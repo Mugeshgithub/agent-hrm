@@ -5,3 +5,4 @@ __pycache__/
 unit_test_hr.dbNOTES.md
 payslip_test_hr.db
 unit_test_hr.db
+policy_embeddings.json
