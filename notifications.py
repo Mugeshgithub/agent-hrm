@@ -58,3 +58,19 @@ def show_unread(employee_id):
                 (employee_id,),
             )
     conn.close()
+
+def notify_ticket_reply(ticket_id, hr_name):
+    # tell the employee that HR answered their ticket
+    from db import ticket_number
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT employee_id, hr_reply FROM hr_tickets WHERE id = ?", (ticket_id,)
+    ).fetchone()
+    if row:
+        with conn:
+            conn.execute(
+                "INSERT INTO notifications (employee_id, message) VALUES (?, ?)",
+                (row["employee_id"],
+                 f"{hr_name} from HR replied to ticket {ticket_number(ticket_id)}: {row['hr_reply']}"),
+            )
+    conn.close()

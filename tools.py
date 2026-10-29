@@ -1,6 +1,6 @@
 # tools.py
 from datetime import date, timedelta
-from db import get_conn, init_db
+from db import get_conn, init_db, ticket_number
 
 HOLIDAYS = {date(2026, 11, 8), date(2026, 12, 25)}  # sample public holidays
 LEAVE_TYPES = ("casual", "sick")
@@ -56,7 +56,7 @@ def apply_leave(employee_id, leave_type, start_date, end_date):
         overlap = conn.execute(
             """SELECT id, status, start_date, end_date FROM leave_requests
                WHERE employee_id = ? AND status IN (?, 'approved')
-               AND start_date <= ? AND end_date >= ?""",
+                 AND start_date <= ? AND end_date >= ?""",
             (employee_id, PENDING, end.isoformat(), start.isoformat()),
         ).fetchone()
         if overlap:
@@ -91,9 +91,12 @@ def apply_leave(employee_id, leave_type, start_date, end_date):
         return {
             "success": True,
             "request": {
-                "id": cur.lastrowid, "leave_type": leave_type,
-                "start": start.isoformat(), "end": end.isoformat(),
-                "days": days, "status": PENDING,
+                "id": cur.lastrowid,
+                "leave_type": leave_type,
+                "start": start.isoformat(),
+                "end": end.isoformat(),
+                "days": days,
+                "status": PENDING,
             },
             "current_balance": {"casual": emp["casual_balance"], "sick": emp["sick_balance"]},
             "balance_after_approval": {leave_type: balance - days},
@@ -120,7 +123,6 @@ def get_pending_requests(manager_id):
         return {"error": "Employee not found"}
     if manager["role"] != "manager":
         return {"error": "Only managers can view team leave requests"}
-
     conn = get_conn()
     rows = conn.execute(
         """SELECT r.id AS request_id, e.name AS employee_name, r.employee_id,
@@ -160,7 +162,7 @@ def decide_leave(manager_id, request_id, decision, reason=""):
             return {"success": True, "request_id": request_id, "status": "rejected", "reason": reason}
 
         # approve: deduct the balance and mark approved together, or not at all
-        column = f"{req['leave_type']}_balance"   # safe: leave_type was checked when the request was created
+        column = f"{req['leave_type']}_balance"  # safe: leave_type was checked when the request was created
         with conn:
             cur = conn.execute(
                 f"UPDATE employees SET {column} = {column} - ? WHERE id = ? AND {column} >= ?",
@@ -169,7 +171,6 @@ def decide_leave(manager_id, request_id, decision, reason=""):
             if cur.rowcount == 0:
                 return {"error": f"Employee no longer has enough {req['leave_type']} leave"}
             conn.execute("UPDATE leave_requests SET status = 'approved' WHERE id = ?", (request_id,))
-
         new_balance = conn.execute(f"SELECT {column} FROM employees WHERE id = ?",
                                    (req["employee_id"],)).fetchone()[0]
         return {"success": True, "request_id": request_id, "status": "approved",
@@ -221,6 +222,74 @@ def cancel_leave(employee_id, request_id):
         conn.close()
 
 
+# ---------- NEW: HR tickets ----------
+
+def create_hr_ticket(employee_id, question, summary):
+    question, summary = (question or "").strip(), (summary or "").strip()
+    if not question or not summary:
+        return {"error": "A ticket needs both the question and a short summary"}
+    if get_employee(employee_id) is None:
+        return {"error": "Employee not found"}
+    conn = get_conn()
+    try:
+        with conn:
+            cur = conn.execute(
+                "INSERT INTO hr_tickets (employee_id, question, summary) VALUES (?, ?, ?)",
+                (employee_id, question, summary),
+            )
+        return {"success": True, "id": cur.lastrowid, "ticket": ticket_number(cur.lastrowid),
+                "status": "open", "message": "Ticket sent to HR. They will reply here."}
+    finally:
+        conn.close()
+
+
+def get_my_tickets(employee_id):
+    conn = get_conn()
+    rows = conn.execute(
+        """SELECT id, question, summary, status, hr_reply, created_at
+           FROM hr_tickets WHERE employee_id = ? ORDER BY id""",
+        (employee_id,),
+    ).fetchall()
+    conn.close()
+    return {"tickets": [{**dict(r), "ticket": ticket_number(r["id"])} for r in rows]}
+
+
+def get_open_tickets(hr_id):
+    staff = get_employee(hr_id)
+    if staff is None or staff["role"] != "hr":
+        return {"error": "Only HR can view tickets"}
+    conn = get_conn()
+    rows = conn.execute(
+        """SELECT t.id, e.name AS employee_name, t.employee_id, t.question, t.summary, t.created_at
+           FROM hr_tickets t JOIN employees e ON e.id = t.employee_id
+           WHERE t.status = 'open' ORDER BY t.id""",
+    ).fetchall()
+    conn.close()
+    return {"tickets": [{**dict(r), "ticket": ticket_number(r["id"])} for r in rows]}
+
+
+def reply_to_ticket(hr_id, ticket_id, reply):
+    staff = get_employee(hr_id)
+    if staff is None or staff["role"] != "hr":
+        return {"error": "Only HR can reply to tickets"}
+    reply = (reply or "").strip()
+    if not reply:
+        return {"error": "The reply cannot be empty"}
+    conn = get_conn()
+    try:
+        with conn:
+            # only an open ticket can be answered, so nothing is replied to twice
+            cur = conn.execute(
+                "UPDATE hr_tickets SET status = 'closed', hr_reply = ? WHERE id = ? AND status = 'open'",
+                (reply, ticket_id),
+            )
+        if cur.rowcount == 0:
+            return {"error": f"Ticket {ticket_number(ticket_id)} is not open or does not exist"}
+        return {"success": True, "ticket": ticket_number(ticket_id), "status": "closed"}
+    finally:
+        conn.close()
+
+
 # test block: resets the database, then runs the full flow
 if __name__ == "__main__":
     init_db(reset=True)
@@ -230,5 +299,5 @@ if __name__ == "__main__":
     print(decide_leave("M001", 1, "approve"))
     print(decide_leave("M001", 1, "approve"))  # second approval: should be blocked
     print(get_my_requests("E001"))
-    print(cancel_leave("E001", 1))      # approved, not started: days come back
-    print(get_leave_balance("E001"))    # casual should be back to 8
+    print(cancel_leave("E001", 1))  # approved, not started: days come back
+    print(get_leave_balance("E001"))  # casual should be back to 8

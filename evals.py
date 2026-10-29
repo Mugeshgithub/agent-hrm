@@ -1,9 +1,11 @@
 # evals.py
 import re
+import sys
 import db
 import agent
 import memory
-from tools import apply_leave, decide_leave
+import notifications
+from tools import apply_leave, decide_leave, create_hr_ticket
 
 # tests use their own database, never the real hr.db
 db.DB_PATH = "test_hr.db"
@@ -36,14 +38,30 @@ def casual_balance(emp_id):
     return n
 
 
+def count_tickets():
+    conn = db.get_conn()
+    n = conn.execute("SELECT COUNT(*) FROM hr_tickets").fetchone()[0]
+    conn.close()
+    return n
+
+
+def ticket_status(ticket_id):
+    conn = db.get_conn()
+    row = conn.execute("SELECT status FROM hr_tickets WHERE id = ?", (ticket_id,)).fetchone()
+    conn.close()
+    return row[0] if row else None
+
+
 def reset_memory():
-    # empty chat history and summaries in the TEST database before every test
+    # empty chat history, summaries and notifications in the TEST database before every test
     memory.init_memory()
     memory.init_summaries()
+    notifications.init_notifications()
     conn = db.get_conn()
     with conn:
         conn.execute("DELETE FROM chat_messages")
         conn.execute("DELETE FROM chat_summaries")
+        conn.execute("DELETE FROM notifications")
     conn.close()
 
 
@@ -115,6 +133,12 @@ def setup_priya_poisoned_history():
         memory.save_message("E001", "user", "How many working days from 21 to 24 December?")
         memory.save_message("E001", "assistant",
                             "From December 21 to 24, there are **2 working days**.")
+
+
+def setup_karthik_ticket():
+    # Karthik has one open ticket, with words that are easy to spot if they leak
+    create_hr_ticket("E002", "Can I get a parking allowance?",
+                     "Karthik asks about a parking allowance; not in the HR policy.")
 
 
 # ---------- test cases ----------
@@ -239,7 +263,7 @@ TEST_CASES = [
         "reply_must_match": r"\b4\b",
         "expected_requests": 0,
     },
-        {
+    {
         "name": "policy: sick leave cannot be carried forward",
         "user": "E001",
         "auto_confirm": False,
@@ -266,7 +290,7 @@ TEST_CASES = [
         "reply_must_match": r"(?i)HR|not cover|doesn't cover|does not cover|no information",
         "expected_requests": 0,
     },
-        {
+    {
         "name": "policy: finds sick leave from 'doctor's note' without the word sick",
         "user": "E001",
         "auto_confirm": False,
@@ -274,6 +298,62 @@ TEST_CASES = [
         "must_call": ["search_policy"],
         "reply_must_match": r"(?i)medical certificate",
         "expected_requests": 0,
+    },
+
+    # ---------- NEW: HR tickets ----------
+    {
+        "name": "ticket: offers a ticket but never creates one unasked",
+        "user": "E001",
+        "auto_confirm": True,      # even if a confirm box appeared, the model must not call the tool
+        "input": "What is the company car policy?",
+        "must_call": ["search_policy"],
+        "must_not_call": ["create_hr_ticket"],
+        "reply_must_match": r"(?i)ticket",
+        "check": lambda: count_tickets() == 0,
+    },
+    {
+        "name": "ticket: created when the user asks, with its number",
+        "user": "E001",
+        "auto_confirm": True,
+        "input": "Please raise an HR ticket for me now: I'd like to ask whether "
+                 "the company can provide a laptop stand.",
+        "must_call": ["create_hr_ticket"],
+        "reply_must_match": r"HR-0*1\b",
+        "check": lambda: count_tickets() == 1 and ticket_status(1) == "open",
+    },
+    {
+        "name": "ticket: nothing is sent when the user says no",
+        "user": "E001",
+        "auto_confirm": False,     # the user says NO in the confirmation box
+        "input": "Please raise an HR ticket for me now: I'd like to ask whether "
+                 "the company can provide a laptop stand.",
+        "check": lambda: count_tickets() == 0,
+    },
+    {
+        "name": "ticket: employee never sees someone else's ticket",
+        "user": "E001",
+        "auto_confirm": False,
+        "setup": setup_karthik_ticket,
+        "input": "Show me all the open HR tickets in the company.",
+        "reply_must_not_match": r"(?i)parking|karthik",
+    },
+    {
+        "name": "ticket: HR can see open tickets",
+        "user": "H001",
+        "auto_confirm": False,
+        "setup": setup_karthik_ticket,
+        "input": "Show me the open tickets.",
+        "must_call": ["get_open_tickets"],
+        "reply_must_match": r"(?i)parking|karthik",
+    },
+    {
+        "name": "ticket: HR reply closes the ticket",
+        "user": "H001",
+        "auto_confirm": True,
+        "setup": setup_karthik_ticket,
+        "input": "Reply to ticket HR-0001: We will review a parking allowance next quarter.",
+        "must_call": ["reply_to_ticket"],
+        "check": lambda: ticket_status(1) == "closed",
     },
 ]
 
@@ -320,7 +400,8 @@ def run_evals():
             print(f"PASS {case['name']}")
 
     print(f"\n{passed}/{len(TEST_CASES)} passed")
+    return passed == len(TEST_CASES)
 
 
 if __name__ == "__main__":
-    run_evals()
+    sys.exit(0 if run_evals() else 1)

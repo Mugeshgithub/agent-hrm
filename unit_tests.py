@@ -5,6 +5,7 @@ from datetime import date, timedelta
 import db
 db.DB_PATH = "unit_test_hr.db"   # its own database, never the real hr.db
 
+import tools
 from tools import (count_working_days, apply_leave, decide_leave, cancel_leave,
                    get_leave_balance, get_team_member_balance)
 
@@ -26,6 +27,8 @@ def test(fn):
     TESTS.append(fn)
     return fn
 
+
+# ---------- leave rules ----------
 
 @test
 def counts_working_days():
@@ -94,6 +97,56 @@ def team_balance_rules():
     not_team = get_team_member_balance("E002", "E001")
     missing = get_team_member_balance("M001", "E999")
     assert "error" in not_team and not_team == missing   # same message, so no enumeration
+
+
+# ---------- NEW: HR tickets ----------
+
+@test
+def ticket_gets_a_number_and_starts_open():
+    result = tools.create_hr_ticket("E001", "What is the company car policy?",
+                                    "Asked about company car policy; not in the HR policy.")
+    assert result.get("success")
+    assert result["ticket"] == "HR-0001"
+    mine = tools.get_my_tickets("E001")["tickets"]
+    assert len(mine) == 1 and mine[0]["status"] == "open"
+
+
+@test
+def empty_ticket_is_rejected():
+    assert "error" in tools.create_hr_ticket("E001", "   ", "   ")
+
+
+@test
+def employees_only_see_their_own_tickets():
+    tools.create_hr_ticket("E001", "Priya's question", "Priya's summary")
+    tools.create_hr_ticket("E002", "Karthik's question", "Karthik's summary")
+    karthik = tools.get_my_tickets("E002")["tickets"]
+    assert len(karthik) == 1
+    assert "Priya" not in str(karthik)
+
+
+@test
+def only_hr_can_see_open_tickets():
+    tools.create_hr_ticket("E001", "A question", "A summary")
+    assert len(tools.get_open_tickets("H001")["tickets"]) == 1   # Lakshmi (HR) can
+    assert "error" in tools.get_open_tickets("E001")             # an employee can't
+    assert "error" in tools.get_open_tickets("M001")             # a manager can't either
+
+
+@test
+def hr_reply_closes_ticket_once():
+    tid = tools.create_hr_ticket("E001", "Car policy?", "Car policy question")["id"]
+    assert "error" in tools.reply_to_ticket("M001", tid, "Not HR, can't reply")
+    assert "error" in tools.reply_to_ticket("H001", tid, "   ")        # an empty reply isn't allowed
+    assert tools.reply_to_ticket("H001", tid, "No company cars, sorry.").get("success")
+    mine = tools.get_my_tickets("E001")["tickets"][0]
+    assert mine["status"] == "closed" and mine["hr_reply"] == "No company cars, sorry."
+    assert "error" in tools.reply_to_ticket("H001", tid, "Second reply")   # already closed
+    assert get_open_tickets_count() == 0
+
+
+def get_open_tickets_count():
+    return len(tools.get_open_tickets("H001")["tickets"])
 
 
 if __name__ == "__main__":

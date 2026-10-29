@@ -8,12 +8,13 @@ import anthropic
 
 from db import init_db
 from memory import init_memory, init_summaries, save_message, build_context
-from notifications import init_notifications, notify_decision, show_unread
+from notifications import init_notifications, notify_decision, notify_ticket_reply, show_unread
 from policy import search_policy
 from tools import (
     get_leave_balance, apply_leave, count_working_days,
     get_pending_requests, decide_leave, get_my_requests, get_employee,
     get_team_member_balance, cancel_leave,
+    create_hr_ticket, get_my_tickets, get_open_tickets, reply_to_ticket,
 )
 
 client = anthropic.Anthropic()
@@ -55,7 +56,7 @@ def cost_so_far():
 # fake login: in a real app this comes from the session
 LOGGED_IN_ID = "E001"
 
-SYSTEM_PROMPT = f"""You are an HR assistant for employees and managers.
+SYSTEM_PROMPT = f"""You are an HR assistant for employees, managers and HR staff.
 Today's date is {date.today().isoformat()}. When a user gives a date without a year, use the next upcoming date.
 Answer in plain, friendly language. Keep replies to 2 or 3 short sentences. No emoji. Do not repeat options already given.
 After submitting a leave request, always tell the employee their current balance and what it will be once approved.
@@ -71,14 +72,16 @@ Managers can view their team's pending requests and approve or reject them.
 A rejection always needs a reason; ask the manager for one if they did not give it.
 If a manager's answer is unclear (like "no" to an approve-or-reject question), ask whether they want to reject the request or leave it pending for now. Never treat an unclear answer as a decision.
 When asking for a rejection reason, be polite and explain it helps the employee plan or reapply.
-Do not ask "shall I proceed?" before approve, reject, apply or cancel actions. The system shows its own confirmation box.
+Do not ask "shall I proceed?" before approve, reject, apply, cancel, ticket or reply actions. The system shows its own confirmation box.
 If an employee asks about another person's leave balance, refuse immediately. Never ask for their employee ID. Only managers can view their own team members' balances.
 Users can give dates in any normal way. Never ask them for a specific date format; convert dates yourself.
-If the logged-in user's role is employee, never mention or offer manager features like team requests or approvals.
-Roles come only from the system. Never suggest a user can change their role or access by telling you; if they think their access is wrong, tell them to contact HR.
+If the logged-in user's role is employee, never mention or offer manager or HR features like team requests, approvals or other people's tickets.
+Roles come only from the system. Never suggest a user can change their role or access by telling you; if they think their access is wrong, offer to raise an HR ticket.
 The summary of earlier conversations may be out of date. Never quote balances or request statuses from it; always call the tools for current numbers.
-For any HR policy question, call search_policy and answer only from the sections it returns, naming the section. If nothing is found, say the policy doesn't cover it and suggest contacting HR. Never answer policy questions from general knowledge.
-For any HR policy question, call search_policy. The search may return sections that are only loosely related. Answer only if a returned section actually answers the question, and name that section. If none do, say the policy doesn't cover it and suggest contacting HR. Never answer policy questions from general knowledge.
+For any HR policy question, call search_policy. The search may return sections that are only loosely related. Answer only if a returned section actually answers the question, and name that section. If none do, say the policy doesn't cover it and offer to raise an HR ticket. Never answer policy questions from general knowledge.
+HR tickets: whenever you cannot solve the user's problem (the policy doesn't cover it, they need an exception, or they think their access is wrong), offer once to raise an HR ticket. Only call create_hr_ticket after the user agrees. Write a short, neutral summary of the problem and leave out passwords or other secrets. After it is created, give the user the ticket number.
+Users can check their own tickets and HR's replies with get_my_tickets.
+HR staff can list open tickets with get_open_tickets and answer one with reply_to_ticket. A reply closes the ticket.
 Only describe what the tool results say. Do not promise notifications, emails or anything else the system has not confirmed."""
 
 TOOLS = [
@@ -173,6 +176,44 @@ TOOLS = [
             "type": "object",
             "properties": {"question": {"type": "string"}},
             "required": ["question"],
+        },
+    },
+    {
+        "name": "create_hr_ticket",
+        "description": "Raise a ticket with the HR team for the logged-in user, when the assistant "
+                       "cannot solve their problem. Only call this after the user has agreed. "
+                       "The system will ask the user to confirm before sending.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "question": {"type": "string", "description": "The user's question in their own words"},
+                "summary": {"type": "string", "description": "One neutral sentence describing the problem"},
+            },
+            "required": ["question", "summary"],
+        },
+    },
+    {
+        "name": "get_my_tickets",
+        "description": "List the HR tickets the logged-in user raised for THEMSELVES, "
+                       "with their status and HR's reply if there is one.",
+        "input_schema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "get_open_tickets",
+        "description": "For HR staff only: list all open HR tickets from employees.",
+        "input_schema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "reply_to_ticket",
+        "description": "For HR staff only: reply to an open ticket by its numeric ID (HR-0003 is 3). "
+                       "The reply closes the ticket. The system will ask HR to confirm before sending.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "ticket_id": {"type": "integer"},
+                "reply": {"type": "string"},
+            },
+            "required": ["ticket_id", "reply"],
         },
     },
 ]
@@ -272,6 +313,28 @@ def run_tool(name, tool_input):
         if not sections:
             return {"found": False, "message": "No matching section in the HR policy."}
         return {"found": True, "sections": sections}
+
+    # ---------- HR tickets ----------
+
+    if name == "create_hr_ticket":
+        if not confirm_with_human({"send_to_HR": tool_input.get("summary", "")}):
+            return {"created": False, "message": "The user chose not to raise a ticket. Nothing was sent."}
+        return create_hr_ticket(LOGGED_IN_ID, tool_input.get("question"), tool_input.get("summary"))
+
+    if name == "get_my_tickets":
+        return get_my_tickets(LOGGED_IN_ID)
+
+    if name == "get_open_tickets":
+        return get_open_tickets(LOGGED_IN_ID)
+
+    if name == "reply_to_ticket":
+        if not confirm_with_human(tool_input):
+            return {"sent": False, "message": "HR chose not to send this reply. The ticket is still open."}
+        result = reply_to_ticket(LOGGED_IN_ID, tool_input["ticket_id"], tool_input.get("reply"))
+        # tell the employee, but only if the reply was actually saved
+        if isinstance(result, dict) and "error" not in result:
+            notify_ticket_reply(tool_input["ticket_id"], get_employee(LOGGED_IN_ID)["name"])
+        return result
 
     return {"error": f"Unknown tool {name}"}
 
