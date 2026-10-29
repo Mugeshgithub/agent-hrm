@@ -470,13 +470,13 @@ TEST_CASES = [
         "check": lambda: status_of(1) == "pending_manager_approval",
     },
     {
-        "name": "payslip: missing payslip gets no invented reason",
+        "name": "payslip: missing payslip gets the real issue date, not a guess",
         "user": "M001",
         "auto_confirm": False,
         "input": "Show me my payslip for December 2026.",
         "must_call": ["get_payslip"],
-        "reply_must_match": r"(?i)not.*(issued|available)|no payslip",
-        "reply_must_not_match": r"(?i)usually|end of (the|each) month|after the month|typically",
+        "reply_must_match": r"(?i)31 December|December 31",
+        "reply_must_not_match": r"(?i)usually|typically|shortly|after the month",
     },
 ]
 

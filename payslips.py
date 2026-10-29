@@ -1,6 +1,9 @@
 # payslips.py: read-only payslips. Payroll writes them; the agent only reads.
+import calendar
+from datetime import date, timedelta
+
 import db
-from datetime import date
+from tools import HOLIDAYS
 
 NOT_FOUND = "No payslip found for that month."   # same message for "missing" and "not allowed"
 
@@ -80,6 +83,15 @@ def euro(cents):
     return f"{sign}€{cents // 100:,}.{cents % 100:02d}"
 
 
+def issue_date(month):
+    # company rule: payslips are issued on the last working day of the month
+    year, mon = map(int, month.split("-"))
+    d = date(year, mon, calendar.monthrange(year, mon)[1])
+    while d.weekday() >= 5 or d in HOLIDAYS:
+        d -= timedelta(days=1)
+    return d
+
+
 def _role(emp_id):
     conn = db.get_conn()
     row = conn.execute("SELECT role FROM employees WHERE id = ?", (emp_id,)).fetchone()
@@ -144,10 +156,14 @@ def get_payslip(viewer_id, emp_id, month):
     if not lines:
         if viewer_id != emp_id:
             return {"error": NOT_FOUND}          # others: never reveal why
-        # own payslip: the CODE gives the reason, so the model never has to invent one
+        # own payslip: the CODE gives the reason and the real date, so the model never invents one
         if month >= date.today().strftime("%Y-%m"):
-            return {"error": f"No payslip has been issued for {month} yet.",
-                    "reason": "not_issued_yet"}
+            d = issue_date(month)
+            return {"error": f"No payslip has been issued for {month} yet. Payslips are issued on "
+                             f"the last working day of the month, so this one is due on "
+                             f"{d.day} {d:%B %Y}.",
+                    "reason": "not_issued_yet",
+                    "expected_issue_date": d.isoformat()}
         return {"error": f"There is no payslip on record for {month}.",
                 "reason": "no_record"}
     return {

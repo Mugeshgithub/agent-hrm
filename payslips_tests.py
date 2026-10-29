@@ -78,6 +78,10 @@ def test_year_summary_adds_net_in_code():
     assert r["months"] == 2, r
     assert r["net_paid_cents"] == 450500, r   # 231000 + 219500
 
+def test_december_payslip_due_on_last_working_day():
+    r = payslips.get_payslip("E001", "E001", "2026-12")
+    assert r["expected_issue_date"] == "2026-12-31", r   # Thursday 31 December
+
 
 TESTS = [v for k, v in dict(globals()).items() if k.startswith("test_")]
 

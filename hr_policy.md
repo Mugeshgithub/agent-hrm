@@ -17,3 +17,6 @@ Employees may work from home up to 2 days per week with manager approval. Work f
 
 ## Notice period
 The notice period is 30 days for employees and 60 days for managers. Leave cannot be taken during the notice period without HR approval.
+
+## Payslips
+Payslips are issued on the last working day of each month. Employees can view their own payslips through the HR assistant. Questions about errors in a payslip should be raised with HR.

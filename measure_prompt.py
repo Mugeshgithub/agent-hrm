@@ -1,4 +1,4 @@
-# measure_prompt.py: how big is what we send on EVERY call?
+# measure_prompt.py: how big is the fixed part of every call, per role?
 from dotenv import load_dotenv
 load_dotenv()
 import agent
@@ -12,12 +12,11 @@ def count(system, tools=None):
     ).input_tokens
 
 
-full = count(agent.system_prompt_for("E001"), agent.TOOLS)
-no_tools = count(agent.system_prompt_for("E001"))
 bare = count([{"type": "text", "text": "x"}])
-
-print(f"Whole fixed part of each call: {full} tokens")
-print(f"  tool definitions:            {full - no_tools}")
-print(f"  system prompt:               {no_tools - bare}")
-print(f"Rules in SYSTEM_PROMPT:        {len([l for l in agent.SYSTEM_PROMPT.splitlines() if l.strip()])}")
-print(f"Tools:                         {len(agent.TOOLS)}")
+for user_id in ("E001", "M001", "H001"):
+    role = agent.get_employee(user_id)["role"]
+    system = agent.system_prompt_for(user_id)
+    tools = agent.tools_for(role, agent.TOOLS)
+    full = count(system, tools)
+    no_tools = count(system)
+    print(f"{role:9} total {full:5}   tools {full - no_tools:5} ({len(tools)} tools)   prompt {no_tools - bare:4}")
