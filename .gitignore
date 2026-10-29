@@ -1,0 +1,4 @@
+.env
+hr.db
+test_hr.db
+__pycache__/
