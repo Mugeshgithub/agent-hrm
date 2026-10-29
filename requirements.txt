@@ -1,3 +1,5 @@
 anthropic
 openai
 python-dotenv
+langfuse
+opentelemetry-instrumentation-anthropic
