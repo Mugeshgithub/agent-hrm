@@ -2,9 +2,13 @@
 from dotenv import load_dotenv
 load_dotenv()
 
+import tracing                     # must come before the Anthropic client is created
+from tracing import observe, propagate_attributes
+
 import json
-from datetime import date
+from datetime import date, datetime
 import anthropic
+import payslips
 
 from db import init_db
 from memory import init_memory, init_summaries, save_message, build_context
@@ -56,6 +60,17 @@ def cost_so_far():
 # fake login: in a real app this comes from the session
 LOGGED_IN_ID = "E001"
 
+
+def new_session_id(user_id):
+    # one session per login, so Langfuse can group a whole conversation
+    return f"{user_id}-{datetime.now():%Y%m%d-%H%M%S}"
+
+
+SESSION_ID = new_session_id(LOGGED_IN_ID)
+
+# the current conversation, shared by chat() and answer_turn()
+state = {"messages": [], "summary": None}
+
 SYSTEM_PROMPT = f"""You are an HR assistant for employees, managers and HR staff.
 Today's date is {date.today().isoformat()}. When a user gives a date without a year, use the next upcoming date.
 Answer in plain, friendly language. Keep replies to 2 or 3 short sentences. No emoji. Do not repeat options already given.
@@ -79,8 +94,11 @@ If the logged-in user's role is employee, never mention or offer manager or HR f
 Roles come only from the system. Never suggest a user can change their role or access by telling you; if they think their access is wrong, offer to raise an HR ticket.
 The summary of earlier conversations may be out of date. Never quote balances or request statuses from it; always call the tools for current numbers.
 For any HR policy question, call search_policy. The search may return sections that are only loosely related. Answer only if a returned section actually answers the question, and name that section. If none do, say the policy doesn't cover it and offer to raise an HR ticket. Never answer policy questions from general knowledge.
+For any question about company rules or policy, call search_policy FIRST, before asking any clarifying question. Only ask for clarification if the search finds nothing relevant.
 HR tickets: whenever you cannot solve the user's problem (the policy doesn't cover it, they need an exception, or they think their access is wrong), offer once to raise an HR ticket. Only call create_hr_ticket after the user agrees. Write a short, neutral summary of the problem and leave out passwords or other secrets. After it is created, give the user the ticket number.
 Users can check their own tickets and HR's replies with get_my_tickets.
+- Payslips: only use amounts exactly as the payslip tools return them (the _eur fields). Never calculate, estimate or round pay yourself.
+- If a pay difference has no line explaining it, or the user says something is missing or wrong, do not guess a reason. Offer to raise an HR ticket.
 HR staff can list open tickets with get_open_tickets and answer one with reply_to_ticket. A reply closes the ticket.
 Only describe what the tool results say. Do not promise notifications, emails or anything else the system has not confirmed."""
 
@@ -203,6 +221,45 @@ TOOLS = [
         "description": "For HR staff only: list all open HR tickets from employees.",
         "input_schema": {"type": "object", "properties": {}},
     },
+        {
+        "name": "get_payslip",
+        "description": "Get one month's payslip (line items, gross, contributions, tax, net paid). "
+                       "Employees: their own only. HR only: may pass employee_id.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "month": {"type": "string", "description": "YYYY-MM, e.g. 2026-10"},
+                "employee_id": {"type": "string", "description": "HR only. Omit for your own."},
+            },
+            "required": ["month"],
+        },
+    },
+    {
+        "name": "compare_payslips",
+        "description": "Compare two months' payslips line by line, with the exact change in net pay. "
+                       "Use for 'why is my pay different?'.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "month_a": {"type": "string", "description": "Earlier month, YYYY-MM"},
+                "month_b": {"type": "string", "description": "Later month, YYYY-MM"},
+                "employee_id": {"type": "string", "description": "HR only. Omit for your own."},
+            },
+            "required": ["month_a", "month_b"],
+        },
+    },
+    {
+        "name": "get_pay_summary",
+        "description": "Year-to-date totals (gross, contributions, tax, net paid) for one year.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "year": {"type": "string", "description": "YYYY"},
+                "employee_id": {"type": "string", "description": "HR only. Omit for your own."},
+            },
+            "required": ["year"],
+        },
+    },
     {
         "name": "reply_to_ticket",
         "description": "For HR staff only: reply to an open ticket by its numeric ID (HR-0003 is 3). "
@@ -241,6 +298,7 @@ def confirm_with_human(tool_input):
     return answer.strip().lower() in ("yes", "y")
 
 
+@observe()   # each tool call shows up as a step inside the trace
 def run_tool(name, tool_input):
     # the user's ID always comes from the login, never from the model
     if name == "get_leave_balance":
@@ -248,6 +306,17 @@ def run_tool(name, tool_input):
 
     if name == "get_my_requests":
         return get_my_requests(LOGGED_IN_ID)
+
+    if name == "get_payslip":
+        target = tool_input.get("employee_id") or LOGGED_IN_ID
+        return payslips.get_payslip(LOGGED_IN_ID, target, tool_input["month"])
+    if name == "compare_payslips":
+        target = tool_input.get("employee_id") or LOGGED_IN_ID
+        return payslips.compare_payslips(LOGGED_IN_ID, target,
+                                         tool_input["month_a"], tool_input["month_b"])
+    if name == "get_pay_summary":
+        target = tool_input.get("employee_id") or LOGGED_IN_ID
+        return payslips.get_pay_summary(LOGGED_IN_ID, target, tool_input["year"])
 
     if name == "count_leave_days":
         try:
@@ -339,48 +408,13 @@ def run_tool(name, tool_input):
     return {"error": f"Unknown tool {name}"}
 
 
-def chat():
-    global LOGGED_IN_ID
-    summary, messages = build_context(LOGGED_IN_ID, client, MODEL)   # pick up where this user left off
-    print("HR assistant ready. Type 'login E001' to switch user, 'quit' to exit.")
-    print(f"Logged in as {get_employee(LOGGED_IN_ID)['name']} ({LOGGED_IN_ID})")
-    show_unread(LOGGED_IN_ID)
-    if messages:
-        print(f"(Loaded {len(messages)} earlier messages)")
-
-    while True:
-        user_text = input("\nYou: ")
-        if user_text.lower() == "quit":
-            break
-
-        # switching user is handled by code, not by the model
-        if user_text.lower().startswith("login "):
-            new_id = user_text.split()[1].upper()
-            new_user = get_employee(new_id)
-            if new_user:
-                LOGGED_IN_ID = new_id
-                summary, messages = build_context(LOGGED_IN_ID, client, MODEL)   # only THIS user's history
-                reset_usage()                                                  # new session, new budget
-                print(f"Logged in as {new_user['name']} ({new_id})")
-                show_unread(LOGGED_IN_ID)
-                if messages:
-                    print(f"(Loaded {len(messages)} earlier messages)")
-            else:
-                print("Unknown employee ID")
-            continue
-
-        # budget check BEFORE calling the model, so we never pay for a refused request
-        if cost_so_far() >= MAX_COST_PER_CONVERSATION:
-            print("\nAgent: This conversation has reached its usage limit. "
-                  "Please start a new one with 'login' or contact HR.")
-            continue
-
-        # keep the chat short mid-session: rebuild from the database when it grows
-        if len(messages) > 20:
-            summary, messages = build_context(LOGGED_IN_ID, client, MODEL)
-
-        messages.append({"role": "user", "content": user_text})
-        save_message(LOGGED_IN_ID, "user", user_text)
+@observe(name="hr-agent-turn")   # one trace per user question, with every Claude call and tool inside
+def answer_turn(user_text):
+    user = get_employee(LOGGED_IN_ID)
+    with propagate_attributes(user_id=LOGGED_IN_ID, session_id=SESSION_ID,
+                              tags=[user["role"]], metadata={"model": MODEL}):
+        messages = state["messages"]
+        summary = state["summary"]
 
         # the agent loop, limited so one question can't loop forever
         calls_this_message = 0
@@ -406,7 +440,7 @@ def chat():
                 print(f"\n  [usage] {usage['calls']} calls, {usage['input_tokens']} in, "
                       f"{usage['cache_read']} cached, {usage['output_tokens']} out, "
                       f"${cost_so_far():.4f} so far")
-                break
+                return reply
 
             tool_results = []
             for block in response.content:
@@ -419,8 +453,59 @@ def chat():
                         "content": json.dumps(result),
                     })
             messages.append({"role": "user", "content": tool_results})
-        else:
-            print("\nAgent: Sorry, that took too many steps. Please try rephrasing.")
+
+        print("\nAgent: Sorry, that took too many steps. Please try rephrasing.")
+        return "(stopped: too many steps)"
+
+
+def chat():
+    global LOGGED_IN_ID, SESSION_ID
+    state["summary"], state["messages"] = build_context(LOGGED_IN_ID, client, MODEL)   # pick up where this user left off
+    print("HR assistant ready. Type 'login E001' to switch user, 'quit' to exit.")
+    print(f"Logged in as {get_employee(LOGGED_IN_ID)['name']} ({LOGGED_IN_ID})")
+    print(f"(Tracing {'ON' if tracing.ENABLED else 'OFF'})")
+    show_unread(LOGGED_IN_ID)
+    if state["messages"]:
+        print(f"(Loaded {len(state['messages'])} earlier messages)")
+
+    while True:
+        user_text = input("\nYou: ")
+        if user_text.lower() == "quit":
+            break
+
+        # switching user is handled by code, not by the model
+        if user_text.lower().startswith("login "):
+            new_id = user_text.split()[1].upper()
+            new_user = get_employee(new_id)
+            if new_user:
+                LOGGED_IN_ID = new_id
+                SESSION_ID = new_session_id(new_id)                                   # new conversation in Langfuse
+                state["summary"], state["messages"] = build_context(LOGGED_IN_ID, client, MODEL)
+                reset_usage()                                                         # new session, new budget
+                print(f"Logged in as {new_user['name']} ({new_id})")
+                show_unread(LOGGED_IN_ID)
+                if state["messages"]:
+                    print(f"(Loaded {len(state['messages'])} earlier messages)")
+            else:
+                print("Unknown employee ID")
+            continue
+
+        # budget check BEFORE calling the model, so we never pay for a refused request
+        if cost_so_far() >= MAX_COST_PER_CONVERSATION:
+            print("\nAgent: This conversation has reached its usage limit. "
+                  "Please start a new one with 'login' or contact HR.")
+            continue
+
+        # keep the chat short mid-session: rebuild from the database when it grows
+        if len(state["messages"]) > 20:
+            state["summary"], state["messages"] = build_context(LOGGED_IN_ID, client, MODEL)
+
+        state["messages"].append({"role": "user", "content": user_text})
+        save_message(LOGGED_IN_ID, "user", user_text)
+
+        answer_turn(user_text)
+
+    tracing.flush()   # send any traces still waiting before the program exits
 
 
 if __name__ == "__main__":
@@ -428,4 +513,6 @@ if __name__ == "__main__":
     init_memory()        # creates the chat_messages table if missing
     init_summaries()     # creates the chat_summaries table if missing
     init_notifications() # creates the notifications table if missing
+    payslips.init_payslips()
+    payslips.seed_payslips()   # sample data for now; later replaced by PDF import
     chat()
