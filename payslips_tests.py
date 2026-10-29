@@ -32,10 +32,20 @@ def test_manager_cannot_see_team_salary():
 
 
 def test_refusal_looks_same_as_missing():
-    # not allowed and not existing must be indistinguishable
-    forbidden = payslips.get_payslip("E002", "E001", "2026-10")
-    missing = payslips.get_payslip("E002", "E002", "2025-01")
-    assert forbidden == missing == {"error": payslips.NOT_FOUND}
+    # someone else's payslip: "exists but forbidden" and "doesn't exist" must look identical
+    exists = payslips.get_payslip("E002", "E001", "2026-10")
+    missing = payslips.get_payslip("E002", "E001", "2025-01")
+    assert exists == missing == {"error": payslips.NOT_FOUND}
+
+
+def test_own_future_payslip_says_not_issued_yet():
+    r = payslips.get_payslip("E001", "E001", "2099-01")
+    assert r["reason"] == "not_issued_yet", r
+
+
+def test_own_old_payslip_says_no_record():
+    r = payslips.get_payslip("E001", "E001", "2025-01")
+    assert r["reason"] == "no_record", r
 
 
 def test_hr_can_see_and_is_logged():

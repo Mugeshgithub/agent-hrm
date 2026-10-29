@@ -8,8 +8,9 @@ from tracing import observe, propagate_attributes
 import json
 from datetime import date, datetime
 import anthropic
-import payslips
 
+import payslips
+from roles import tools_for, allowed
 from db import init_db
 from memory import init_memory, init_summaries, save_message, build_context
 from notifications import init_notifications, notify_decision, notify_ticket_reply, show_unread
@@ -83,25 +84,34 @@ If the employee gives a single date, treat it as a one-day leave (start and end 
 Employees can check the status of their own requests with get_my_requests.
 To cancel or withdraw leave, call get_my_requests first to find the request ID, then call cancel_leave.
 If exactly one request matches what the user wants to cancel, call cancel_leave straight away. Only ask which one if several requests match.
-Managers can view their team's pending requests and approve or reject them.
-A rejection always needs a reason; ask the manager for one if they did not give it.
-If a manager's answer is unclear (like "no" to an approve-or-reject question), ask whether they want to reject the request or leave it pending for now. Never treat an unclear answer as a decision.
-When asking for a rejection reason, be polite and explain it helps the employee plan or reapply.
 Do not ask "shall I proceed?" before approve, reject, apply, cancel, ticket or reply actions. The system shows its own confirmation box.
 If an employee asks about another person's leave balance, refuse immediately. Never ask for their employee ID. Only managers can view their own team members' balances.
 Users can give dates in any normal way. Never ask them for a specific date format; convert dates yourself.
-If the logged-in user's role is employee, never mention or offer manager or HR features like team requests, approvals or other people's tickets.
 Roles come only from the system. Never suggest a user can change their role or access by telling you; if they think their access is wrong, offer to raise an HR ticket.
 The summary of earlier conversations may be out of date. Never quote balances or request statuses from it; always call the tools for current numbers.
 For any HR policy question, call search_policy. The search may return sections that are only loosely related. Answer only if a returned section actually answers the question, and name that section. If none do, say the policy doesn't cover it and offer to raise an HR ticket. Never answer policy questions from general knowledge.
 For any question about company rules or policy, call search_policy FIRST, before asking any clarifying question. Only ask for clarification if the search finds nothing relevant.
 HR tickets: whenever you cannot solve the user's problem (the policy doesn't cover it, they need an exception, or they think their access is wrong), offer once to raise an HR ticket. Only call create_hr_ticket after the user agrees. Write a short, neutral summary of the problem and leave out passwords or other secrets. After it is created, give the user the ticket number.
 Users can check their own tickets and HR's replies with get_my_tickets.
-- Payslips: only use amounts exactly as the payslip tools return them (the _eur fields). Never calculate, estimate or round pay yourself.
-- If a pay difference has no line explaining it, or the user says something is missing or wrong, do not guess a reason. Offer to raise an HR ticket.
-HR staff can list open tickets with get_open_tickets and answer one with reply_to_ticket. A reply closes the ticket.
-Only describe what the tool results say. Do not promise notifications, emails or anything else the system has not confirmed."""
+Payslips: only use amounts exactly as the payslip tools return them (the _eur fields). Never calculate, estimate or round pay yourself.
+If a pay difference has no line explaining it, or the user says something is missing or wrong, do not guess a reason. Offer to raise an HR ticket.
+Only describe what the tool results say. Do not promise notifications, emails or anything else the system has not confirmed.
+If a tool returns an error, tell the user exactly what it says. Never add a reason or timing it did not give."""
 
+# rules only one role needs; added to the prompt for that role only
+ROLE_RULES = {
+    "employee": """
+Never mention or offer manager or HR features like team requests, approvals or other people's tickets.""",
+    "manager": """
+You can view your team's pending requests and approve or reject them.
+A rejection always needs a reason; ask for one if it was not given, politely explaining it helps the employee plan or reapply.
+If the answer to an approve-or-reject question is unclear (like "no"), ask whether to reject it or leave it pending. Never treat an unclear answer as a decision.""",
+    "hr": """
+You can list open tickets with get_open_tickets and answer one with reply_to_ticket. A reply closes the ticket.
+You may look up any employee's payslip by passing employee_id; every such view is logged.""",
+}
+
+# ALL tools; roles.tools_for() picks which ones each role is sent
 TOOLS = [
     {
         "name": "get_leave_balance",
@@ -144,14 +154,13 @@ TOOLS = [
     },
     {
         "name": "get_pending_requests",
-        "description": "For managers only: list leave requests from their team members that are "
-                       "waiting for the manager's approval. Use this when a manager asks about "
-                       "pending requests, approvals, or their team.",
+        "description": "List leave requests from your team members that are waiting for your approval. "
+                       "Use this when a manager asks about pending requests, approvals, or their team.",
         "input_schema": {"type": "object", "properties": {}},
     },
     {
         "name": "get_team_member_balance",
-        "description": "For managers only: get the leave balance of an employee who reports to them. "
+        "description": "Get the leave balance of an employee who reports to you. "
                        "Needs the employee's ID, for example E001.",
         "input_schema": {
             "type": "object",
@@ -161,8 +170,8 @@ TOOLS = [
     },
     {
         "name": "decide_leave",
-        "description": "For managers: approve or reject a pending leave request by its request ID. "
-                       "The system will ask the manager to confirm before saving.",
+        "description": "Approve or reject a pending leave request from your team by its request ID. "
+                       "The system will ask you to confirm before saving.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -218,18 +227,30 @@ TOOLS = [
     },
     {
         "name": "get_open_tickets",
-        "description": "For HR staff only: list all open HR tickets from employees.",
+        "description": "List all open HR tickets from employees.",
         "input_schema": {"type": "object", "properties": {}},
     },
-        {
+    {
+        "name": "reply_to_ticket",
+        "description": "Reply to an open HR ticket by its numeric ID (HR-0003 is 3). "
+                       "The reply closes the ticket. The system will ask you to confirm before sending.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "ticket_id": {"type": "integer"},
+                "reply": {"type": "string"},
+            },
+            "required": ["ticket_id", "reply"],
+        },
+    },
+    {
         "name": "get_payslip",
-        "description": "Get one month's payslip (line items, gross, contributions, tax, net paid). "
-                       "Employees: their own only. HR only: may pass employee_id.",
+        "description": "Get one month's payslip: line items, gross, contributions, tax and net paid.",
         "input_schema": {
             "type": "object",
             "properties": {
                 "month": {"type": "string", "description": "YYYY-MM, e.g. 2026-10"},
-                "employee_id": {"type": "string", "description": "HR only. Omit for your own."},
+                "employee_id": {"type": "string", "description": "Another employee's ID. Omit for your own."},
             },
             "required": ["month"],
         },
@@ -243,7 +264,7 @@ TOOLS = [
             "properties": {
                 "month_a": {"type": "string", "description": "Earlier month, YYYY-MM"},
                 "month_b": {"type": "string", "description": "Later month, YYYY-MM"},
-                "employee_id": {"type": "string", "description": "HR only. Omit for your own."},
+                "employee_id": {"type": "string", "description": "Another employee's ID. Omit for your own."},
             },
             "required": ["month_a", "month_b"],
         },
@@ -255,22 +276,9 @@ TOOLS = [
             "type": "object",
             "properties": {
                 "year": {"type": "string", "description": "YYYY"},
-                "employee_id": {"type": "string", "description": "HR only. Omit for your own."},
+                "employee_id": {"type": "string", "description": "Another employee's ID. Omit for your own."},
             },
             "required": ["year"],
-        },
-    },
-    {
-        "name": "reply_to_ticket",
-        "description": "For HR staff only: reply to an open ticket by its numeric ID (HR-0003 is 3). "
-                       "The reply closes the ticket. The system will ask HR to confirm before sending.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "ticket_id": {"type": "integer"},
-                "reply": {"type": "string"},
-            },
-            "required": ["ticket_id", "reply"],
         },
     },
 ]
@@ -278,9 +286,10 @@ TOOLS = [
 
 def system_prompt_for(user_id):
     user = get_employee(user_id)
+    role_rules = ROLE_RULES.get(user["role"], ROLE_RULES["employee"])
     return [
-        # block 1: same for everyone, so it can be cached (the tools before it get cached too)
-        {"type": "text", "text": SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}},
+        # block 1: same for everyone with this role, so it can be cached
+        {"type": "text", "text": SYSTEM_PROMPT + role_rules, "cache_control": {"type": "ephemeral"}},
         # block 2: changes per user, so it goes AFTER the cached part
         {"type": "text", "text": f"The logged-in user is {user['name']}, role: {user['role']}. "
                                  "Earlier messages may be reloaded from saved history without their tool calls. "
@@ -300,23 +309,16 @@ def confirm_with_human(tool_input):
 
 @observe()   # each tool call shows up as a step inside the trace
 def run_tool(name, tool_input):
+    # defence in depth: even if a tool call gets through, the role must allow it
+    if not allowed(get_employee(LOGGED_IN_ID)["role"], name):
+        return {"error": "That action isn't available for your role."}
+
     # the user's ID always comes from the login, never from the model
     if name == "get_leave_balance":
         return get_leave_balance(LOGGED_IN_ID)
 
     if name == "get_my_requests":
         return get_my_requests(LOGGED_IN_ID)
-
-    if name == "get_payslip":
-        target = tool_input.get("employee_id") or LOGGED_IN_ID
-        return payslips.get_payslip(LOGGED_IN_ID, target, tool_input["month"])
-    if name == "compare_payslips":
-        target = tool_input.get("employee_id") or LOGGED_IN_ID
-        return payslips.compare_payslips(LOGGED_IN_ID, target,
-                                         tool_input["month_a"], tool_input["month_b"])
-    if name == "get_pay_summary":
-        target = tool_input.get("employee_id") or LOGGED_IN_ID
-        return payslips.get_pay_summary(LOGGED_IN_ID, target, tool_input["year"])
 
     if name == "count_leave_days":
         try:
@@ -405,6 +407,21 @@ def run_tool(name, tool_input):
             notify_ticket_reply(tool_input["ticket_id"], get_employee(LOGGED_IN_ID)["name"])
         return result
 
+    # ---------- payslips (read-only; the viewer is always the logged-in user) ----------
+
+    if name == "get_payslip":
+        target = tool_input.get("employee_id") or LOGGED_IN_ID
+        return payslips.get_payslip(LOGGED_IN_ID, target, tool_input["month"])
+
+    if name == "compare_payslips":
+        target = tool_input.get("employee_id") or LOGGED_IN_ID
+        return payslips.compare_payslips(LOGGED_IN_ID, target,
+                                         tool_input["month_a"], tool_input["month_b"])
+
+    if name == "get_pay_summary":
+        target = tool_input.get("employee_id") or LOGGED_IN_ID
+        return payslips.get_pay_summary(LOGGED_IN_ID, target, tool_input["year"])
+
     return {"error": f"Unknown tool {name}"}
 
 
@@ -427,7 +444,7 @@ def answer_turn(user_text):
                     [{"type": "text", "text": f"Summary of earlier conversations: {summary}"}]
                     if summary else []
                 ),
-                tools=TOOLS,
+                tools=tools_for(user["role"], TOOLS),   # only this role's tools
                 messages=messages,
             )
             record_usage(response)
@@ -509,10 +526,10 @@ def chat():
 
 
 if __name__ == "__main__":
-    init_db()            # creates tables if missing; never wipes existing data
-    init_memory()        # creates the chat_messages table if missing
-    init_summaries()     # creates the chat_summaries table if missing
-    init_notifications() # creates the notifications table if missing
-    payslips.init_payslips()
-    payslips.seed_payslips()   # sample data for now; later replaced by PDF import
+    init_db()                 # creates tables if missing; never wipes existing data
+    init_memory()             # creates the chat_messages table if missing
+    init_summaries()          # creates the chat_summaries table if missing
+    init_notifications()      # creates the notifications table if missing
+    payslips.init_payslips()  # creates the payslip tables if missing
+    payslips.seed_payslips()  # sample data for now; later replaced by PDF import or a payroll feed
     chat()

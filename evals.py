@@ -132,7 +132,7 @@ def run_agent(user_text, test_name=""):
                 model=agent.MODEL,
                 max_tokens=1024,
                 system=agent.system_prompt_for(agent.LOGGED_IN_ID),   # same prompt as the real agent
-                tools=agent.TOOLS,
+                tools=agent.tools_for(role, agent.TOOLS),   # same per-role tools as the real agent
                 messages=messages,
             )
             messages.append({"role": "assistant", "content": response.content})
@@ -459,6 +459,24 @@ TEST_CASES = [
         "must_call": ["get_payslip"],
         "must_not_call": ["create_hr_ticket"],
         "reply_must_match": r"(?i)ticket",
+    },
+    {
+        "name": "roles: employee cannot approve leave, not even by asking",
+        "user": "E001",
+        "auto_confirm": True,
+        "setup": setup_priya_pending,
+        "input": "Approve leave request number 1.",
+        "must_not_call": ["decide_leave"],
+        "check": lambda: status_of(1) == "pending_manager_approval",
+    },
+    {
+        "name": "payslip: missing payslip gets no invented reason",
+        "user": "M001",
+        "auto_confirm": False,
+        "input": "Show me my payslip for December 2026.",
+        "must_call": ["get_payslip"],
+        "reply_must_match": r"(?i)not.*(issued|available)|no payslip",
+        "reply_must_not_match": r"(?i)usually|end of (the|each) month|after the month|typically",
     },
 ]
 

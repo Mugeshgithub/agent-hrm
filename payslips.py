@@ -1,5 +1,6 @@
 # payslips.py: read-only payslips. Payroll writes them; the agent only reads.
 import db
+from datetime import date
 
 NOT_FOUND = "No payslip found for that month."   # same message for "missing" and "not allowed"
 
@@ -29,32 +30,38 @@ def init_payslips():
     conn.close()
 
 
+def _month(emp_id, month, base, pension, health, csg, tax, employer, extra=None):
+    rows = [(emp_id, month, "earning", "Base salary", base)]
+    if extra:
+        rows.append((emp_id, month, "earning", extra[0], extra[1]))
+    rows += [
+        (emp_id, month, "employee_contribution", "Pension contributions", pension),
+        (emp_id, month, "employee_contribution", "Health and other contributions", health),
+        (emp_id, month, "employee_contribution", "CSG/CRDS", csg),
+        (emp_id, month, "tax", "Income tax withheld at source", tax),
+        (emp_id, month, "employer_contribution", "Employer contributions", employer),
+    ]
+    return rows
+
+
 def seed_payslips():
     # illustrative figures only, not real French rates
-    lines = [
-        # Priya, September: normal month
-        ("E001", "2026-09", "earning", "Base salary", 320000),
-        ("E001", "2026-09", "employee_contribution", "Pension contributions", 33000),
-        ("E001", "2026-09", "employee_contribution", "Health and other contributions", 12000),
-        ("E001", "2026-09", "employee_contribution", "CSG/CRDS", 29000),
-        ("E001", "2026-09", "tax", "Income tax withheld at source", 15000),
-        ("E001", "2026-09", "employer_contribution", "Employer contributions", 135000),
-        # Priya, October: one day of unpaid leave
-        ("E001", "2026-10", "earning", "Base salary", 320000),
-        ("E001", "2026-10", "earning", "Unpaid leave (1 day)", -14700),
-        ("E001", "2026-10", "employee_contribution", "Pension contributions", 32000),
-        ("E001", "2026-10", "employee_contribution", "Health and other contributions", 11700),
-        ("E001", "2026-10", "employee_contribution", "CSG/CRDS", 28100),
-        ("E001", "2026-10", "tax", "Income tax withheld at source", 14000),
-        ("E001", "2026-10", "employer_contribution", "Employer contributions", 129000),
-        # Karthik, October
-        ("E002", "2026-10", "earning", "Base salary", 280000),
-        ("E002", "2026-10", "employee_contribution", "Pension contributions", 29000),
-        ("E002", "2026-10", "employee_contribution", "Health and other contributions", 10000),
-        ("E002", "2026-10", "employee_contribution", "CSG/CRDS", 26000),
-        ("E002", "2026-10", "tax", "Income tax withheld at source", 9000),
-        ("E002", "2026-10", "employer_contribution", "Employer contributions", 115000),
-    ]
+    lines = (
+        _month("E001", "2026-09", 320000, 33000, 12000, 29000, 15000, 135000)
+        + _month("E001", "2026-10", 320000, 32000, 11700, 28100, 14000, 129000,
+                 extra=("Unpaid leave (1 day)", -14700))
+        + _month("E002", "2026-09", 280000, 29000, 10000, 26000, 9000, 115000)
+        + _month("E002", "2026-10", 280000, 29000, 10000, 26000, 9000, 115000)
+        + _month("E003", "2026-09", 250000, 26000, 9000, 23000, 6000, 103000)
+        + _month("E003", "2026-10", 250000, 26000, 9000, 23000, 6000, 103000)
+        + _month("M001", "2026-09", 450000, 46000, 16000, 41000, 32000, 190000)
+        + _month("M001", "2026-10", 450000, 46000, 16000, 41000, 32000, 190000,
+                 extra=("Performance bonus", 50000))
+        + _month("H001", "2026-09", 380000, 39000, 14000, 35000, 22000, 160000)
+        + _month("H001", "2026-10", 380000, 39000, 14000, 35000, 22000, 160000)
+        + _month("C001", "2026-09", 700000, 72000, 25000, 64000, 80000, 300000)
+        + _month("C001", "2026-10", 700000, 72000, 25000, 64000, 80000, 300000)
+    )
     conn = db.get_conn()
     with conn:
         conn.execute("DELETE FROM payslip_lines")
@@ -135,7 +142,14 @@ def get_payslip(viewer_id, emp_id, month):
         return {"error": NOT_FOUND}
     lines = _lines(emp_id, month)
     if not lines:
-        return {"error": NOT_FOUND}
+        if viewer_id != emp_id:
+            return {"error": NOT_FOUND}          # others: never reveal why
+        # own payslip: the CODE gives the reason, so the model never has to invent one
+        if month >= date.today().strftime("%Y-%m"):
+            return {"error": f"No payslip has been issued for {month} yet.",
+                    "reason": "not_issued_yet"}
+        return {"error": f"There is no payslip on record for {month}.",
+                "reason": "no_record"}
     return {
         "month": month,
         "lines": [{**l, "amount_eur": euro(l["amount_cents"])} for l in lines],
