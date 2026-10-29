@@ -14,6 +14,7 @@ jobs:
         with:
           python-version: "3.13"
       - run: python unit_tests.py
+      - run: python payslips_tests.py
 
   evals:
     needs: unit-tests
