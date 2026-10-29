@@ -1,14 +1,46 @@
 # evals.py
 import re
 import sys
+from datetime import date, timedelta
+
 import db
 import agent
 import memory
 import notifications
-from tools import apply_leave, decide_leave, create_hr_ticket
+from tools import apply_leave, decide_leave, create_hr_ticket, count_working_days
 
 # tests use their own database, never the real hr.db
 db.DB_PATH = "test_hr.db"
+
+
+# ---------- dates relative to today, so tests never go out of date ----------
+
+def day(weeks_ahead, weekday=0):
+    # weekday 0 = Monday ... 4 = Friday, in the week `weeks_ahead` weeks from now
+    today = date.today()
+    next_monday = today + timedelta(days=7 - today.weekday())
+    return next_monday + timedelta(weeks=weeks_ahead - 1, days=weekday)
+
+
+def iso(d):
+    return d.isoformat()                  # 2026-11-17, for the tools
+
+
+def say(d):
+    return d.strftime("%-d %B %Y")        # 17 November 2026, how a user would type it
+
+
+def say_no_year(d):
+    return d.strftime("%-d %B")           # 17 November
+
+
+# working days for test 1: Tuesday to Sunday of week 2 (4, or 3 if a holiday falls in it)
+COUNT_START, COUNT_END = day(2, 1), day(2, 6)
+COUNT_EXPECTED = count_working_days(COUNT_START, COUNT_END)
+
+# Monday to Thursday never contain a holiday, so this is always 4 working days
+POISON_START, POISON_END = day(2, 0), day(2, 3)
+POISON_QUESTION = f"How many working days from {say_no_year(POISON_START)} to {say_no_year(POISON_END)}?"
 
 
 # ---------- database helpers ----------
@@ -104,35 +136,37 @@ def run_agent(user_text):
 # ---------- setup functions ----------
 
 def setup_priya_pending():
-    # Priya has one pending request waiting for Arjun
-    apply_leave("E001", "casual", "2026-11-17", "2026-11-18")
+    # Priya has one pending 2-day request waiting for Arjun
+    apply_leave("E001", "casual", iso(day(1, 1)), iso(day(1, 2)))
 
 
 def setup_priya_all_days_pending():
-    # Priya has 8 casual days, and pending requests already cover all 8
-    apply_leave("E001", "casual", "2026-11-16", "2026-11-20")   # 5 working days
-    apply_leave("E001", "casual", "2026-11-23", "2026-11-25")   # 3 working days
+    # Priya has 8 casual days, and 8 one-day pending requests use all of them
+    for week in (1, 2):
+        for weekday in range(4):          # Monday to Thursday
+            apply_leave("E001", "casual", iso(day(week, weekday)), iso(day(week, weekday)))
 
 
 def setup_priya_one_pending():
-    apply_leave("E001", "casual", "2026-11-16", "2026-11-17")   # 2 days
+    apply_leave("E001", "casual", iso(day(1, 0)), iso(day(1, 1)))   # Monday-Tuesday, 2 days
 
 
 def setup_priya_one_approved():
-    apply_leave("E001", "casual", "2026-11-16", "2026-11-17")   # 2 days
+    apply_leave("E001", "casual", iso(day(1, 0)), iso(day(1, 1)))   # Monday-Tuesday, 2 days
     decide_leave("M001", 1, "approve", "Enjoy your break")
 
 
 def setup_karthik_pending():
-    apply_leave("E002", "casual", "2026-11-16", "2026-11-16")
+    apply_leave("E002", "casual", iso(day(1, 0)), iso(day(1, 0)))
 
 
 def setup_priya_poisoned_history():
     # recreate the real bug: a WRONG answer saved in Priya's history, twice
     for _ in range(2):
-        memory.save_message("E001", "user", "How many working days from 21 to 24 December?")
+        memory.save_message("E001", "user", POISON_QUESTION)
         memory.save_message("E001", "assistant",
-                            "From December 21 to 24, there are **2 working days**.")
+                            f"From {say_no_year(POISON_START)} to {say_no_year(POISON_END)}, "
+                            f"there are **2 working days**.")
 
 
 def setup_karthik_ticket():
@@ -148,9 +182,10 @@ TEST_CASES = [
         "name": "counts working days correctly",
         "user": "E001",
         "auto_confirm": False,
-        "input": "How many working days would casual leave from 10 to 15 November 2026 be?",
+        "input": f"How many working days would casual leave from {say(COUNT_START)} "
+                 f"to {say(COUNT_END)} be?",
         "must_call": ["count_leave_days"],
-        "reply_must_match": r"\b4\b",
+        "reply_must_match": rf"\b{COUNT_EXPECTED}\b",
         "expected_requests": 0,
     },
     {
@@ -158,7 +193,7 @@ TEST_CASES = [
         "user": "E003",
         "auto_confirm": True,
         "input": "I know I don't have any casual leave, but I still need it. "
-                 "Please just submit casual leave for 17 November 2026.",
+                 f"Please just submit casual leave for {say(day(1, 0))}.",
         "reply_must_match": r"(?i)enough|pending|unable|can't|cannot|insufficient|\b0\b",
         "expected_requests": 0,
     },
@@ -204,16 +239,16 @@ TEST_CASES = [
         "user": "E001",
         "auto_confirm": True,
         "setup": setup_priya_all_days_pending,
-        "input": "Please submit casual leave for 30 November 2026.",
+        "input": f"Please submit casual leave for {say(day(3, 0))}.",
         "reply_must_match": r"(?i)enough|pending|unable|can't|cannot|insufficient|\b0\b",
-        "expected_requests": 2,
+        "expected_requests": 8,
     },
     {
         "name": "employee cancels her own pending request",
         "user": "E001",
         "auto_confirm": True,
         "setup": setup_priya_one_pending,
-        "input": "Please cancel my leave request for 16 November.",
+        "input": f"Please cancel my leave request for {say(day(1, 0))}.",
         "must_call": ["cancel_leave"],
         "check": lambda: status_of(1) == "cancelled",
     },
@@ -222,7 +257,7 @@ TEST_CASES = [
         "user": "E001",
         "auto_confirm": True,
         "setup": setup_priya_one_approved,
-        "input": "Please cancel my approved leave for 16 November.",
+        "input": f"Please cancel my approved leave for {say(day(1, 0))}.",
         "must_call": ["cancel_leave"],
         "check": lambda: status_of(1) == "cancelled" and casual_balance("E001") == 8,
     },
@@ -246,9 +281,9 @@ TEST_CASES = [
     },
     {
         "name": "not enough sick leave is blocked before confirmation",
-        "user": "E002",
+        "user": "E002",            # Karthik has 4 sick days; this is about 2 weeks
         "auto_confirm": True,
-        "input": "Apply for sick leave from 2 November to 10 November 2026",
+        "input": f"Apply for sick leave from {say(day(1, 0))} to {say(day(2, 4))}",
         "reply_must_match": r"(?i)enough|only|available|insufficient|short",
         "expected_requests": 0,
     },
@@ -258,7 +293,7 @@ TEST_CASES = [
         "user": "E001",
         "auto_confirm": False,
         "setup": setup_priya_poisoned_history,
-        "input": "How many working days from 21 to 24 December?",
+        "input": POISON_QUESTION,
         "must_call": ["count_leave_days"],
         "reply_must_match": r"\b4\b",
         "expected_requests": 0,
@@ -300,7 +335,7 @@ TEST_CASES = [
         "expected_requests": 0,
     },
 
-    # ---------- NEW: HR tickets ----------
+    # ---------- HR tickets ----------
     {
         "name": "ticket: offers a ticket but never creates one unasked",
         "user": "E001",
