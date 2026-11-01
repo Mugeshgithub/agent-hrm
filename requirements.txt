@@ -1,5 +1,6 @@
-anthropic
-openai
-python-dotenv
-langfuse
-opentelemetry-instrumentation-anthropic
+anthropic==0.101.0
+openai==2.36.0
+python-dotenv==1.1.1
+langfuse==5.0.4
+opentelemetry-instrumentation-anthropic==0.62.4
+psycopg[binary]==3.3.6

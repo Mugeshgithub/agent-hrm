@@ -74,7 +74,7 @@ REWRITE_PROMPT = (
 def rewrite_query(question):
     # the model only prepares the SEARCH; it never answers here
     resp = claude.messages.create(
-        model="claude-haiku-4-5", max_tokens=60, temperature=0, system=REWRITE_PROMPT,
+        model="claude-haiku-4-5", max_tokens=60, system=REWRITE_PROMPT,
         messages=[{"role": "user", "content": question}],
     )
     return "".join(b.text for b in resp.content if b.type == "text").strip()
@@ -119,7 +119,7 @@ def rerank(question, rows, snippet=600):
     articles = list(first.values())
     listing = "\n\n".join(f"[{i}] {r['num']}: {r['text'][:snippet]}" for i, r in enumerate(articles, start=1))
     resp = claude.messages.create(
-        model="claude-haiku-4-5", max_tokens=150, temperature=0, system=RERANK_PROMPT,
+        model="claude-haiku-4-5", max_tokens=150, system=RERANK_PROMPT,
         messages=[{"role": "user", "content": f"Question: {question}\n\nCandidates:\n\n{listing}"}],
     )
     text = "".join(b.text for b in resp.content if b.type == "text")

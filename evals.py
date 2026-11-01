@@ -145,7 +145,6 @@ def run_agent(user_text, test_name=""):
             response = agent.client.messages.create(
                 model=agent.MODEL,
                 max_tokens=1024,
-                temperature=0,   # consistent, factual answers: same question, (nearly) same reply
                 system=agent.system_prompt_for(agent.LOGGED_IN_ID),   # same prompt as the real agent
                 tools=agent.tools_for(role, agent.TOOLS),   # same per-role tools as the real agent
                 messages=messages,

@@ -482,7 +482,6 @@ def answer_turn(user_text):
             response = client.messages.create(
                 model=MODEL,
                 max_tokens=1024,
-                temperature=0,   # consistent, factual answers: same question, (nearly) same reply
                 system=system_prompt_for(LOGGED_IN_ID) + (
                     [{"type": "text", "text": f"Summary of earlier conversations: {summary}"}]
                     if summary else []
