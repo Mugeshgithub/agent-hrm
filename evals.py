@@ -128,6 +128,7 @@ def reset_memory():
 # ---------- run the agent ----------
 
 from citations import ungrounded_citations
+from judge import judge   # LLM-as-judge: every claim supported by this turn's tool results (tested in judge_tests.py)
 
 
 @observe(name="eval-test")   # one trace per test, with every Claude call and tool inside
@@ -628,6 +629,11 @@ def run_evals(only=None):
             bad = ungrounded_citations(reply, agent.last_turn["sources"])
             if bad:
                 problems.append(f"cites articles no tool returned this turn: {', '.join(bad)}")
+        # LLM-as-judge on answers built from sources (policy and law): catches invented reasons and
+        # wrong attributions that keyword checks miss. Leave, permission and pay tests are checked by code.
+        if case["name"].startswith(("policy:", "law:")):
+            for issue in judge(case["input"], reply, agent.last_turn["sources"]):
+                problems.append(f"judge: unsupported \"{issue.get('claim')}\" ({issue.get('why')})")
         if "check" in case and not case["check"]():
             problems.append("database check failed")
 

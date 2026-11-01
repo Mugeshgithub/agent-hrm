@@ -438,9 +438,10 @@ def run_tool(name, tool_input):
             # imported here, not at the top, so CI (which has no labour-code database) still runs
             # multi-query finds candidates (top 20), then Haiku reranks them by "does it answer the question?"
             # recall@8 on 50 EN/FR questions: vector 45, multi-query 48, multi+rerank 50
-            from labour_code.search import connect, reranked_search
+            # search with the employee's own words AND the agent's query (the agent's rewording once hid L3141-3)
+            from labour_code.search import connect, search_for_agent
             with connect() as conn:
-                results = reranked_search(conn, tool_input["question"], k=20)
+                results = search_for_agent(conn, last_turn.get("question"), tool_input["question"], k=20)
         except Exception:
             # e.g. Docker is not running: the user gets a clear message, the agent keeps working
             return {"error": "The labour-law search is not reachable right now. Please try again later."}
@@ -506,6 +507,7 @@ def answer_turn(user_text):
         citation_retry_used = False
         last_turn["tools_called"] = []
         last_turn["sources"] = turn_sources
+        last_turn["question"] = user_text   # the employee's own words, used by the labour-law search
         while calls_this_message < MAX_CALLS_PER_MESSAGE:
             calls_this_message += 1
             response = client.messages.create(

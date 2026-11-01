@@ -135,3 +135,15 @@ def rerank(question, rows, snippet=600):
 def reranked_search(conn, question, k=20):
     # multi-query finds the right article in its top 20 for all 50 test questions; the reranker puts it first
     return rerank(question, multi_query_search(conn, question, k))
+
+
+def search_for_agent(conn, user_question, agent_query, k=20):
+    # the agent rewrites the user's question before calling the tool, and its wording can lose the meaning:
+    # "paid holiday days per year entitlement" -> L3141-3 not in the top 20; the user's own question -> rank 2.
+    # So search with BOTH, merge the candidates, and rerank against both (the agent's query keeps the
+    # context of follow-ups like "And during which months?").
+    queries = [q for q in dict.fromkeys([user_question, agent_query]) if q]
+    if len(queries) == 1:
+        return reranked_search(conn, queries[0], k)
+    candidates = fuse([multi_query_search(conn, q, k) for q in queries], k)
+    return rerank(f"{user_question}\n(search query: {agent_query})", candidates)
