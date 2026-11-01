@@ -145,6 +145,7 @@ def run_agent(user_text, test_name=""):
             response = agent.client.messages.create(
                 model=agent.MODEL,
                 max_tokens=1024,
+                temperature=0,   # consistent, factual answers: same question, (nearly) same reply
                 system=agent.system_prompt_for(agent.LOGGED_IN_ID),   # same prompt as the real agent
                 tools=agent.tools_for(role, agent.TOOLS),   # same per-role tools as the real agent
                 messages=messages,
@@ -366,7 +367,8 @@ TEST_CASES = [
         "auto_confirm": False,
         "input": "Do I need a doctor's note?",
         "must_call": ["search_policy"],
-        "reply_must_match": r"(?i)medical certificate",
+        # the fact: a certificate/note is needed beyond 2 days; accept the user's wording or the policy's
+        "reply_must_match": r"(?i)(medical certificate|doctor'?s note).*(more than|over|beyond|exceed)\D{0,20}(2|two)|(more than|over|beyond|exceed)\D{0,20}(2|two).*(medical certificate|doctor'?s note)",
         "expected_requests": 0,
     },
 
