@@ -412,11 +412,11 @@ def run_tool(name, tool_input):
             return {"error": "The labour-law database isn't available right now."}
         try:
             # imported here, not at the top, so CI (which has no labour-code database) still runs
-            # plain vector search: best recall@8 on our test set (17/18); multi-query's French rewrite
-            # pulled in look-alike leave articles and pushed L3141-3 out of the top 8
-            from labour_code.search import connect, vector_search
+            # multi-query finds candidates (top 20), then Haiku reranks them by "does it answer the question?"
+            # recall@8 on 50 EN/FR questions: vector 45, multi-query 48, multi+rerank 50
+            from labour_code.search import connect, reranked_search
             with connect() as conn:
-                results = vector_search(conn, tool_input["question"], k=20)
+                results = reranked_search(conn, tool_input["question"], k=20)
         except Exception:
             # e.g. Docker is not running: the user gets a clear message, the agent keeps working
             return {"error": "The labour-law search is not reachable right now. Please try again later."}

@@ -1,10 +1,11 @@
 # labour_code/eval_retrieval.py: recall@8 for each search method, in English and French
 from retrieval_cases import CASES
 from search import (connect, vector_search, keyword_search, hybrid_search,
-                    multi_query_search, french_search, rewrite_query)
+                    multi_query_search, french_search, reranked_search, rewrite_query)
 
 METHODS = {"vector": vector_search, "keyword": keyword_search, "hybrid": hybrid_search,
-           "multi-query": multi_query_search, "french-only": french_search}
+           "multi-query": multi_query_search, "french-only": french_search,
+           "multi+rerank": reranked_search}
 TOP = 8   # the agent receives the top 8 articles, so measure exactly that
 
 

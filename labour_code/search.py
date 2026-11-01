@@ -74,7 +74,7 @@ REWRITE_PROMPT = (
 def rewrite_query(question):
     # the model only prepares the SEARCH; it never answers here
     resp = claude.messages.create(
-        model="claude-haiku-4-5", max_tokens=60, system=REWRITE_PROMPT,
+        model="claude-haiku-4-5", max_tokens=60, temperature=0, system=REWRITE_PROMPT,
         messages=[{"role": "user", "content": question}],
     )
     return "".join(b.text for b in resp.content if b.type == "text").strip()
@@ -97,3 +97,41 @@ def french_search(conn, question, k=20):
         vector_search(conn, rewritten, k),
         keyword_search(conn, rewritten, k),
     ], k)
+
+
+RERANK_PROMPT = (
+    "You rank articles of the French Code du travail for a search engine. "
+    "You get a question (in English or French) and numbered candidate articles. "
+    "Order the candidates by how directly each one ANSWERS the question. "
+    "Put first the article that states the rule asked about (the general rule, the number, the definition), "
+    "before articles about exceptions, special cases, procedures, sanctions or other kinds of leave. "
+    "Output only the candidate numbers, most relevant first, separated by commas (for example: 4,1,7). "
+    "Include every number exactly once. No explanation."
+)
+
+
+def rerank(question, rows, snippet=600):
+    # second step: a model READS the question and each candidate together and reorders them.
+    # the search only finds "same topic"; this judges "does it answer the question?"
+    first = {}
+    for r in rows:                              # one row per article, in search order
+        first.setdefault(r["num"], r)
+    articles = list(first.values())
+    listing = "\n\n".join(f"[{i}] {r['num']}: {r['text'][:snippet]}" for i, r in enumerate(articles, start=1))
+    resp = claude.messages.create(
+        model="claude-haiku-4-5", max_tokens=150, temperature=0, system=RERANK_PROMPT,
+        messages=[{"role": "user", "content": f"Question: {question}\n\nCandidates:\n\n{listing}"}],
+    )
+    text = "".join(b.text for b in resp.content if b.type == "text")
+    order = []
+    for n in re.findall(r"\d+", text):          # tolerate any formatting; ignore numbers out of range
+        i = int(n)
+        if 1 <= i <= len(articles) and i not in order:
+            order.append(i)
+    order += [i for i in range(1, len(articles) + 1) if i not in order]   # anything it forgot keeps search order
+    return [articles[i - 1] for i in order]
+
+
+def reranked_search(conn, question, k=20):
+    # multi-query finds the right article in its top 20 for all 50 test questions; the reranker puts it first
+    return rerank(question, multi_query_search(conn, question, k))
