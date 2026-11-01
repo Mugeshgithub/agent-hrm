@@ -504,14 +504,24 @@ TEST_CASES = [
         "reply_must_match": r"(?is)(?=.*L\.?\s?3141-3)(?=.*(2[.,]5|deux jours et demi|30))",
     },
     {
-        # the real bug: the agent quoted the company's 12 days without checking the law
-        "name": "law: a policy below the legal minimum is flagged",
+        # an amount below the law must be flagged; asked as a claim, so we don't need an illegal policy
+        "name": "law: an entitlement below the legal minimum is flagged",
         "user": "E001",
         "auto_confirm": False,
         "needs_labour_db": True,
-        "input": "How many days of paid holiday do I get per year?",
-        "must_call": ["search_policy", "search_labour_code"],
-        "reply_must_match": r"(?is)(?=.*L\.?\s?3141-3)(?=.*(below|less than|lower than|under the legal|minimum))",
+        "input": "My manager says I only get 20 days of paid holiday a year. Is that legal?",
+        "must_call": ["search_labour_code"],
+        "reply_must_match": r"(?is)(?=.*L\.?\s?3141-3)(?=.*(below|less than|lower than|under the legal|not legal|illegal|minimum|not enough))",
+    },
+    {
+        # the policy now has a real paid-leave section; casual leave (12 days) must not be given as paid leave
+        "name": "policy: paid leave comes from the paid-leave section, not casual leave",
+        "user": "E001",
+        "auto_confirm": False,
+        "input": "How many days of paid leave do I get per year?",
+        "must_call": ["search_policy"],
+        "reply_must_match": r"\b25\b",
+        "reply_must_not_match": r"(?i)\b12\b[^.]{0,40}paid",
     },
     {
         "name": "law: French question gets a French answer",
