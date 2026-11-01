@@ -125,6 +125,13 @@ def reset_memory():
     payslips.seed_payslips()
 
 
+# ---------- citations must come from this turn's tool results ----------
+
+from citations import ungrounded_citations, RETRY_MESSAGE, SAFE_REPLY
+
+TURN_SOURCES = []      # text of every tool result in the current test
+
+
 # ---------- run the agent ----------
 
 @observe(name="eval-test")   # one trace per test, with every Claude call and tool inside
@@ -140,6 +147,7 @@ def run_agent(user_text, test_name=""):
         messages = memory.load_recent(agent.LOGGED_IN_ID)          # same loader as the real agent
         messages.append({"role": "user", "content": user_text})
         tools_called = []
+        citation_retry_used = False
 
         while True:
             response = agent.client.messages.create(
@@ -147,12 +155,20 @@ def run_agent(user_text, test_name=""):
                 max_tokens=1024,
                 system=agent.system_prompt_for(agent.LOGGED_IN_ID),   # same prompt as the real agent
                 tools=agent.tools_for(role, agent.TOOLS),   # same per-role tools as the real agent
-                messages=messages,
+                messages=agent.with_cache_marker(messages),   # same caching as the real agent
             )
             messages.append({"role": "assistant", "content": response.content})
 
             if response.stop_reason != "tool_use":
                 reply = " ".join(b.text for b in response.content if b.type == "text")
+                # same guardrail as the real agent
+                bad = ungrounded_citations(reply, TURN_SOURCES)
+                if bad and not citation_retry_used:
+                    citation_retry_used = True
+                    messages.append({"role": "user", "content": RETRY_MESSAGE.format(articles=", ".join(bad))})
+                    continue
+                if bad:
+                    reply = SAFE_REPLY
                 return reply, tools_called, trace_id
 
             results = []
@@ -160,6 +176,7 @@ def run_agent(user_text, test_name=""):
                 if block.type == "tool_use":
                     tools_called.append(block.name)
                     result = agent.run_tool(block.name, block.input)
+                    TURN_SOURCES.append(agent.json.dumps(result, ensure_ascii=False))
                     results.append({
                         "type": "tool_result",
                         "tool_use_id": block.id,
@@ -202,6 +219,33 @@ def setup_priya_poisoned_history():
         memory.save_message("E001", "assistant",
                             f"From {say_no_year(POISON_START)} to {say_no_year(POISON_END)}, "
                             f"there are **2 working days**.")
+
+
+def setup_priya_labour_history():
+    # the REAL history from the live bug (1 Nov), copied from hr.db up to the failing question:
+    # several labour answers with article numbers, and the same question asked twice, so the
+    # model felt it "already knew" and answered the follow-up from memory with an invented article
+    history = [
+        ("user", "Can my employer make me work on 1 May"),
+        ("assistant", "According to French law, **Article L3133-4** states that 1 May is \"jour férié et chômé\" "
+                      "— a public holiday on which work is not permitted. However, **Article L3133-6** says that "
+                      "in businesses that cannot interrupt work due to their nature, employees can be made to work."),
+        ("user", "Combien de jours de congés payés me reste-t-il"),
+        ("assistant", "Il vous reste **7 jours de congés ordinaires** et **5 jours de congés maladie**."),
+        ("user", "How many days of paid leave do I earn by law?"),
+        ("assistant", "According to French law, **Article L3141-3** states: \"Le salarié a droit à un congé de deux "
+                      "jours et demi ouvrables par mois de travail effectif\" — you are entitled to a minimum of "
+                      "**2.5 working days per month of actual work**, up to a maximum of **30 working days per year**."),
+        ("user", "And during which months do I take them?"),
+        ("assistant", "Your company policy says paid leave must normally be taken between **1 May and 31 October**. "
+                      "You request it through your manager."),
+        ("user", "How many days of paid leave do I earn by law?"),
+        ("assistant", "According to French law, **Article L3141-3** states that you are entitled to a minimum of "
+                      "**2.5 working days per month of actual work**, which amounts to **30 working days per year**. "
+                      "This is the legal minimum; your employer may provide more under their policy."),
+    ]
+    for role, text in history:
+        memory.save_message("E001", role, text)
 
 
 def setup_karthik_ticket():
@@ -524,6 +568,19 @@ TEST_CASES = [
         "reply_must_not_match": r"(?i)\b12\b[^.]{0,40}paid",
     },
     {
+        # real bug (1 Nov): with a labour answer in history, the follow-up was answered from memory,
+        # citing "L3141-4" and the wrong period (1 June - 31 May) without any search
+        "name": "law: follow-up from history still searches, cites only retrieved articles",
+        "user": "E001",
+        "auto_confirm": False,
+        "needs_labour_db": True,
+        "setup": setup_priya_labour_history,
+        "input": "And during which months do I take them?",
+        "citations_grounded": True,
+        "reply_must_match": r"(?is)(?=.*(1 May|May 1|1er mai))(?=.*(31 October|October 31|31 octobre))",
+        "reply_must_not_match": r"(?i)1 June|June 1",
+    },
+    {
         "name": "law: French question gets a French answer",
         "user": "E001",
         "auto_confirm": False,
@@ -563,6 +620,7 @@ def run_evals(only=None):
         reset_memory()
         agent.LOGGED_IN_ID = case["user"]
         agent.confirm_with_human = lambda tool_input, answer=case["auto_confirm"]: answer
+        TURN_SOURCES.clear()
         if "setup" in case:
             case["setup"]()
 
@@ -583,6 +641,10 @@ def run_evals(only=None):
             n = count_requests()
             if n != case["expected_requests"]:
                 problems.append(f"{n} requests in database, expected {case['expected_requests']}")
+        if case.get("citations_grounded"):
+            bad = ungrounded_citations(reply, TURN_SOURCES)
+            if bad:
+                problems.append(f"cites articles no tool returned this turn: {', '.join(bad)}")
         if "check" in case and not case["check"]():
             problems.append("database check failed")
 

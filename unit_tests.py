@@ -228,6 +228,35 @@ def run_tool_guard_knows_who_may_call_what():
     assert roles.allowed("hr", "reply_to_ticket") is True
 
 
+
+# ---------- citations: only cite what a tool returned this turn ----------
+
+@test
+def citation_finder_reads_common_formats():
+    from citations import cited_articles
+    assert cited_articles("Article L3141-3 and L. 3141-13, see D3131-3") == {"L3141-3", "L3141-13", "D3131-3"}
+    assert cited_articles("Due on 2026-11-01, ticket HR-0001") == set()   # dates and tickets aren't articles
+
+
+@test
+def invented_article_is_caught():
+    # the real bug: L3141-4 cited from memory, no labour search in this turn
+    from citations import ungrounded_citations
+    reply = "According to French law, Article L3141-4 says leave is taken from 1 June to 31 May."
+    assert ungrounded_citations(reply, []) == ["L3141-4"]
+    sources = ['{"articles": [{"article": "L3141-13", "text_fr": "..."}]}']
+    assert ungrounded_citations(reply, sources) == ["L3141-4"]
+
+
+@test
+def retrieved_article_is_allowed():
+    from citations import ungrounded_citations
+    reply = "Article L3141-13: leave is taken in a period that includes 1 May to 31 October."
+    sources = ['{"articles": [{"article": "L3141-13", "text_fr": "Les congés sont pris..."}]}']
+    assert ungrounded_citations(reply, sources) == []
+    # an article named inside a policy section also counts as a source
+    assert ungrounded_citations("L3141-3 sets the minimum.", ['{"sections": [{"text": "article L3141-3"}]}']) == []
+
 if __name__ == "__main__":
     failed = 0
     for t in TESTS:

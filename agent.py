@@ -16,6 +16,7 @@ from db import init_db
 from memory import init_memory, init_summaries, save_message, build_context
 from notifications import init_notifications, notify_decision, notify_ticket_reply, show_unread
 from policy import search_policy
+from citations import ungrounded_citations, RETRY_MESSAGE, SAFE_REPLY
 from tools import (
     get_leave_balance, apply_leave, count_working_days,
     get_pending_requests, decide_leave, get_my_requests, get_employee,
@@ -319,6 +320,25 @@ def system_prompt_for(user_id):
     ]
 
 
+def with_cache_marker(messages):
+    # mark the LAST message so the whole conversation so far (incl. tool results like the
+    # ~10k tokens of labour articles) is cached; the next call re-reads it at ~10% of the price.
+    # works on a copy, so markers never pile up in the saved history (max 4 per request).
+    if not messages:
+        return messages
+    marked = list(messages)
+    last = dict(marked[-1])
+    content = last["content"]
+    if isinstance(content, str):
+        content = [{"type": "text", "text": content}]
+    else:
+        content = [b if isinstance(b, dict) else b.model_dump(exclude_none=True) for b in content]
+    content[-1] = {**content[-1], "cache_control": {"type": "ephemeral"}}
+    last["content"] = content
+    marked[-1] = last
+    return marked
+
+
 def confirm_with_human(tool_input):
     # this runs in YOUR code, so the model cannot skip it
     print("\n  >>> Please confirm:")
@@ -477,6 +497,8 @@ def answer_turn(user_text):
 
         # the agent loop, limited so one question can't loop forever
         calls_this_message = 0
+        turn_sources = []          # every tool result in this turn: the only allowed sources of citations
+        citation_retry_used = False
         while calls_this_message < MAX_CALLS_PER_MESSAGE:
             calls_this_message += 1
             response = client.messages.create(
@@ -487,17 +509,28 @@ def answer_turn(user_text):
                     if summary else []
                 ),
                 tools=tools_for(user["role"], TOOLS),   # only this role's tools
-                messages=messages,
+                messages=with_cache_marker(messages),   # cache the conversation so far
             )
             record_usage(response)
             messages.append({"role": "assistant", "content": response.content})
 
             if response.stop_reason != "tool_use":
                 reply = "".join(b.text for b in response.content if b.type == "text")
+
+                # guardrail in code: never show an article the agent didn't retrieve in this turn
+                bad = ungrounded_citations(reply, turn_sources)
+                if bad and not citation_retry_used:
+                    citation_retry_used = True
+                    print(f"  [guard] ungrounded citation {bad}: asking the agent to search first")
+                    messages.append({"role": "user", "content": RETRY_MESSAGE.format(articles=", ".join(bad))})
+                    continue
+                if bad:
+                    print(f"  [guard] still ungrounded {bad}: replying safely instead")
+                    reply = SAFE_REPLY
                 print(f"\nAgent: {reply}")
                 save_message(LOGGED_IN_ID, "assistant", reply)
                 print(f"\n  [usage] {usage['calls']} calls, {usage['input_tokens']} in, "
-                      f"{usage['cache_read']} cached, {usage['output_tokens']} out, "
+                      f"{usage['cache_write']} cache-written, {usage['cache_read']} cached, {usage['output_tokens']} out, "
                       f"${cost_so_far():.4f} so far")
                 return reply
 
@@ -506,6 +539,7 @@ def answer_turn(user_text):
                 if block.type == "tool_use":
                     print(f"  [tool call] {block.name} {block.input}")
                     result = run_tool(block.name, block.input)
+                    turn_sources.append(json.dumps(result, ensure_ascii=False))
                     tool_results.append({
                         "type": "tool_result",
                         "tool_use_id": block.id,
