@@ -201,9 +201,11 @@ TOOLS = [
     },
     {
         "name": "search_policy",
-        "description": "Search the company HR policy document. Use this for any question about "
-                       "leave rules, carry forward, medical certificates, holidays, work from home "
-                       "or notice period. Returns the most relevant policy sections.",
+         "description": "Search the company HR policy document. Use this for any question about "
+                       "leave rules, carry forward, medical certificates or doctor's notes, holidays, "
+                       "work from home or notice period. Call it FIRST, even for short or vague "
+                       "questions, before asking the user to clarify. Returns the most relevant "
+                       "policy sections.",
         "input_schema": {
             "type": "object",
             "properties": {"question": {"type": "string"}},
@@ -213,8 +215,9 @@ TOOLS = [
     {
         "name": "create_hr_ticket",
         "description": "Raise a ticket with the HR team for the logged-in user, when the assistant "
-                       "cannot solve their problem. Only call this after the user has agreed. "
-                       "The system will ask the user to confirm before sending.",
+                       "cannot solve their problem. Only call this when the user has explicitly asked "
+                       "for a ticket or said yes to your offer in this conversation. If they have not, "
+                       "do NOT call it: offer the ticket in your reply and wait for their answer.",
         "input_schema": {
             "type": "object",
             "properties": {
