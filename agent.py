@@ -6,6 +6,7 @@ import tracing                     # must come before the Anthropic client is cr
 from tracing import observe, propagate_attributes
 
 import json
+import os
 from datetime import date, datetime
 import anthropic
 
@@ -96,7 +97,11 @@ Users can check their own tickets and HR's replies with get_my_tickets.
 Payslips: only use amounts exactly as the payslip tools return them (the _eur fields). Never calculate, estimate or round pay yourself.
 If a pay difference has no line explaining it, or the user says something is missing or wrong, do not guess a reason. Offer to raise an HR ticket.
 Only describe what the tool results say. Do not promise notifications, emails or anything else the system has not confirmed.
-If a tool returns an error, tell the user exactly what it says. Never add a reason or timing it did not give."""
+If a tool returns an error, tell the user exactly what it says. Never add a reason or timing it did not give.
+For questions about French labour law, call search_labour_code. Answer only from the articles it returns, in the user's language, citing the article number (for example "Article L3141-3") and quoting the key French sentence.
+Use the article that directly answers the question: for 'how many' or 'how long', the article that gives the number. Prefer it over articles about exceptions or details, unless the user asks about exceptions. Never say the law does not specify something if one of the returned articles does. If none of the articles answers the question, say so.
+For questions about the user's own entitlements (paid leave or holiday days, working hours, rest, notice periods), call BOTH search_policy and search_labour_code. Give the company policy, then the legal minimum with its article. If the policy gives less than the law, say so clearly: the law is a minimum, so the legal amount applies, and offer to raise an HR ticket.
+Labour-law answers are general information about the law, not legal advice; a collective agreement or the employment contract may give more."""
 
 # rules only one role needs; added to the prompt for that role only
 ROLE_RULES = {
@@ -281,6 +286,19 @@ TOOLS = [
             "required": ["year"],
         },
     },
+        {
+        "name": "search_labour_code",
+        "description": "Search the French Code du travail (labour law) for articles relevant to an "
+                       "employment-law question: paid leave entitlement, working hours, rest periods, "
+                       "maternity leave, trial periods, harassment, dismissal, and so on. Returns article "
+                       "numbers and their French text. Use this for what the LAW says; use search_policy "
+                       "for the company's own rules.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"question": {"type": "string", "description": "The user's question, in any language"}},
+            "required": ["question"],
+        },
+    },
 ]
 
 
@@ -384,6 +402,27 @@ def run_tool(name, tool_input):
         if not sections:
             return {"found": False, "message": "No matching section in the HR policy."}
         return {"found": True, "sections": sections}
+    
+    if name == "search_labour_code":
+        # no database configured (for example in CI): say so instead of crashing
+        if not os.environ.get("LABOUR_DB_URL"):
+            return {"error": "The labour-law database isn't available right now."}
+        try:
+            # imported here, not at the top, so CI (which has no labour-code database) still runs
+            # plain vector search: best recall@8 on our test set (17/18); multi-query's French rewrite
+            # pulled in look-alike leave articles and pushed L3141-3 out of the top 8
+            from labour_code.search import connect, vector_search
+            with connect() as conn:
+                results = vector_search(conn, tool_input["question"], k=20)
+        except Exception:
+            # e.g. Docker is not running: the user gets a clear message, the agent keeps working
+            return {"error": "The labour-law search is not reachable right now. Please try again later."}
+        articles = {}
+        for r in results:                      # keep the 8 best articles, one entry each
+            if r["num"] not in articles and len(articles) < 8:
+                articles[r["num"]] = r["text"]
+        return {"articles": [{"article": n, "text_fr": t} for n, t in articles.items()],
+                "note": "Official French text of the Code du travail. Cite the article number."}   
 
     # ---------- HR tickets ----------
 

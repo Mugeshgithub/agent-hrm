@@ -1,4 +1,5 @@
 # evals.py
+import os
 import re
 import sys
 from datetime import date, datetime, timedelta
@@ -94,6 +95,19 @@ def payslip_access_count():
     n = conn.execute("SELECT COUNT(*) FROM payslip_access_log").fetchone()[0]
     conn.close()
     return n
+
+
+def labour_db_available():
+    # the labour-law tests need the Postgres container; CI has none, so they are skipped there
+    if not os.environ.get("LABOUR_DB_URL"):
+        return False
+    try:
+        from labour_code.search import connect
+        with connect() as conn:
+            conn.execute("SELECT 1 FROM chunks LIMIT 1")
+        return True
+    except Exception:
+        return False
 
 
 def reset_memory():
@@ -478,15 +492,61 @@ TEST_CASES = [
         "reply_must_match": r"(?i)31 December|December 31",
         "reply_must_not_match": r"(?i)usually|typically|shortly|after the month",
     },
+    # ---------- French labour law (need the Postgres container) ----------
+    {
+        "name": "law: paid leave entitlement cites L3141-3",
+        "user": "E001",
+        "auto_confirm": False,
+        "needs_labour_db": True,
+        "input": "What does French law say about how many days of paid leave I earn?",
+        "must_call": ["search_labour_code"],
+        "reply_must_match": r"(?is)(?=.*L\.?\s?3141-3)(?=.*(2[.,]5|deux jours et demi|30))",
+    },
+    {
+        # the real bug: the agent quoted the company's 12 days without checking the law
+        "name": "law: a policy below the legal minimum is flagged",
+        "user": "E001",
+        "auto_confirm": False,
+        "needs_labour_db": True,
+        "input": "How many days of paid holiday do I get per year?",
+        "must_call": ["search_policy", "search_labour_code"],
+        "reply_must_match": r"(?is)(?=.*L\.?\s?3141-3)(?=.*(below|less than|lower than|under the legal|minimum))",
+    },
+    {
+        "name": "law: French question gets a French answer",
+        "user": "E001",
+        "auto_confirm": False,
+        "needs_labour_db": True,
+        "input": "Quelle est la durée légale du travail par semaine ?",
+        "must_call": ["search_labour_code"],
+        "reply_must_match": r"(?is)(?=.*L\.?\s?3121-27)(?=.*35\s?heures)",
+    },
+    {
+        "name": "law: maternity leave length cites L1225-17",
+        "user": "E001",
+        "auto_confirm": False,
+        "needs_labour_db": True,
+        "input": "How long is maternity leave in France?",
+        "must_call": ["search_labour_code"],
+        # 16 weeks in total, or the same rule split as 6 weeks before + 10 weeks after
+        "reply_must_match": r"(?is)(?=.*L\.?\s?1225-17)(?=.*(\b16\b|sixteen|seize|\b6\b[^.]{0,60}\b10\b))",
+    },
 ]
 
 
 # ---------- runner ----------
 
-def run_evals():
-    passed = 0
-    print(f"Eval run: {RUN_ID}  (tracing {'ON' if tracing.ENABLED else 'OFF'})\n")
-    for case in TEST_CASES:
+def run_evals(only=None):
+    passed = skipped = 0
+    cases = [c for c in TEST_CASES if not only or only.lower() in c["name"].lower()]
+    labour_db = labour_db_available()
+    print(f"Eval run: {RUN_ID}  (tracing {'ON' if tracing.ENABLED else 'OFF'}, "
+          f"labour-law database {'ON' if labour_db else 'OFF'})\n")
+    for case in cases:
+        if case.get("needs_labour_db") and not labour_db:
+            skipped += 1
+            print(f"SKIP {case['name']}  (no labour-law database)")
+            continue
         # fresh test database, empty chat memory, logged-in user and simulated yes/no for every test
         db.init_db(reset=True)
         reset_memory()
@@ -527,10 +587,13 @@ def run_evals():
             passed += 1
             print(f"PASS {case['name']}")
 
-    print(f"\n{passed}/{len(TEST_CASES)} passed")
+    ran = len(cases) - skipped
+    print(f"\n{passed}/{ran} passed" + (f", {skipped} skipped" if skipped else ""))
     tracing.flush()   # send all eval traces and scores before the program exits
-    return passed == len(TEST_CASES)
+    return passed == ran
 
 
 if __name__ == "__main__":
-    sys.exit(0 if run_evals() else 1)
+    # python evals.py          -> all tests
+    # python evals.py law      -> only tests whose name contains "law"
+    sys.exit(0 if run_evals(sys.argv[1] if len(sys.argv) > 1 else None) else 1)

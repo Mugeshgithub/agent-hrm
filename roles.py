@@ -5,7 +5,7 @@ import copy
 # tools every logged-in person gets (managers and HR also have their own leave and payslips)
 EVERYONE = {
     "get_leave_balance", "get_my_requests", "count_leave_days", "apply_leave", "cancel_leave",
-    "search_policy", "create_hr_ticket", "get_my_tickets",
+    "search_policy", "search_labour_code", "create_hr_ticket", "get_my_tickets",
     "get_payslip", "compare_payslips", "get_pay_summary",
 }
 

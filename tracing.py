@@ -26,10 +26,14 @@ def current_trace_id():
 
 
 def score_trace(trace_id, passed, comment=""):
-    # attach "passed" = 1 or 0 to a trace, so failed tests can be filtered in Langfuse
+    # "passed" = 1 or 0: a number, so Langfuse can chart the pass rate over time
+    # "result" = "pass" or "fail": a label, easy to read and filter in the table
     if ENABLED and trace_id:
         langfuse.create_score(trace_id=trace_id, name="passed",
                               value=1 if passed else 0, comment=comment)
+        langfuse.create_score(trace_id=trace_id, name="result",
+                              value="pass" if passed else "fail",
+                              data_type="CATEGORICAL", comment=comment)
 
 
 def flush():

@@ -156,7 +156,7 @@ def fake_tools():
              "cancel_leave", "search_policy", "create_hr_ticket", "get_my_tickets",
              "get_payslip", "compare_payslips", "get_pay_summary",
              "get_pending_requests", "get_team_member_balance", "decide_leave",
-             "get_open_tickets", "reply_to_ticket"]
+             "get_open_tickets", "reply_to_ticket","search_labour_code"]
     tools = [{"name": n, "description": n, "input_schema": {"type": "object", "properties": {}}}
              for n in names]
     for t in tools:
@@ -178,21 +178,21 @@ def names_for(role):
 def employee_gets_no_manager_or_hr_tools():
     names = names_for("employee")
     assert not names & (MANAGER_ONLY | HR_ONLY), names
-    assert "apply_leave" in names and len(names) == 11, names
+    assert "apply_leave" in names and len(names) == 12, names
 
 
 @test
 def manager_gets_team_tools_but_not_hr_tools():
     names = names_for("manager")
     assert MANAGER_ONLY <= names and not names & HR_ONLY, names
-    assert len(names) == 14, names
+    assert len(names) == 15, names
 
 
 @test
 def hr_gets_ticket_tools_but_not_manager_tools():
     names = names_for("hr")
     assert HR_ONLY <= names and not names & MANAGER_ONLY, names
-    assert len(names) == 13, names
+    assert len(names) == 14, names
 
 
 @test
