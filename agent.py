@@ -441,8 +441,9 @@ def run_tool(name, tool_input):
             # e.g. Docker is not running: the user gets a clear message, the agent keeps working
             return {"error": "The labour-law search is not reachable right now. Please try again later."}
         articles = {}
-        for r in results:                      # keep the 8 best articles, one entry each
-            if r["num"] not in articles and len(articles) < 8:
+        for r in results:                      # keep the 5 best articles, one entry each
+            # top 5: full recall on all 70 test questions (top 8 gave no extra), ~37% fewer tokens
+            if r["num"] not in articles and len(articles) < 5:
                 articles[r["num"]] = r["text"]
         return {"articles": [{"article": n, "text_fr": t} for n, t in articles.items()],
                 "note": "Official French text of the Code du travail. Cite the article number."}   

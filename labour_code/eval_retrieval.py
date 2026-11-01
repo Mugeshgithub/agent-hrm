@@ -9,33 +9,63 @@ METHODS = {"vector": vector_search, "keyword": keyword_search, "hybrid": hybrid_
            "multi-query": multi_query_search, "french-only": french_search,
            "multi+rerank": reranked_search}
 TOP = 8   # the agent receives the top 8 articles, so measure exactly that
+TOPS = [8]
 
-
-def top_articles(results, n=TOP):
-    # several chunks can come from one article; count each article once
-    return list(dict.fromkeys(r["num"] for r in results))[:n]
-
-
-# python eval_retrieval.py          -> the 50 tuning questions
-# python eval_retrieval.py holdout  -> the 20 held-out questions the reranker was never tuned on
-if len(sys.argv) > 1 and sys.argv[1] == "holdout":
+# python eval_retrieval.py                          -> the 50 tuning questions, all methods, top 8
+# python eval_retrieval.py holdout                  -> the 20 held-out questions the reranker never saw
+# python eval_retrieval.py top=5 only=multi+rerank  -> any top-k, one method (cheaper)
+args = sys.argv[1:]
+if "holdout" in args:
     CASES = HOLDOUT
     print("HELD-OUT SET\n")
+for a in args:
+    if a.startswith("top="):
+        TOPS = [int(k) for k in a.split("=")[1].split(",")]   # top=3,5,8 -> measured in one pass
+        TOP = TOPS[-1]
+    if a.startswith("only="):
+        METHODS = {k: v for k, v in METHODS.items() if k == a.split("=")[1]}
+print(f"recall@{', '.join(map(str, TOPS))}\n")
+
+
+def top_rows(results, n):
+    # several chunks can come from one article; keep the first chunk of each, like the agent's tool
+    first = {}
+    for r in results:
+        first.setdefault(r["num"], r)
+    return list(first.values())[:n]
+
+
+def top_articles(results, n=None):
+    return [r["num"] for r in top_rows(results, n or TOP)]
 
 with connect() as conn:
     misses = {}
     print(f"{'method':15}  {'all':>7}  {'english':>7}  {'french':>7}")
     for name, search in METHODS.items():
         hits = {"en": 0, "fr": 0}
+        chars = 0
+        per_k = {k: {"hits": 0, "chars": 0} for k in TOPS}
         for question, lang, expected in CASES:
-            found = top_articles(search(conn, question))
+            results = search(conn, question)
+            found = top_articles(results)
+            chars += sum(len(r["text"]) for r in top_rows(results, TOP))   # what the agent would read
+            for k in TOPS:
+                if any(e in top_articles(results, k) for e in expected.split("|")):
+                    per_k[k]["hits"] += 1
+                per_k[k]["chars"] += sum(len(r["text"]) for r in top_rows(results, k))
             if any(e in found for e in expected.split("|")):   # "A|B" = either article is a correct answer
                 hits[lang] += 1
             else:
                 misses.setdefault(name, {})[question] = (expected, found)
         per_lang = len(CASES) // 2
         total = hits["en"] + hits["fr"]
-        print(f"{name:15}  {total:>3}/{len(CASES)}   {hits['en']:>3}/{per_lang}    {hits['fr']:>3}/{per_lang}")
+        avg = chars // len(CASES)
+        print(f"{name:15}  {total:>3}/{len(CASES)}   {hits['en']:>3}/{per_lang}    {hits['fr']:>3}/{per_lang}"
+              f"    ~{avg:,} chars (~{avg // 4:,} tokens) sent per question")
+        if len(TOPS) > 1:
+            for k in TOPS:
+                a = per_k[k]["chars"] // len(CASES)
+                print(f"   top {k}:  {per_k[k]['hits']:>3}/{len(CASES)}    ~{a // 4:,} tokens per question")
 
     for name, missed in misses.items():
         print(f"\n{name} misses:")
