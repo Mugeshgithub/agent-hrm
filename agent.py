@@ -74,6 +74,10 @@ SESSION_ID = new_session_id(LOGGED_IN_ID)
 # the current conversation, shared by chat() and answer_turn()
 state = {"messages": [], "summary": None}
 
+# what happened in the last answered message: read by the evals (tools used, tool results for citations)
+last_turn = {"tools_called": [], "sources": []}
+EXTRA_TAGS = []   # extra Langfuse tags, e.g. ["eval"] when the evals drive the agent
+
 SYSTEM_PROMPT = f"""You are an HR assistant for employees, managers and HR staff.
 Today's date is {date.today().isoformat()}. When a user gives a date without a year, use the next upcoming date.
 Answer in plain, friendly language. Keep replies to 2 or 3 short sentences. No emoji. Do not repeat options already given.
@@ -492,7 +496,7 @@ def run_tool(name, tool_input):
 def answer_turn(user_text):
     user = get_employee(LOGGED_IN_ID)
     with propagate_attributes(user_id=LOGGED_IN_ID, session_id=SESSION_ID,
-                              tags=[user["role"]], metadata={"model": MODEL}):
+                              tags=[user["role"], *EXTRA_TAGS], metadata={"model": MODEL}):
         messages = state["messages"]
         summary = state["summary"]
 
@@ -500,6 +504,8 @@ def answer_turn(user_text):
         calls_this_message = 0
         turn_sources = []          # every tool result in this turn: the only allowed sources of citations
         citation_retry_used = False
+        last_turn["tools_called"] = []
+        last_turn["sources"] = turn_sources
         while calls_this_message < MAX_CALLS_PER_MESSAGE:
             calls_this_message += 1
             response = client.messages.create(
@@ -539,6 +545,7 @@ def answer_turn(user_text):
             for block in response.content:
                 if block.type == "tool_use":
                     print(f"  [tool call] {block.name} {block.input}")
+                    last_turn["tools_called"].append(block.name)
                     result = run_tool(block.name, block.input)
                     turn_sources.append(json.dumps(result, ensure_ascii=False))
                     tool_results.append({
@@ -550,6 +557,34 @@ def answer_turn(user_text):
 
         print("\nAgent: Sorry, that took too many steps. Please try rephrasing.")
         return "(stopped: too many steps)"
+
+
+def start_session(user_id):
+    """Log a user in: load their history (+ summary) and start a fresh budget. Used by chat() and the evals."""
+    global LOGGED_IN_ID, SESSION_ID
+    LOGGED_IN_ID = user_id
+    SESSION_ID = new_session_id(user_id)
+    state["summary"], state["messages"] = build_context(user_id, client, MODEL)
+    reset_usage()
+
+
+def handle_message(user_text):
+    """One user message, exactly as production runs it. chat() and the evals both call this,
+    so the tests always check the real agent, never a copy."""
+    # budget check BEFORE calling the model, so we never pay for a refused request
+    if cost_so_far() >= MAX_COST_PER_CONVERSATION:
+        reply = ("This conversation has reached its usage limit. "
+                 "Please start a new one with 'login' or contact HR.")
+        print(f"\nAgent: {reply}")
+        return reply
+
+    # keep the chat short mid-session: rebuild from the database when it grows
+    if len(state["messages"]) > 20:
+        state["summary"], state["messages"] = build_context(LOGGED_IN_ID, client, MODEL)
+
+    state["messages"].append({"role": "user", "content": user_text})
+    save_message(LOGGED_IN_ID, "user", user_text)
+    return answer_turn(user_text)
 
 
 def chat():
@@ -584,20 +619,7 @@ def chat():
                 print("Unknown employee ID")
             continue
 
-        # budget check BEFORE calling the model, so we never pay for a refused request
-        if cost_so_far() >= MAX_COST_PER_CONVERSATION:
-            print("\nAgent: This conversation has reached its usage limit. "
-                  "Please start a new one with 'login' or contact HR.")
-            continue
-
-        # keep the chat short mid-session: rebuild from the database when it grows
-        if len(state["messages"]) > 20:
-            state["summary"], state["messages"] = build_context(LOGGED_IN_ID, client, MODEL)
-
-        state["messages"].append({"role": "user", "content": user_text})
-        save_message(LOGGED_IN_ID, "user", user_text)
-
-        answer_turn(user_text)
+        handle_message(user_text)
 
     tracing.flush()   # send any traces still waiting before the program exits
 

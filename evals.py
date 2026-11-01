@@ -125,64 +125,26 @@ def reset_memory():
     payslips.seed_payslips()
 
 
-# ---------- citations must come from this turn's tool results ----------
-
-from citations import ungrounded_citations, RETRY_MESSAGE, SAFE_REPLY
-
-TURN_SOURCES = []      # text of every tool result in the current test
-
-
 # ---------- run the agent ----------
+
+from citations import ungrounded_citations
+
 
 @observe(name="eval-test")   # one trace per test, with every Claude call and tool inside
 def run_agent(user_text, test_name=""):
-    """Run one user message through the agent, starting from the user's saved history
-    exactly like the real agent does. Returns (reply_text, tools_called, trace_id)."""
+    """Run one user message through the REAL agent (agent.handle_message), starting from the user's
+    saved history, exactly as production does. Returns (reply_text, tools_called, trace_id)."""
     role = agent.get_employee(agent.LOGGED_IN_ID)["role"]
     # trace_name = the test's name, so you can search for it in Langfuse
     with propagate_attributes(trace_name=test_name, user_id=agent.LOGGED_IN_ID,
                               session_id=RUN_ID, tags=["eval", role],
                               metadata={"test": test_name}):
         trace_id = tracing.current_trace_id()   # remembered so the pass/fail score lands on this trace
-        messages = memory.load_recent(agent.LOGGED_IN_ID)          # same loader as the real agent
-        messages.append({"role": "user", "content": user_text})
-        tools_called = []
-        citation_retry_used = False
-
-        while True:
-            response = agent.client.messages.create(
-                model=agent.MODEL,
-                max_tokens=1024,
-                system=agent.system_prompt_for(agent.LOGGED_IN_ID),   # same prompt as the real agent
-                tools=agent.tools_for(role, agent.TOOLS),   # same per-role tools as the real agent
-                messages=agent.with_cache_marker(messages),   # same caching as the real agent
-            )
-            messages.append({"role": "assistant", "content": response.content})
-
-            if response.stop_reason != "tool_use":
-                reply = " ".join(b.text for b in response.content if b.type == "text")
-                # same guardrail as the real agent
-                bad = ungrounded_citations(reply, TURN_SOURCES)
-                if bad and not citation_retry_used:
-                    citation_retry_used = True
-                    messages.append({"role": "user", "content": RETRY_MESSAGE.format(articles=", ".join(bad))})
-                    continue
-                if bad:
-                    reply = SAFE_REPLY
-                return reply, tools_called, trace_id
-
-            results = []
-            for block in response.content:
-                if block.type == "tool_use":
-                    tools_called.append(block.name)
-                    result = agent.run_tool(block.name, block.input)
-                    TURN_SOURCES.append(agent.json.dumps(result, ensure_ascii=False))
-                    results.append({
-                        "type": "tool_result",
-                        "tool_use_id": block.id,
-                        "content": agent.json.dumps(result),
-                    })
-            messages.append({"role": "user", "content": results})
+        agent.start_session(agent.LOGGED_IN_ID)  # load history + summary, fresh budget: like a real login
+        agent.SESSION_ID = RUN_ID                # keep all tests of this run in one Langfuse session
+        agent.EXTRA_TAGS = ["eval"]
+        reply = agent.handle_message(user_text)
+        return reply, list(agent.last_turn["tools_called"]), trace_id
 
 
 # ---------- setup functions ----------
@@ -578,14 +540,16 @@ TEST_CASES = [
         "reply_must_match": r"(?is)(?=.*L\.?\s?3141-3)(?=.*(below|less than|lower than|under the legal|not legal|illegal|minimum|not enough))",
     },
     {
-        # the policy now has a real paid-leave section; casual leave (12 days) must not be given as paid leave
+        # the policy has a real paid-leave section: 30 days (5 weeks), exactly the legal minimum.
+        # 1 Nov: with "25 days" the agent called it both "less than" and "more generous than" the law,
+        # and the old test (checking only "25") passed the wrong answer, so check the meaning too
         "name": "policy: paid leave comes from the paid-leave section, not casual leave",
         "user": "E001",
         "auto_confirm": False,
         "input": "How many days of paid leave do I get per year?",
         "must_call": ["search_policy"],
-        "reply_must_match": r"\b25\b",
-        "reply_must_not_match": r"(?i)\b12\b[^.]{0,40}paid",
+        "reply_must_match": r"(?i)\b30\b|5 weeks|five weeks",
+        "reply_must_not_match": r"(?i)\b12\b[^.]{0,40}paid|less than (the law|the legal)|below the legal|more generous",
     },
     {
         # real bug (1 Nov): with a labour answer in history, the follow-up was answered from memory,
@@ -640,7 +604,6 @@ def run_evals(only=None):
         reset_memory()
         agent.LOGGED_IN_ID = case["user"]
         agent.confirm_with_human = lambda tool_input, answer=case["auto_confirm"]: answer
-        TURN_SOURCES.clear()
         if "setup" in case:
             case["setup"]()
 
@@ -662,7 +625,7 @@ def run_evals(only=None):
             if n != case["expected_requests"]:
                 problems.append(f"{n} requests in database, expected {case['expected_requests']}")
         if case.get("citations_grounded"):
-            bad = ungrounded_citations(reply, TURN_SOURCES)
+            bad = ungrounded_citations(reply, agent.last_turn["sources"])
             if bad:
                 problems.append(f"cites articles no tool returned this turn: {', '.join(bad)}")
         if "check" in case and not case["check"]():
