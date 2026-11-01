@@ -58,6 +58,35 @@ CASES = [
 ]
 
 
+
+# expected article: "L1471-1|L1235-7" means either one counts as correct
+
+# held-out set (1 Nov): rules the reranker prompt was NEVER tuned on. Don't change the reranker to fix
+# misses here; if this set drops, the 50/50 on CASES was overfitting.
+HOLDOUT = [
+    ("What hours count as night work?", "en", "L3122-2"),
+    ("À partir de quelle heure le travail est-il considéré comme du travail de nuit ?", "fr", "L3122-2"),
+    ("How long can a night worker work in one shift?", "en", "L3122-6"),
+    ("Combien d'heures maximum un travailleur de nuit peut-il faire par jour ?", "fr", "L3122-6"),
+    ("Can my employer and I agree to end my contract by mutual agreement?", "en", "L1237-11"),
+    ("Peut-on mettre fin au CDI d'un commun accord avec l'employeur ?", "fr", "L1237-11"),
+    ("Does my employer have to meet me before firing me?", "en", "L1232-2"),
+    ("Mon employeur doit-il me convoquer à un entretien avant de me licencier ?", "fr", "L1232-2"),
+    ("Can I be punished for reporting bullying I witnessed at work?", "en", "L1152-2"),
+    ("Puis-je être sanctionné pour avoir témoigné d'un harcèlement moral ?", "fr", "L1152-2"),
+    ("Can I take parental leave after my maternity leave ends?", "en", "L1225-47"),
+    ("Ai-je droit à un congé parental après mon congé maternité ?", "fr", "L1225-47"),
+    ("Can I be fired while I'm off work after a workplace accident?", "en", "L1226-9"),
+    ("Peut-on me licencier pendant mon arrêt pour accident du travail ?", "fr", "L1226-9"),
+    ("Will I be paid for my unused holiday days when I leave the company?", "en", "L3141-28"),
+    ("Mes congés non pris sont-ils payés quand je quitte l'entreprise ?", "fr", "L3141-28"),
+    ("How long do I have to take my employer to court?", "en", "L1471-1"),
+    # both give 12 months: L1471-1 for any dismissal, L1235-7 for an economic dismissal
+    ("Dans quel délai puis-je contester mon licenciement devant les prud'hommes ?", "fr", "L1471-1|L1235-7"),
+    ("Can a company refuse to hire me because I'm pregnant?", "en", "L1225-1"),
+    ("Un employeur peut-il refuser de m'embaucher parce que je suis enceinte ?", "fr", "L1225-1"),
+]
+
 if __name__ == "__main__":
     texts = {}
     with open("labour_code/chunks.jsonl", encoding="utf-8") as f:
@@ -66,10 +95,10 @@ if __name__ == "__main__":
             texts.setdefault(c["num"], c["text"])   # first piece is enough to check
 
     missing = 0
-    for num in dict.fromkeys(n for _, _, n in CASES):   # each article once
+    for num in dict.fromkeys(a for _, _, n in CASES + HOLDOUT for a in n.split("|")):   # each article once
         if num not in texts:
             missing += 1
             print(f"MISSING {num}: not in the in-force chunks!\n")
         else:
             print(f"{num}: {texts[num][:300]}\n")
-    print(f"{len(CASES)} questions, {missing} expected articles missing")
+    print(f"{len(CASES)} + {len(HOLDOUT)} held-out questions, {missing} expected articles missing")

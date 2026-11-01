@@ -1,5 +1,7 @@
 # labour_code/eval_retrieval.py: recall@8 for each search method, in English and French
-from retrieval_cases import CASES
+import sys
+
+from retrieval_cases import CASES, HOLDOUT
 from search import (connect, vector_search, keyword_search, hybrid_search,
                     multi_query_search, french_search, reranked_search, rewrite_query)
 
@@ -14,6 +16,12 @@ def top_articles(results, n=TOP):
     return list(dict.fromkeys(r["num"] for r in results))[:n]
 
 
+# python eval_retrieval.py          -> the 50 tuning questions
+# python eval_retrieval.py holdout  -> the 20 held-out questions the reranker was never tuned on
+if len(sys.argv) > 1 and sys.argv[1] == "holdout":
+    CASES = HOLDOUT
+    print("HELD-OUT SET\n")
+
 with connect() as conn:
     misses = {}
     print(f"{'method':15}  {'all':>7}  {'english':>7}  {'french':>7}")
@@ -21,7 +29,7 @@ with connect() as conn:
         hits = {"en": 0, "fr": 0}
         for question, lang, expected in CASES:
             found = top_articles(search(conn, question))
-            if expected in found:
+            if any(e in found for e in expected.split("|")):   # "A|B" = either article is a correct answer
                 hits[lang] += 1
             else:
                 misses.setdefault(name, {})[question] = (expected, found)
