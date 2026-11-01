@@ -248,6 +248,14 @@ def setup_priya_labour_history():
         memory.save_message("E001", role, text)
 
 
+def setup_priya_asked_paid_leave():
+    # the first question of the real conversation (1 Nov) where the follow-up mixed in the notice period
+    memory.save_message("E001", "user", "How many days of paid leave do I earn by law?")
+    memory.save_message("E001", "assistant",
+                        "By French law (Article L3141-3), you earn 2.5 working days per month of paid leave, "
+                        "up to 30 working days per year. This is the legal minimum; your company may offer more.")
+
+
 def setup_karthik_ticket():
     # Karthik has one open ticket, with words that are easy to spot if they leak
     create_hr_ticket("E002", "Can I get a parking allowance?",
@@ -537,6 +545,18 @@ TEST_CASES = [
         "reply_must_match": r"(?i)31 December|December 31",
         "reply_must_not_match": r"(?i)usually|typically|shortly|after the month",
     },
+    {
+        # real bug (1 Nov): "take paid leave between 1 May and 31 October ... you need to give notice
+        # (30 days for employees)": the notice period is the RESIGNATION rule, not a leave rule
+        "name": "policy: leave months answer does not mix in the resignation notice period",
+        "user": "E001",
+        "auto_confirm": False,
+        "setup": setup_priya_asked_paid_leave,
+        "input": "And during which months do I take them?",
+        "reply_must_match": r"(?is)(?=.*(1 May|May 1|1er mai))(?=.*(31 October|October 31|31 octobre))",
+        "reply_must_not_match": r"(?i)\bnotice\b|préavis",
+    },
+
     # ---------- French labour law (need the Postgres container) ----------
     {
         "name": "law: paid leave entitlement cites L3141-3",
