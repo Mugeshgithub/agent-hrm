@@ -17,6 +17,7 @@ From the project folder, in two terminals:
 
 ```bash
 # 1. API (first time: pip install -r requirements.txt)
+export HRM_DB=web_demo.db      # the web demo gets its own database; your hr.db stays untouched
 python demo_data.py            # once: sample leave requests, tickets and notifications
 uvicorn server:app --reload --port 8000
 ```

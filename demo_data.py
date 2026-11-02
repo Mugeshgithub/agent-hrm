@@ -3,10 +3,12 @@
 # code paths in tools.py, so the demo obeys the same rules as the agent.
 #   python demo_data.py          -> adds demo activity if there is none yet
 #   python demo_data.py --reset  -> rebuilds hr.db from scratch first (chat history is kept)
+import os
 import sys
 from datetime import date, timedelta
 
 import db
+db.DB_PATH = os.getenv("HRM_DB", db.DB_PATH)   # same database as server.py (HRM_DB=web_demo.db keeps hr.db untouched)
 import payslips
 import hr_queries
 from memory import init_memory, init_summaries
