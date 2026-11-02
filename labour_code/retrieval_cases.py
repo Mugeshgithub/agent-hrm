@@ -87,6 +87,29 @@ HOLDOUT = [
     ("Un employeur peut-il refuser de m'embaucher parce que je suis enceinte ?", "fr", "L1225-1"),
 ]
 
+
+# situation-style questions (2 Nov): how employees really ask ("my manager says..."). The agent has to EXTRACT
+# the legal question, and its rewording can lose the key words (the real bug: "20 days of paid holiday" -> L3141-3
+# missing from the top 20). Accepted alternatives were decided BEFORE the first run.
+SITUATIONS = [
+    ("My manager says I only get 20 days of paid holiday a year. Is that legal?", "en", "L3141-3"),
+    ("Mon responsable dit que je n'ai droit qu'à 20 jours de congés payés par an. Est-ce légal ?", "fr", "L3141-3"),
+    ("My boss wants me to work 12 hours tomorrow to finish a project. Can he ask that?", "en", "L3121-18"),
+    ("Mon patron veut que je travaille 12 heures demain pour finir un projet. Il a le droit ?", "fr", "L3121-18"),
+    ("I did 6 hours of overtime last week but they were paid at the normal rate. Is that right?", "en", "L3121-36"),
+    ("J'ai fait 6 heures supplémentaires la semaine dernière mais elles sont payées au taux normal. C'est normal ?", "fr", "L3121-36"),
+    # L3142-4 gives 3 days of birth leave, but only L1225-35 (25 days of paternity leave) shows the manager is wrong
+    ("My wife is due next month and my manager says I can only take 3 days off for the birth. Is that true?", "en", "L1225-35"),
+    ("Ma femme accouche le mois prochain et mon responsable dit que je n'ai droit qu'à 3 jours. C'est vrai ?", "fr", "L1225-35"),
+    ("I'm resigning next month and I still have 8 days of holiday left. Will I lose them?", "en", "L3141-28"),
+    ("Je démissionne le mois prochain et il me reste 8 jours de congés. Est-ce que je les perds ?", "fr", "L3141-28"),
+    ("We work 7-hour shifts without any break at all. Is that allowed?", "en", "L3121-16"),
+    ("On fait des journées de 7 heures sans aucune pause. Est-ce autorisé ?", "fr", "L3121-16"),
+    # both say a dismissal needs a prior meeting: L1232-2 (the meeting), L1232-6 (letter only 2 days after it)
+    ("My manager emailed me that I'm fired from tomorrow, without any meeting. Can he do that?", "en", "L1232-2|L1232-6"),
+    ("Mon responsable m'a écrit que je suis licencié à partir de demain, sans entretien. Il peut faire ça ?", "fr", "L1232-2|L1232-6"),
+]
+
 if __name__ == "__main__":
     texts = {}
     with open("labour_code/chunks.jsonl", encoding="utf-8") as f:
@@ -95,7 +118,7 @@ if __name__ == "__main__":
             texts.setdefault(c["num"], c["text"])   # first piece is enough to check
 
     missing = 0
-    for num in dict.fromkeys(a for _, _, n in CASES + HOLDOUT for a in n.split("|")):   # each article once
+    for num in dict.fromkeys(a for _, _, n in CASES + HOLDOUT + SITUATIONS for a in n.split("|")):   # each article once
         if num not in texts:
             missing += 1
             print(f"MISSING {num}: not in the in-force chunks!\n")

@@ -11,7 +11,7 @@ sys.path.insert(0, ROOT)                      # to import agent.py from the proj
 sys.path.insert(0, os.path.join(ROOT, "labour_code"))
 
 import agent                                  # same prompt, same tools, same model as production
-from retrieval_cases import CASES, HOLDOUT
+from retrieval_cases import CASES, HOLDOUT, SITUATIONS
 
 OUT = os.path.join(ROOT, "labour_code", "agent_queries.json")
 
@@ -30,7 +30,7 @@ def agent_query(question):
 
 if __name__ == "__main__":
     saved = json.load(open(OUT, encoding="utf-8")) if os.path.exists(OUT) else {}
-    for question, lang, expected in CASES + HOLDOUT:
+    for question, lang, expected in CASES + HOLDOUT + SITUATIONS:
         if question not in saved:             # only pay for new questions
             saved[question] = agent_query(question)
             print(f"[{lang}] {question}\n      -> {saved[question]}")

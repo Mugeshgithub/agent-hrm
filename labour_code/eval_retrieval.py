@@ -1,7 +1,7 @@
 # labour_code/eval_retrieval.py: recall@8 for each search method, in English and French
 import sys
 
-from retrieval_cases import CASES, HOLDOUT
+from retrieval_cases import CASES, HOLDOUT, SITUATIONS
 from search import (connect, vector_search, keyword_search, hybrid_search,
                     multi_query_search, french_search, reranked_search, search_for_agent, rewrite_query)
 
@@ -20,12 +20,16 @@ TOP = 8   # the agent receives the top 8 articles, so measure exactly that
 TOPS = [8]
 
 # python eval_retrieval.py                          -> the 50 tuning questions, all methods, top 8
+# python eval_retrieval.py situations             -> 14 "my manager says..." questions
 # python eval_retrieval.py holdout                  -> the 20 held-out questions the reranker never saw
 # python eval_retrieval.py top=5 only=multi+rerank  -> any top-k, one method (cheaper)
 args = sys.argv[1:]
 if "holdout" in args:
     CASES = HOLDOUT
     print("HELD-OUT SET\n")
+if "situations" in args:                                   # python eval_retrieval.py situations
+    CASES = SITUATIONS
+    print("SITUATION-STYLE SET\n")
 for a in args:
     if a.startswith("top="):
         TOPS = [int(k) for k in a.split("=")[1].split(",")]   # top=3,5,8 -> measured in one pass
