@@ -3,11 +3,19 @@ import sys
 
 from retrieval_cases import CASES, HOLDOUT
 from search import (connect, vector_search, keyword_search, hybrid_search,
-                    multi_query_search, french_search, reranked_search, rewrite_query)
+                    multi_query_search, french_search, reranked_search, search_for_agent, rewrite_query)
 
 METHODS = {"vector": vector_search, "keyword": keyword_search, "hybrid": hybrid_search,
            "multi-query": multi_query_search, "french-only": french_search,
            "multi+rerank": reranked_search}
+
+# the agent's own query for each question (python labour_code/agent_queries.py): what the tool REALLY receives
+import json, os
+_AQ_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "agent_queries.json")
+if os.path.exists(_AQ_FILE):
+    AQ = json.load(open(_AQ_FILE, encoding="utf-8"))
+    METHODS["agent-query"] = lambda conn, q: reranked_search(conn, AQ[q])               # old path
+    METHODS["user+agent"] = lambda conn, q: search_for_agent(conn, q, AQ[q])            # production path
 TOP = 8   # the agent receives the top 8 articles, so measure exactly that
 TOPS = [8]
 
@@ -22,8 +30,9 @@ for a in args:
     if a.startswith("top="):
         TOPS = [int(k) for k in a.split("=")[1].split(",")]   # top=3,5,8 -> measured in one pass
         TOP = TOPS[-1]
-    if a.startswith("only="):
-        METHODS = {k: v for k, v in METHODS.items() if k == a.split("=")[1]}
+    if a.startswith("only="):                                     # only=agent-query,user+agent
+        keep = a.split("=")[1].split(",")
+        METHODS = {k: v for k, v in METHODS.items() if k in keep}
 print(f"recall@{', '.join(map(str, TOPS))}\n")
 
 
