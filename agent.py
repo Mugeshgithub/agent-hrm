@@ -352,6 +352,24 @@ def confirm_with_human(tool_input):
     return answer.strip().lower() in ("yes", "y")
 
 
+# web app: instead of asking in the terminal, the action is parked and shown as a confirmation card.
+# The web server sets confirm_with_human to return AWAITING_CONFIRMATION; when the person clicks
+# Confirm, the server runs the parked action through run_tool again with confirmation = yes.
+AWAITING_CONFIRMATION = "awaiting_confirmation"
+pending_action = {}
+CARD_SHOWN = {"awaiting_confirmation": True,
+              "message": "Nothing has been done yet. The app is showing the user a confirmation card for "
+                         "this action; tell them to review it and press Confirm."}
+
+
+def confirmed(name, tool_input, details):
+    answer = confirm_with_human(details)
+    if answer == AWAITING_CONFIRMATION:
+        pending_action.clear()
+        pending_action.update(tool=name, input=dict(tool_input), details=details)
+    return answer
+
+
 @observe()   # each tool call shows up as a step inside the trace
 def run_tool(name, tool_input):
     # defence in depth: even if a tool call gets through, the role must allow it
@@ -388,23 +406,33 @@ def run_tool(name, tool_input):
         if start < date.today():
             return {"error": f"Leave cannot start in the past. Today is {date.today()}."}
         days = count_working_days(start, end)
-        balance = emp[f"{tool_input['leave_type']}_balance"]
+        # available = saved balance minus days already waiting for approval (same rule as apply_leave),
+        # so the confirmation never shows a "balance after" that ignores pending requests
+        from hr_queries import balances
+        balance = balances(LOGGED_IN_ID)[tool_input["leave_type"]]["available"]
         # refuse BEFORE asking, so the user is never asked to confirm something impossible
         if balance - days < 0:
             return {"error": f"Not enough {tool_input['leave_type']} leave: needs {days} working days, "
-                             f"only {balance} available. Nothing was submitted and no confirmation was shown."}
+                             f"only {balance} available (pending requests included). "
+                             f"Nothing was submitted and no confirmation was shown."}
         details = {**tool_input,
                    "working_days": days,
                    "current_balance": balance,
                    "all_balances": {"casual": emp["casual_balance"], "sick": emp["sick_balance"]},
                    "balance_after_approval": balance - days}
-        if not confirm_with_human(details):
+        answer = confirmed(name, tool_input, details)
+        if answer == AWAITING_CONFIRMATION:
+            return CARD_SHOWN
+        if not answer:
             return {"submitted": False, "working_days": days,
                     "message": f"The employee chose not to submit this {days}-day request. No request exists."}
         return apply_leave(LOGGED_IN_ID, **tool_input)
 
     if name == "cancel_leave":
-        if not confirm_with_human({"cancel_request_id": tool_input["request_id"]}):
+        answer = confirmed(name, tool_input, {"cancel_request_id": tool_input["request_id"]})
+        if answer == AWAITING_CONFIRMATION:
+            return CARD_SHOWN
+        if not answer:
             return {"cancelled": False, "message": "The user chose not to cancel. The request is unchanged."}
         return cancel_leave(LOGGED_IN_ID, tool_input["request_id"])
 
@@ -415,7 +443,10 @@ def run_tool(name, tool_input):
         return get_pending_requests(LOGGED_IN_ID)
 
     if name == "decide_leave":
-        if not confirm_with_human(tool_input):
+        answer = confirmed(name, tool_input, tool_input)
+        if answer == AWAITING_CONFIRMATION:
+            return CARD_SHOWN
+        if not answer:
             return {"saved": False, "message": "The manager chose not to save this decision. Nothing changed."}
         result = decide_leave(LOGGED_IN_ID, **tool_input)
         # tell the employee, but only if the decision was actually saved
@@ -456,7 +487,10 @@ def run_tool(name, tool_input):
     # ---------- HR tickets ----------
 
     if name == "create_hr_ticket":
-        if not confirm_with_human({"send_to_HR": tool_input.get("summary", "")}):
+        answer = confirmed(name, tool_input, {"send_to_HR": tool_input.get("summary", "")})
+        if answer == AWAITING_CONFIRMATION:
+            return CARD_SHOWN
+        if not answer:
             return {"created": False, "message": "The user chose not to raise a ticket. Nothing was sent."}
         return create_hr_ticket(LOGGED_IN_ID, tool_input.get("question"), tool_input.get("summary"))
 
@@ -467,7 +501,10 @@ def run_tool(name, tool_input):
         return get_open_tickets(LOGGED_IN_ID)
 
     if name == "reply_to_ticket":
-        if not confirm_with_human(tool_input):
+        answer = confirmed(name, tool_input, tool_input)
+        if answer == AWAITING_CONFIRMATION:
+            return CARD_SHOWN
+        if not answer:
             return {"sent": False, "message": "HR chose not to send this reply. The ticket is still open."}
         result = reply_to_ticket(LOGGED_IN_ID, tool_input["ticket_id"], tool_input.get("reply"))
         # tell the employee, but only if the reply was actually saved

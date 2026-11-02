@@ -16,6 +16,25 @@ jobs:
       - run: python unit_tests.py
       - run: python payslips_tests.py
 
+  web:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+      - run: pip install fastapi==0.115.12 itsdangerous==2.2.0 httpx==0.28.1 python-dotenv==1.1.1
+      - run: python server_tests.py          # API rules: sessions, roles, audit log (no AI, no keys)
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: npm ci
+        working-directory: web
+      - run: npx tsc --noEmit
+        working-directory: web
+      - run: npm run build
+        working-directory: web
+
   evals:
     needs: unit-tests
     if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'

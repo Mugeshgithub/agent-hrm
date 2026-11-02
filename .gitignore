@@ -8,3 +8,7 @@ unit_test_hr.db
 policy_embeddings.json
 labour_code/articles.jsonl
 labour_code/chunks.jsonl
+web/node_modules/
+web/.next/
+web/tsconfig.tsbuildinfo
+web_demo.db
