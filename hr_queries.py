@@ -26,7 +26,7 @@ def init_profiles():
                 location TEXT NOT NULL,
                 start_date TEXT NOT NULL
             )""")
-        conn.executemany("INSERT OR IGNORE INTO profiles VALUES (?, ?, ?, ?, ?)", SEED_PROFILES)
+        conn.executemany("INSERT OR IGNORE INTO profiles (emp_id, title, department, location, start_date) VALUES (?, ?, ?, ?, ?)", SEED_PROFILES)
     conn.close()
 
 

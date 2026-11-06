@@ -11,6 +11,7 @@ import db
 db.DB_PATH = os.getenv("HRM_DB", db.DB_PATH)   # same database as server.py (HRM_DB=web_demo.db keeps hr.db untouched)
 import payslips
 import hr_queries
+import employees
 from memory import init_memory, init_summaries
 from notifications import init_notifications, notify_decision, notify_ticket_reply
 from tools import apply_leave, decide_leave, create_hr_ticket, reply_to_ticket
@@ -24,6 +25,7 @@ def init_all(reset=False):
     payslips.init_payslips()
     payslips.seed_payslips()
     hr_queries.init_profiles()
+    employees.init_records()
 
 
 def weekday(days_ahead):
