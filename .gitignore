@@ -1,6 +1,7 @@
 .env
 hr.db
 test_hr.db
+test_hr_w*.db
 __pycache__/
 NOTES.md
 payslip_test_hr.db

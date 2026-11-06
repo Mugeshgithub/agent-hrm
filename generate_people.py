@@ -65,7 +65,7 @@ DEPARTMENTS = {
     ]),
     "Customer Success": ("Head of Customer Success", "Lille", [
         ("Support Manager", "Lille", ["Support Specialist", "Senior Support Specialist"], 11),
-        ("Customer Success Manager, Key Accounts", "Paris", ["Customer Success Manager", "Onboarding Specialist"], 7),
+        ("Customer Success Manager, Key Accounts", "Strasbourg", ["Customer Success Manager", "Onboarding Specialist"], 7),
     ]),
     "Marketing": ("Head of Marketing", "Paris", [
         (None, "Paris", ["Marketing Manager", "Content Marketer", "Growth Marketer", "Brand Designer"], 8),
@@ -261,6 +261,11 @@ def save(co):
                              leave_history(p))
             conn.executemany("INSERT INTO payslip_lines (emp_id, month, kind, label, amount_cents) VALUES (?, ?, ?, ?, ?)",
                              payslip_lines(p))
+        # the Strasbourg office has its own public holidays (Alsace-Moselle), if the plans exist
+        if conn.execute("SELECT 1 FROM sqlite_master WHERE name = 'holiday_plans'").fetchone():
+            conn.execute("""UPDATE profiles SET holiday_plan_id =
+                                (SELECT id FROM holiday_plans WHERE name = 'Alsace-Moselle')
+                            WHERE location = 'Strasbourg'""")
     conn.close()
 
 

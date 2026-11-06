@@ -16,6 +16,7 @@ jobs:
       - run: python unit_tests.py
       - run: python payslips_tests.py
       - run: python employees_tests.py
+      - run: python leave_admin_tests.py
 
   web:
     runs-on: ubuntu-latest

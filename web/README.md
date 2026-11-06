@@ -36,6 +36,26 @@ Narmadha (HR) to see the three roles.
 The assistant panel needs the same `.env` keys as `agent.py`; the labour-law answers also need the
 Docker database running.
 
+## Holiday plans
+
+Like Keka's holiday calendars: each person is on a holiday plan (France by default, Alsace-Moselle
+for the Strasbourg office). A plan has public holidays, which are never counted as leave, and
+floating holidays, which people choose on the Holidays page (up to the plan's quota per year, approved
+by their manager). HR manages plans in Leave settings: add or change holidays, import a CSV
+(checked line by line before anything is saved), move a whole office to a plan, and create plans.
+
+## Scheduled job
+
+At the start of each year, balances are reset from the policy: up to 5 unused casual days carry over,
+sick days lapse, and everyone gets 12 casual and 6 sick days. A scheduler runs it on 1 January:
+
+```bash
+# crontab: 00:05 on 1 January (safe to run more often: each year only runs once)
+5 0 1 1 *  cd /path/to/agent-hrm && HRM_DB=web_demo.db python leave_jobs.py year-start
+```
+
+HR can see what it will do on the Leave settings page.
+
 ## How the assistant changes things
 
 When the agent wants to do something (request leave, cancel, approve, raise a ticket), it doesn't
@@ -45,6 +65,7 @@ through the same `run_tool` path, with the code's rules still checked.
 ## Tests
 
 ```bash
+python leave_admin_tests.py    # holidays, balance adjustments, the yearly reset
 python server_tests.py         # API rules: sessions, roles, audit log (no AI, no keys)
 cd web && npx tsc --noEmit && npm run build
 ```

@@ -3,7 +3,6 @@
 # Every change goes through tools.py / payslips.py, the same code the agent and the tests use.
 import os
 import secrets
-import employees    
 import threading
 from datetime import date, timedelta
 
@@ -15,11 +14,13 @@ from pydantic import BaseModel
 from starlette.middleware.sessions import SessionMiddleware
 
 import db
+import employees
 import hr_queries
+import leave_admin
 import payslips
 from demo_data import init_all
 from notifications import notify_decision, notify_ticket_reply
-from tools import (get_employee, apply_leave, cancel_leave, count_working_days, get_pending_requests,
+from tools import (get_employee, apply_leave, cancel_leave, count_working_days, holidays_of, get_pending_requests,
                    decide_leave, create_hr_ticket, get_my_tickets, reply_to_ticket, PENDING)
 
 db.DB_PATH = os.getenv("HRM_DB", "hr.db")
@@ -105,7 +106,7 @@ def home(request: Request):
         "open_tickets": sum(1 for t in get_my_tickets(emp["id"])["tickets"] if t["status"] == "open"),
         "latest_payslip": {"month": latest["month"], "net_paid_eur": latest["net_paid_eur"],
                            "gross_eur": latest["gross_eur"]} if latest and "error" not in latest else None,
-        "holidays": [h for h in hr_queries.holidays() if h >= today][:3],
+        "holidays": [h for h in sorted(d.isoformat() for d in holidays_of(emp["id"])) if h >= today][:3],
     }
     if emp["role"] == "manager":
         data["pending_approvals"] = len(get_pending_requests(emp["id"])["pending_requests"])
@@ -134,7 +135,7 @@ class LeaveIn(BaseModel):
 def leave_overview(request: Request):
     emp = me(request)
     return {"balances": hr_queries.balances(emp["id"]), "requests": hr_queries.my_requests(emp["id"]),
-            "holidays": hr_queries.holidays()}
+            "holidays": sorted(d.isoformat() for d in holidays_of(emp["id"]))}
 
 
 @app.post("/api/leave/preview")
@@ -149,7 +150,7 @@ def leave_preview(body: LeaveIn, request: Request):
         raise HTTPException(400, "Choose casual or sick leave.")
     if end < start:
         raise HTTPException(400, "The end date is before the start date.")
-    days = count_working_days(start, end)
+    days = count_working_days(start, end, holidays_of(emp["id"]))
     available = hr_queries.balances(emp["id"])[body.leave_type]["available"]
     return {"working_days": days, "available": available, "after": available - days,
             "enough": days <= available, "in_past": start < date.today()}
@@ -176,7 +177,8 @@ def calendar(start: str, end: str, request: Request):
     ids = [emp["id"]]
     if emp["role"] == "manager":
         ids += [m["id"] for m in hr_queries.team(emp["id"])]
-    return {"leave": hr_queries.leave_between(start, end, ids), "holidays": hr_queries.holidays()}
+    mine = sorted(d.isoformat() for d in holidays_of(emp["id"]))
+    return {"leave": hr_queries.leave_between(start, end, ids), "holidays": mine}
 
 
 # ---------- manager ----------
@@ -322,8 +324,10 @@ def person_profile(emp_id: str, request: Request):
     if person is None or (not person["active"] and not is_hr):
         raise HTTPException(404, "No such person.")
     reports = [{"id": r["id"], "name": r["name"], "title": r["title"]} for r in hr_queries.team(emp_id)]
+    plan = next((p for p in leave_admin.list_plans() if p["id"] == leave_admin.plan_id_of(emp_id)), None)
     if is_hr:
-        return {**person, "reports": reports, "balances": hr_queries.balances(emp_id)}
+        return {**person, "reports": reports, "balances": hr_queries.balances(emp_id),
+                "holiday_plan": {"id": plan["id"], "name": plan["name"]} if plan else None}
     # the colleague view: no contract, no balances, no pay
     public = ("id", "name", "role", "email", "title", "department", "location", "start_date",
               "manager_id", "manager_name", "active")
@@ -374,6 +378,153 @@ def edit_person(emp_id: str, body: EditIn, request: Request):
 def offboard(emp_id: str, body: OffboardIn, request: Request):
     hr = need(request, "hr")
     return fail_on_error(employees.offboard_employee(hr["id"], emp_id, body.end_date, body.reason))
+
+
+# ---------- leave administration ----------
+class HolidayIn(BaseModel):
+    day: str
+    name: str
+    kind: str = "mandatory"
+
+
+class KindIn(BaseModel):
+    kind: str
+
+
+class PlanIn(BaseModel):
+    name: str
+    description: str = ""
+    floater_quota: int = 0
+    copy_from: int | None = None
+
+
+class PlanEditIn(BaseModel):
+    name: str | None = None
+    description: str | None = None
+    floater_quota: int | None = None
+
+
+class ImportIn(BaseModel):
+    csv: str
+    dry_run: bool = True
+
+
+class AssignIn(BaseModel):
+    emp_ids: list[str] | None = None
+    location: str | None = None
+
+
+class FloaterIn(BaseModel):
+    day: str
+
+
+class AdjustIn(BaseModel):
+    leave_type: str
+    days: int
+    reason: str
+
+
+class YearIn(BaseModel):
+    year: int
+
+
+@app.get("/api/holidays")
+def my_holidays(request: Request, year: int | None = None):
+    return leave_admin.my_holidays(me(request)["id"], year)
+
+
+@app.post("/api/holidays/floater")
+def take_floater(body: FloaterIn, request: Request):
+    return fail_on_error(leave_admin.request_floater(me(request)["id"], body.day))
+
+
+@app.get("/api/hr/holiday-plans")
+def holiday_plans(request: Request):
+    need(request, "hr")
+    return leave_admin.list_plans()
+
+
+@app.post("/api/hr/holiday-plans")
+def new_holiday_plan(body: PlanIn, request: Request):
+    hr = need(request, "hr")
+    return fail_on_error(leave_admin.create_plan(hr["id"], body.name, body.description, body.floater_quota, body.copy_from))
+
+
+@app.patch("/api/hr/holiday-plans/{plan_id}")
+def edit_holiday_plan(plan_id: int, body: PlanEditIn, request: Request):
+    hr = need(request, "hr")
+    return fail_on_error(leave_admin.update_plan(hr["id"], plan_id, body.name, body.description, body.floater_quota))
+
+
+@app.delete("/api/hr/holiday-plans/{plan_id}")
+def delete_holiday_plan(plan_id: int, request: Request):
+    hr = need(request, "hr")
+    return fail_on_error(leave_admin.delete_plan(hr["id"], plan_id))
+
+
+@app.get("/api/hr/holiday-plans/{plan_id}/holidays")
+def holiday_plan_days(plan_id: int, request: Request, year: int | None = None):
+    need(request, "hr")
+    return fail_on_error(leave_admin.plan_holidays(plan_id, year))
+
+
+@app.post("/api/hr/holiday-plans/{plan_id}/holidays")
+def add_plan_holiday(plan_id: int, body: HolidayIn, request: Request):
+    hr = need(request, "hr")
+    return fail_on_error(leave_admin.add_holiday(hr["id"], plan_id, body.day, body.name, body.kind))
+
+
+@app.patch("/api/hr/holiday-plans/{plan_id}/holidays/{day}")
+def change_plan_holiday(plan_id: int, day: str, body: KindIn, request: Request):
+    hr = need(request, "hr")
+    return fail_on_error(leave_admin.change_holiday_kind(hr["id"], plan_id, day, body.kind))
+
+
+@app.delete("/api/hr/holiday-plans/{plan_id}/holidays/{day}")
+def remove_plan_holiday(plan_id: int, day: str, request: Request):
+    hr = need(request, "hr")
+    return fail_on_error(leave_admin.remove_holiday(hr["id"], plan_id, day))
+
+
+@app.post("/api/hr/holiday-plans/{plan_id}/import")
+def import_plan_holidays(plan_id: int, body: ImportIn, request: Request):
+    hr = need(request, "hr")
+    return fail_on_error(leave_admin.import_holidays(hr["id"], plan_id, body.csv, body.dry_run))
+
+
+@app.post("/api/hr/holiday-plans/{plan_id}/assign")
+def assign_holiday_plan(plan_id: int, body: AssignIn, request: Request):
+    hr = need(request, "hr")
+    return fail_on_error(leave_admin.assign_plan(hr["id"], plan_id, body.emp_ids, body.location))
+
+
+@app.get("/api/leave/history")
+def my_balance_history(request: Request):
+    return fail_on_error(leave_admin.balance_history(me(request)["id"]))
+
+
+@app.get("/api/hr/people/{emp_id}/leave-history")
+def balance_history_for_hr(emp_id: str, request: Request):
+    need(request, "hr")
+    return fail_on_error(leave_admin.balance_history(emp_id))
+
+
+@app.post("/api/hr/people/{emp_id}/balance")
+def adjust_person_balance(emp_id: str, body: AdjustIn, request: Request):
+    hr = need(request, "hr")
+    return fail_on_error(leave_admin.adjust_balance(hr["id"], emp_id, body.leave_type, body.days, body.reason))
+
+
+@app.get("/api/hr/leave/year-start")
+def year_start_preview(request: Request, year: int | None = None):
+    need(request, "hr")
+    return leave_admin.year_start_preview(year or date.today().year + 1)
+
+
+@app.post("/api/hr/leave/year-start")
+def run_year_start(body: YearIn, request: Request):
+    hr = need(request, "hr")
+    return fail_on_error(leave_admin.run_year_start(body.year, ran_by=hr["id"]))
 
 
 # ---------- assistant ----------

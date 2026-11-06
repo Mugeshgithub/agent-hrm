@@ -172,6 +172,42 @@ def people_who_have_left_lose_access_and_leave_their_team():
     assert any(p["id"] == temp and not p["active"] for p in hr.get("/api/people").json())   # HR still sees the record
 
 
+@test
+def hr_adjusts_a_balance_and_the_person_sees_why():
+    r = as_person("H001").post("/api/hr/people/E002/balance", json={"leave_type": "sick", "days": 1, "reason": "Correction"})
+    assert r.status_code == 200 and r.json()["change"] == 1, r.json()
+    line = as_person("E002").get("/api/leave/history").json()["adjustments"][0]
+    assert line["reason"] == "Correction" and line["changed_by"] == "Narmadha"
+    assert as_person("M001").post("/api/hr/people/E002/balance", json={"leave_type": "sick", "days": 1, "reason": "x"}).status_code == 403
+    assert as_person("E001").get("/api/hr/people/E002/leave-history").status_code == 403
+
+
+@test
+def holiday_plans_floaters_and_who_can_edit():
+    mine = as_person("E001").get("/api/holidays?year=2026").json()
+    assert mine["plan"]["name"] == "France" and mine["floaters"]["quota"] == 2
+    assert any(h["day"] == "2026-12-24" and h["kind"] == "floater" for h in mine["holidays"])
+    assert as_person("E001").get("/api/hr/holiday-plans").status_code == 403
+    hr = as_person("H001")
+    france = next(p for p in hr.get("/api/hr/holiday-plans").json() if p["name"] == "France")
+    r = hr.post(f"/api/hr/holiday-plans/{france['id']}/holidays", json={"day": "2026-12-28", "name": "Day off", "kind": "floater"})
+    assert r.status_code == 200, r.json()
+    r = as_person("E003").post("/api/holidays/floater", json={"day": "2026-12-28"})
+    assert r.status_code == 200, r.json()
+    r = hr.delete(f"/api/hr/holiday-plans/{france['id']}/holidays/2026-12-28")
+    assert r.status_code == 400 and "chosen" in r.json()["detail"]
+    preview = hr.post(f"/api/hr/holiday-plans/{france['id']}/import", json={"csv": "date,name\n2027-07-16,Summer day"}).json()
+    assert preview["will_add"] == 1 and preview["dry_run"]
+
+
+@test
+def year_start_cannot_run_early_from_the_web():
+    hr = as_person("H001")
+    assert hr.get("/api/hr/leave/year-start?year=2027").json()["people"] >= 6
+    r = hr.post("/api/hr/leave/year-start", json={"year": 2030})
+    assert r.status_code == 400 and "1 January 2030" in r.json()["detail"]
+
+
 if __name__ == "__main__":
     failed = 0
     for t in TESTS:

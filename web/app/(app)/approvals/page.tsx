@@ -35,7 +35,7 @@ function Request({ p }: { p: Pending }) {
   const [reason, setReason] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
-  const after = p.balances[p.leave_type as "casual" | "sick"];
+  const after = p.balances[p.leave_type as "casual" | "sick"] as Pending["balances"]["casual"] | undefined;   // undefined for floating holidays
 
   async function decide(decision: "approve" | "reject") {
     setBusy(true);
@@ -58,10 +58,12 @@ function Request({ p }: { p: Pending }) {
           </div>
         </div>
         <div className="text-sm space-y-1">
+          {after ? (
           <p><span className="text-ink-soft">{leaveLabel(p.leave_type)} balance </span><span className="font-medium">{after.balance} {after.balance === 1 ? "day" : "days"}</span>
             {after.pending > p.days
               ? <span className="text-ink-soft">; {after.available} left if all {after.pending} waiting days are approved</span>
               : <span className="text-ink-soft">; {after.balance - p.days} left after this one</span>}</p>
+          ) : <p className="text-ink-soft">A floating holiday from their holiday plan. It doesn't use their leave balance.</p>}
           {p.overlaps.length === 0 ? <p className="text-ink-soft">No one else on the team is off then.</p> : (
             <p><span className="text-wait font-medium">Also off: </span>
               {p.overlaps.map((o) => `${o.name} (${range(o.start_date, o.end_date)})`).join(", ")}</p>

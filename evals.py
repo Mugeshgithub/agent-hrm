@@ -1,7 +1,12 @@
 # evals.py
+import argparse
+import json
 import os
 import re
+import subprocess
 import sys
+import threading
+import time
 from datetime import date, datetime, timedelta
 
 import db
@@ -12,6 +17,7 @@ import tracing
 import payslips
 import employees
 import hr_queries
+import leave_admin
 from tracing import observe, propagate_attributes
 from tools import apply_leave, decide_leave, create_hr_ticket, count_working_days
 
@@ -19,7 +25,8 @@ from tools import apply_leave, decide_leave, create_hr_ticket, count_working_day
 db.DB_PATH = "test_hr.db"
 
 # one Langfuse session per eval run, so all tests from this run are grouped together
-RUN_ID = f"eval-{datetime.now():%Y%m%d-%H%M%S}"
+# (with --workers, the parent sets EVAL_RUN_ID so every worker uses the same session)
+RUN_ID = os.environ.get("EVAL_RUN_ID") or f"eval-{datetime.now():%Y%m%d-%H%M%S}"
 
 
 # ---------- dates relative to today, so tests never go out of date ----------
@@ -127,6 +134,13 @@ def reset_memory():
     payslips.seed_payslips()
     hr_queries.init_profiles()     # job details for lookup_colleague
     employees.init_records()
+    leave_admin.init_leave_admin()
+    conn = db.get_conn()
+    with conn:
+        conn.execute("DELETE FROM leave_adjustments")
+        conn.execute("DELETE FROM leave_runs")
+        conn.execute("UPDATE profiles SET holiday_plan_id = NULL")
+    conn.close()
 
 
 # ---------- run the agent ----------
@@ -231,6 +245,11 @@ def setup_karthik_ticket():
 
 # ---------- test cases ----------
 
+def setup_balance_adjusted():
+    # HR gave Emma 2 extra casual days for working the Saturday release
+    leave_admin.adjust_balance("H001", "E001", "casual", 2, "Worked on the Saturday release")
+
+
 TEST_CASES = [
     {
         "name": "counts working days correctly",
@@ -266,6 +285,25 @@ TEST_CASES = [
         "input": "Who is Clara's manager?",
         "must_call": ["lookup_colleague"],
         "reply_must_match": r"(?i)lucas",
+        "expected_requests": 0,
+    },
+    {
+        "name": "explains why the balance went up",
+        "user": "E001",
+        "auto_confirm": False,
+        "setup": setup_balance_adjusted,
+        "input": "Why did my casual leave balance go up?",
+        "must_call": ["get_balance_history"],
+        "reply_must_match": r"(?i)(?=.*saturday)(?=.*\b2\b)",
+        "expected_requests": 0,
+    },
+    {
+        "name": "lists public and floating holidays from the user's plan",
+        "user": "E001",
+        "auto_confirm": False,
+        "input": "Which public holidays do I have in December 2026, and are there any floating holidays I can take?",
+        "must_call": ["get_holidays"],
+        "reply_must_match": r"(?i)(?=.*christmas day)(?=.*christmas eve)",
         "expected_requests": 0,
     },
     {
@@ -630,9 +668,14 @@ TEST_CASES = [
 
 # ---------- runner ----------
 
-def run_evals(only=None):
+def select_indices(only=None):
+    # positions in TEST_CASES of the tests whose name contains `only` (all of them if empty)
+    return [i for i, c in enumerate(TEST_CASES) if not only or only.lower() in c["name"].lower()]
+
+
+def run_cases(cases):
+    """Run these tests one after another in THIS process. Returns (passed, ran, skipped)."""
     passed = skipped = 0
-    cases = [c for c in TEST_CASES if not only or only.lower() in c["name"].lower()]
     labour_db = labour_db_available()
     print(f"Eval run: {RUN_ID}  (tracing {'ON' if tracing.ENABLED else 'OFF'}, "
           f"labour-law database {'ON' if labour_db else 'OFF'})\n")
@@ -693,10 +736,105 @@ def run_evals(only=None):
     ran = len(cases) - skipped
     print(f"\n{passed}/{ran} passed" + (f", {skipped} skipped" if skipped else ""))
     tracing.flush()   # send all eval traces and scores before the program exits
+    return passed, ran, skipped
+
+
+def run_evals(only=None):
+    passed, ran, _ = run_cases([TEST_CASES[i] for i in select_indices(only)])
     return passed == ran
 
 
+# ---------- parallel run ----------
+# The agent keeps ONE conversation in module-level state (agent.LOGGED_IN_ID, history, last_turn),
+# so tests cannot share a process: threads would overwrite each other. Instead each worker is a
+# separate `python evals.py --worker-db ... --cases ...` process with its own database file.
+
+def run_parallel(indices, workers):
+    """Split the tests over `workers` processes, show their output prefixed [w1], [w2]...,
+    and add up the results. Returns True only if every test passed and every worker finished."""
+    workers = min(workers, len(indices))
+    # round-robin, so slow tests that sit next to each other (policy, law) land on different workers
+    groups = [indices[w::workers] for w in range(workers)]
+    env = {**os.environ, "EVAL_RUN_ID": RUN_ID, "PYTHONUNBUFFERED": "1"}
+    print(f"Eval run: {RUN_ID}  ({len(indices)} tests on {workers} workers, "
+          f"{', '.join(str(len(g)) for g in groups)} each)\n")
+
+    lock = threading.Lock()
+    results = {}     # worker number -> {"passed", "ran", "skipped"}, filled from its RESULT line
+    procs = []
+
+    def pump(n, proc):
+        for line in proc.stdout:
+            line = line.rstrip("\n")
+            if line.startswith("RESULT "):
+                results[n] = json.loads(line[len("RESULT "):])
+                continue
+            with lock:
+                print(f"[w{n}] {line}", flush=True)
+
+    readers = []
+    try:
+        for n, group in enumerate(groups, start=1):
+            worker_db = f"test_hr_w{n}.db"
+            if os.path.exists(worker_db):
+                os.remove(worker_db)     # start every worker from a clean file
+            cmd = [sys.executable, os.path.abspath(__file__),
+                   "--worker-db", worker_db, "--cases", ",".join(map(str, group))]
+            proc = subprocess.Popen(cmd, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                    text=True)
+            procs.append(proc)
+            reader = threading.Thread(target=pump, args=(n, proc))
+            reader.start()
+            readers.append(reader)
+        for proc, reader in zip(procs, readers):
+            proc.wait()
+            reader.join()
+    finally:
+        for proc in procs:                         # Ctrl+C: don't leave workers running (and paying)
+            if proc.poll() is None:
+                proc.terminate()
+        for n in range(1, len(procs) + 1):
+            if os.path.exists(f"test_hr_w{n}.db"):
+                os.remove(f"test_hr_w{n}.db")
+
+    crashed = [n for n in range(1, workers + 1) if n not in results]
+    passed = sum(r["passed"] for r in results.values())
+    ran = sum(r["ran"] for r in results.values())
+    skipped = sum(r["skipped"] for r in results.values())
+    print(f"\n{passed}/{ran} passed" + (f", {skipped} skipped" if skipped else "")
+          + f"  (all {workers} workers)")
+    if crashed:
+        print("WORKER CRASHED, results incomplete: "
+              + ", ".join(f"w{n} (exit code {procs[n - 1].returncode})" for n in crashed))
+    return passed == ran and not crashed
+
+
 if __name__ == "__main__":
-    # python evals.py          -> all tests
-    # python evals.py law      -> only tests whose name contains "law"
-    sys.exit(0 if run_evals(sys.argv[1] if len(sys.argv) > 1 else None) else 1)
+    # python evals.py                 -> all tests, one after another
+    # python evals.py law             -> only tests whose name contains "law"
+    # python evals.py --workers 4     -> all tests, split over 4 processes (filter works too)
+    parser = argparse.ArgumentParser()
+    parser.add_argument("only", nargs="?", help="only tests whose name contains this text")
+    parser.add_argument("--workers", type=int, default=1, help="number of parallel processes")
+    parser.add_argument("--worker-db", help=argparse.SUPPRESS)   # internal: used by --workers
+    parser.add_argument("--cases", help=argparse.SUPPRESS)       # internal: used by --workers
+    args = parser.parse_args()
+
+    if args.worker_db:
+        # I am a worker: my own database file, only the tests the parent gave me
+        db.DB_PATH = args.worker_db
+        passed, ran, skipped = run_cases([TEST_CASES[int(i)] for i in args.cases.split(",")])
+        print("RESULT " + json.dumps({"passed": passed, "ran": ran, "skipped": skipped}))
+        sys.exit(0 if passed == ran else 1)
+
+    if args.workers < 1:
+        parser.error("--workers must be 1 or more")
+    indices = select_indices(args.only)
+    started = time.time()
+    if args.workers == 1 or len(indices) <= 1:
+        ok = run_evals(args.only)
+    else:
+        ok = run_parallel(indices, args.workers)
+    minutes, seconds = divmod(int(time.time() - started), 60)
+    print(f"Time: {minutes}m {seconds:02d}s")
+    sys.exit(0 if ok else 1)

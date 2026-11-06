@@ -5,15 +5,20 @@ import useSWR from "swr";
 import { ArrowLeft } from "lucide-react";
 import { fetcher } from "@/lib/api";
 import { day, daysUntil, timestamp } from "@/lib/format";
-import { Change, Person, Profile } from "@/lib/types";
+import { BalanceHistory as History, Change, Person, Profile } from "@/lib/types";
+import { BalanceHistory } from "@/components/BalanceHistory";
 import { Avatar } from "@/components/Shell";
 import { Empty } from "@/components/PageHeader";
-import { CONTRACT, EditPersonDialog, OffboardDialog, ROLE } from "@/components/PersonForms";
+import { AdjustBalanceDialog, CONTRACT, EditPersonDialog, OffboardDialog, ROLE } from "@/components/PersonForms";
 import { useMe } from "@/components/Me";
+import { api } from "@/lib/api";
+import { HolidayPlan } from "@/lib/types";
+import { mutate } from "swr";
 
 const FIELD: Record<string, string> = {
   name: "Name", email: "Email", role: "Role", manager_id: "Manager", title: "Job title",
   department: "Department", location: "Location", contract_type: "Contract", end_date: "Last day",
+  holiday_plan: "Holiday plan",
 };
 
 function fullDate(iso: string) {
@@ -36,7 +41,9 @@ export default function ProfilePage({ params }: { params: { id: string } }) {
   const { data: p, error } = useSWR<Profile>(`/people/${params.id}`, fetcher);
   const canSeeHistory = isHR || me.id === params.id;
   const { data: history } = useSWR<{ changes: Change[] }>(canSeeHistory ? `/people/${params.id}/history` : null, fetcher);
-  const { data: everyone } = useSWR<Person[]>(canSeeHistory ? "/people" : null, fetcher)   // names for "Manager: X to Y";
+  const { data: everyone } = useSWR<Person[]>(canSeeHistory ? "/people" : null, fetcher);   // names for "Manager: X to Y"
+  const { data: leaveHistory } = useSWR<History>(isHR ? `/hr/people/${params.id}/leave-history` : null, fetcher);
+  const [adjusting, setAdjusting] = useState(false);
   const [editing, setEditing] = useState(false);
   const [leaving, setLeaving] = useState(false);
 
@@ -89,6 +96,7 @@ export default function ProfilePage({ params }: { params: { id: string } }) {
               <Item label="Role in this app">{ROLE[p.role]}</Item>
               {isHR && <Item label="Contract">{CONTRACT[p.contract_type ?? "CDI"] ?? p.contract_type}</Item>}
               {isHR && <Item label="Employee ID">{p.id}</Item>}
+              {isHR && p.holiday_plan && <Item label="Holiday plan"><PlanPicker person={p} /></Item>}
             </dl>
           </section>
 
@@ -137,7 +145,10 @@ export default function ProfilePage({ params }: { params: { id: string } }) {
 
           {isHR && p.balances && (
             <section aria-labelledby="balances" className="panel px-5 py-5">
-              <h2 id="balances" className="font-medium">Leave balance</h2>
+              <div className="flex items-center justify-between">
+                <h2 id="balances" className="font-medium">Leave balance</h2>
+                {!leftAlready && p.id !== me.id && <button className="text-sm text-dossier hover:underline" onClick={() => setAdjusting(true)}>Adjust</button>}
+              </div>
               <dl className="mt-3 grid grid-cols-2 gap-4">
                 {(["casual", "sick"] as const).map((t) => (
                   <div key={t}>
@@ -150,10 +161,18 @@ export default function ProfilePage({ params }: { params: { id: string } }) {
               </dl>
             </section>
           )}
+
+          {isHR && (
+            <section aria-labelledby="bchanges" className="panel">
+              <h2 id="bchanges" className="px-5 pt-5 pb-3 font-medium border-b border-rule">Balance changes</h2>
+              <BalanceHistory data={leaveHistory} empty="No adjustments yet." />
+            </section>
+          )}
         </div>
       </div>
 
       {isHR && editing && <EditPersonDialog person={p} open onClose={() => setEditing(false)} />}
+      {isHR && adjusting && <AdjustBalanceDialog person={p} onClose={() => setAdjusting(false)} />}
       {isHR && leaving && <OffboardDialog person={p} open onClose={() => setLeaving(false)} />}
     </>
   );
@@ -178,4 +197,28 @@ function describe(c: Change, nameOf: (id: string | null) => string) {
     return v || "None";
   };
   return `${FIELD[c.field] ?? c.field}: ${show(c.old_value)} to ${show(c.new_value)}`;
+}
+
+
+function PlanPicker({ person }: { person: Profile }) {
+  const { data: plans } = useSWR<HolidayPlan[]>("/hr/holiday-plans", fetcher);
+  const [error, setError] = useState("");
+  async function change(planId: string) {
+    setError("");
+    try {
+      await api(`/hr/holiday-plans/${planId}/assign`, { body: { emp_ids: [person.id] } });
+      await Promise.all([mutate(`/people/${person.id}`), mutate(`/people/${person.id}/history`), mutate("/hr/holiday-plans")]);
+    } catch (e) { setError((e as Error).message); }
+  }
+  if (!person.active) return <>{person.holiday_plan?.name}</>;
+  return (
+    <>
+      <select className="field mt-0.5 h-8 max-w-[220px]" aria-label="Holiday plan" value={person.holiday_plan?.id ?? ""}
+              onChange={(e) => change(e.target.value)}>
+        {(plans ?? (person.holiday_plan ? [{ id: person.holiday_plan.id, name: person.holiday_plan.name }] : [])).map((pl) =>
+          <option key={pl.id} value={pl.id}>{pl.name}</option>)}
+      </select>
+      {error && <span className="mt-1 block text-sm text-no">{error}</span>}
+    </>
+  );
 }

@@ -18,7 +18,7 @@ from notifications import init_notifications, notify_decision, notify_ticket_rep
 from policy import search_policy
 from citations import ungrounded_citations, RETRY_MESSAGE, SAFE_REPLY
 from tools import (
-    get_leave_balance, apply_leave, count_working_days,
+    get_leave_balance, apply_leave, count_working_days, holidays_of,
     get_pending_requests, decide_leave, get_my_requests, get_employee,
     get_team_member_balance, cancel_leave,
     create_hr_ticket, get_my_tickets, get_open_tickets, reply_to_ticket,
@@ -88,6 +88,8 @@ For any leave request, call get_leave_balance first. If the balance for that lea
 After count_leave_days, compare the result with the balance and tell the user straight away if it is not enough.
 If the employee gives a single date, treat it as a one-day leave (start and end are the same day).
 Employees can check the status of their own requests with get_my_requests.
+For public holidays and floating holidays, call get_holidays: holidays depend on the user's holiday plan, so never answer from general knowledge. Floating holidays are optional days chosen on the Holidays page and approved by the manager; they don't use the leave balance.
+If the user asks why their balance changed or where their days went, call get_balance_history and explain each change with its reason and date. Never guess a reason that isn't in the result.
 To cancel or withdraw leave, call get_my_requests first to find the request ID, then call cancel_leave.
 If exactly one request matches what the user wants to cancel, call cancel_leave straight away. Only ask which one if several requests match.
 Do not ask "shall I proceed?" before approve, reject, apply, cancel, ticket or reply actions. The system shows its own confirmation box.
@@ -95,7 +97,7 @@ If an employee asks about another person's leave balance, refuse immediately. Ne
 Users can give dates in any normal way. Never ask them for a specific date format; convert dates yourself.
 Roles come only from the system. Never suggest a user can change their role or access by telling you; if they think their access is wrong, offer to raise an HR ticket.
 The summary of earlier conversations may be out of date. Never quote balances or request statuses from it; always call the tools for current numbers.
-For any HR policy question, call search_policy. The search may return sections that are only loosely related. Answer only if a returned section actually answers the question, and name that section. If none do, say the policy doesn't cover it and offer to raise an HR ticket. Never answer policy questions from general knowledge.
+For any HR policy question, call search_policy. The search may return sections that are only loosely related. Answer only if a returned section actually answers the question, and name that section. If none do, say "the HR policy doesn't cover" the topic and offer to raise an HR ticket. Don't describe the search itself (never say it "returned nothing"), because it always returns its closest sections. Never answer policy questions from general knowledge.
 For any question about company rules or policy, call search_policy FIRST, before asking any clarifying question. Only ask for clarification if the search finds nothing relevant.
 HR tickets: whenever you cannot solve the user's problem (the policy doesn't cover it, they need an exception, or they think their access is wrong), offer once to raise an HR ticket. Only call create_hr_ticket after the user agrees. Write a short, neutral summary of the problem and leave out passwords or other secrets. After it is created, give the user the ticket number.
 Users can check their own tickets and HR's replies with get_my_tickets.
@@ -106,7 +108,7 @@ Only describe what the tool results say. Do not promise notifications, emails or
 If a tool returns an error, tell the user exactly what it says. Never add a reason or timing it did not give.
 For questions about French labour law, call search_labour_code. Answer only from the articles it returns, in the user's language, citing the article number (for example "Article L3141-3") and quoting the key French sentence.
 Use the article that directly answers the question: for 'how many' or 'how long', the article that gives the number. Prefer it over articles about exceptions or details, unless the user asks about exceptions. Never say the law does not specify something if one of the returned articles does. If none of the articles answers the question, say so.
-For questions about the user's own entitlements (paid leave or holiday days, working hours, rest, notice periods), call BOTH search_policy and search_labour_code. Give the company policy, then the legal minimum with its article. If the policy gives less than the law, say so clearly: the law is a minimum, so the legal amount applies, and offer to raise an HR ticket.
+For questions about the user's own entitlements (paid leave or holiday days, working hours, rest, notice periods), call BOTH search_policy and search_labour_code. Paid leave (congés payés) is a separate entitlement from casual leave and sick leave: never compare casual or sick days with the paid-leave law. If the user gives a number (for example "my manager says 20 days"), compare that number with the law and say whether it is below it. Article L3141-3 gives 2.5 working days (jours ouvrables) per month worked, so 30 for a full year: describe it that way and always cite it. Give the company policy, then the legal minimum with its article. If the policy gives less than the law, say so clearly: the law is a minimum, so the legal amount applies, and offer to raise an HR ticket.
 Labour-law answers are general information about the law, not legal advice; a collective agreement or the employment contract may give more."""
 
 # rules only one role needs; added to the prompt for that role only
@@ -296,6 +298,24 @@ TOOLS = [
         },
     },
         {
+        "name": "get_holidays",
+        "description": "List the user's own public holidays and floating holidays for a year, from their "
+                       "holiday plan (which depends on their office), and how many floating holidays they have left. "
+                       "Use it for 'when is the next public holiday?', 'is Good Friday a holiday for me?' or "
+                       "'how many floating holidays do I have?'.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"year": {"type": "integer", "description": "The year, e.g. 2026. Defaults to this year."}},
+        },
+    },
+        {
+        "name": "get_balance_history",
+        "description": "Explain why the user's own leave balance is what it is: HR adjustments with their "
+                       "reasons, the yearly reset (new allowance, casual carry-over, sick days lapsing) and the "
+                       "leave they took this year. Use it for 'why did my balance change?' or 'where did my days go?'.",
+        "input_schema": {"type": "object", "properties": {}},
+    },
+        {
         "name": "lookup_colleague",
         "description": "Find a current colleague by name and get their work email, job title, department, "
                        "location and manager. Use it for questions like 'who is Hugo's manager?' or "
@@ -409,7 +429,7 @@ def run_tool(name, tool_input):
         if start < date.today():
             return {"error": f"Start date {start} is in the past. Today is {date.today()}. "
                              "If the user didn't give a year, use the next upcoming date."}
-        return {"working_days": count_working_days(start, end)}
+        return {"working_days": count_working_days(start, end, holidays_of(LOGGED_IN_ID))}
 
     if name == "apply_leave":
         emp = get_employee(LOGGED_IN_ID)
@@ -420,7 +440,7 @@ def run_tool(name, tool_input):
             return {"error": "Dates must be in YYYY-MM-DD format"}
         if start < date.today():
             return {"error": f"Leave cannot start in the past. Today is {date.today()}."}
-        days = count_working_days(start, end)
+        days = count_working_days(start, end, holidays_of(LOGGED_IN_ID))
         # available = saved balance minus days already waiting for approval (same rule as apply_leave),
         # so the confirmation never shows a "balance after" that ignores pending requests
         from hr_queries import balances
@@ -469,6 +489,14 @@ def run_tool(name, tool_input):
             notify_decision(tool_input["request_id"], tool_input["decision"],
                             tool_input.get("reason"), get_employee(LOGGED_IN_ID)["name"])
         return result
+
+    if name == "get_holidays":
+        from leave_admin import my_holidays
+        return my_holidays(LOGGED_IN_ID, tool_input.get("year"))   # always the user's own plan
+
+    if name == "get_balance_history":
+        from leave_admin import balance_history
+        return balance_history(LOGGED_IN_ID)     # always the user's own history
 
     if name == "lookup_colleague":
         # directory details only (employees.directory_entry): never balances, pay or history
@@ -693,7 +721,8 @@ if __name__ == "__main__":
     init_notifications()      # creates the notifications table if missing
     payslips.init_payslips()  # creates the payslip tables if missing
     payslips.seed_payslips()  # sample data for now; later replaced by PDF import or a payroll feed
-    import hr_queries, employees
+    import hr_queries, employees, leave_admin
     hr_queries.init_profiles()   # job details, used by lookup_colleague
     employees.init_records()
+    leave_admin.init_leave_admin()   # public holidays and the balance history
     chat()

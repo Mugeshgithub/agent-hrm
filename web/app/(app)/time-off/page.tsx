@@ -3,7 +3,8 @@ import { useState } from "react";
 import useSWR, { mutate } from "swr";
 import { api, fetcher } from "@/lib/api";
 import { daysUntil, leaveLabel, range } from "@/lib/format";
-import { Balances, CalendarLeave, LeaveRequest, PENDING } from "@/lib/types";
+import { BalanceHistory as History, Balances, CalendarLeave, LeaveRequest, PENDING } from "@/lib/types";
+import { BalanceHistory } from "@/components/BalanceHistory";
 import { DayTiles, TileLegend } from "@/components/DayTiles";
 import { LeaveForm } from "@/components/LeaveForm";
 import { MonthCalendar, monthBounds } from "@/components/MonthCalendar";
@@ -15,6 +16,7 @@ type Overview = { balances: Balances; requests: LeaveRequest[]; holidays: string
 
 export default function TimeOff() {
   const { data } = useSWR<Overview>("/leave", fetcher);
+  const { data: history } = useSWR<History>("/leave/history", fetcher);
   const [month, setMonth] = useState(() => new Date());
   const { start, end } = monthBounds(month);
   const { data: cal } = useSWR<{ leave: CalendarLeave[]; holidays: string[] }>(`/calendar?start=${start}&end=${end}`, fetcher);
@@ -86,6 +88,14 @@ export default function TimeOff() {
           )}
         </section>
       </div>
+
+      <section aria-labelledby="changes" className="panel mt-6">
+        <div className="px-5 pt-4 pb-3 border-b border-rule">
+          <h2 id="changes" className="font-medium">Balance changes</h2>
+          <p className="text-sm text-ink-soft">Changes that aren't leave requests: HR corrections and the start-of-year update. {history?.rules}</p>
+        </div>
+        <BalanceHistory data={history} empty="No changes yet. Approved leave is listed in your requests above." />
+      </section>
 
       <LeaveForm open={asking} onClose={() => setAsking(false)} />
       <Dialog open={!!withdraw} onClose={() => setWithdraw(null)} title="Withdraw this request?">
