@@ -183,13 +183,21 @@ def hr_adjusts_a_balance_and_the_person_sees_why():
 
 
 @test
-def holidays_are_listed_and_only_hr_edits_them():
-    days = [h["day"] for h in as_person("E001").get("/api/holidays").json()]
-    assert "2026-11-11" in days and "2026-12-25" in days
-    assert as_person("E001").post("/api/hr/holidays", json={"day": "2026-12-24", "name": "x"}).status_code == 403
+def holiday_plans_floaters_and_who_can_edit():
+    mine = as_person("E001").get("/api/holidays?year=2026").json()
+    assert mine["plan"]["name"] == "France" and mine["floaters"]["quota"] == 2
+    assert any(h["day"] == "2026-12-24" and h["kind"] == "floater" for h in mine["holidays"])
+    assert as_person("E001").get("/api/hr/holiday-plans").status_code == 403
     hr = as_person("H001")
-    assert hr.post("/api/hr/holidays", json={"day": "2026-12-24", "name": "Christmas Eve"}).status_code == 200
-    assert hr.delete("/api/hr/holidays/2026-12-24").status_code == 200
+    france = next(p for p in hr.get("/api/hr/holiday-plans").json() if p["name"] == "France")
+    r = hr.post(f"/api/hr/holiday-plans/{france['id']}/holidays", json={"day": "2026-12-28", "name": "Day off", "kind": "floater"})
+    assert r.status_code == 200, r.json()
+    r = as_person("E003").post("/api/holidays/floater", json={"day": "2026-12-28"})
+    assert r.status_code == 200, r.json()
+    r = hr.delete(f"/api/hr/holiday-plans/{france['id']}/holidays/2026-12-28")
+    assert r.status_code == 400 and "chosen" in r.json()["detail"]
+    preview = hr.post(f"/api/hr/holiday-plans/{france['id']}/import", json={"csv": "date,name\n2027-07-16,Summer day"}).json()
+    assert preview["will_add"] == 1 and preview["dry_run"]
 
 
 @test

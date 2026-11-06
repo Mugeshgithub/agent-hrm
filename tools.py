@@ -2,9 +2,11 @@
 from datetime import date, timedelta
 from db import get_conn, init_db, ticket_number
 
-# public holidays; leave_admin.load_holidays() refills this set from the database (HR can edit them)
+# public holidays of the default plan; leave_admin.load_holidays() refills this set from the database
 HOLIDAYS = {date(2026, 11, 11), date(2026, 12, 25)}
-LEAVE_TYPES = ("casual", "sick")
+HOLIDAYS_FOR = None        # set by leave_admin: employee id -> that person's holidays (their holiday plan)
+LEAVE_TYPES = ("casual", "sick")   # leave with a balance
+FLOATER = "floater"                # a floating holiday the employee picks; counted against a yearly quota
 PENDING = "pending_manager_approval"
 
 
@@ -25,11 +27,17 @@ def get_leave_balance(employee_id):
     }
 
 
-def count_working_days(start, end):
+def holidays_of(employee_id):
+    # each person's public holidays come from their holiday plan (default plan if none)
+    return HOLIDAYS_FOR(employee_id) if HOLIDAYS_FOR and employee_id else HOLIDAYS
+
+
+def count_working_days(start, end, holidays=None):
+    holidays = HOLIDAYS if holidays is None else holidays
     days = 0
     current = start
     while current <= end:
-        if current.weekday() < 5 and current not in HOLIDAYS:
+        if current.weekday() < 5 and current not in holidays:
             days += 1
         current += timedelta(days=1)
     return days
@@ -65,7 +73,7 @@ def apply_leave(employee_id, leave_type, start_date, end_date):
                              f"covering {overlap['start_date']} to {overlap['end_date']}. "
                              f"No new request was created."}
 
-        days = count_working_days(start, end)
+        days = count_working_days(start, end, holidays_of(employee_id))
         if days == 0:
             return {"error": "No working days in that range"}
 
@@ -162,6 +170,11 @@ def decide_leave(manager_id, request_id, decision, reason=""):
                              (reason, request_id))
             return {"success": True, "request_id": request_id, "status": "rejected", "reason": reason}
 
+        if req["leave_type"] == FLOATER:   # floating holidays use a yearly quota, not a balance
+            with conn:
+                conn.execute("UPDATE leave_requests SET status = 'approved' WHERE id = ?", (request_id,))
+            return {"success": True, "request_id": request_id, "status": "approved"}
+
         # approve: deduct the balance and mark approved together, or not at all
         column = f"{req['leave_type']}_balance"  # safe: leave_type was checked when the request was created
         with conn:
@@ -210,6 +223,11 @@ def cancel_leave(employee_id, request_id):
             if date.fromisoformat(req["start_date"]) <= date.today():
                 return {"cancelled": False,
                         "message": "This leave has already started. Please contact your manager or HR."}
+            if req["leave_type"] == FLOATER:
+                with conn:
+                    conn.execute("UPDATE leave_requests SET status = 'cancelled' WHERE id = ?", (request_id,))
+                return {"cancelled": True, "days_returned": 0,
+                        "message": "Floating holiday cancelled. You can choose another one."}
             column = f"{req['leave_type']}_balance"
             with conn:  # give the days back and cancel together, or not at all
                 conn.execute("UPDATE leave_requests SET status = 'cancelled' WHERE id = ?", (request_id,))

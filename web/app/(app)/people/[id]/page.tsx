@@ -11,10 +11,14 @@ import { Avatar } from "@/components/Shell";
 import { Empty } from "@/components/PageHeader";
 import { AdjustBalanceDialog, CONTRACT, EditPersonDialog, OffboardDialog, ROLE } from "@/components/PersonForms";
 import { useMe } from "@/components/Me";
+import { api } from "@/lib/api";
+import { HolidayPlan } from "@/lib/types";
+import { mutate } from "swr";
 
 const FIELD: Record<string, string> = {
   name: "Name", email: "Email", role: "Role", manager_id: "Manager", title: "Job title",
   department: "Department", location: "Location", contract_type: "Contract", end_date: "Last day",
+  holiday_plan: "Holiday plan",
 };
 
 function fullDate(iso: string) {
@@ -92,6 +96,7 @@ export default function ProfilePage({ params }: { params: { id: string } }) {
               <Item label="Role in this app">{ROLE[p.role]}</Item>
               {isHR && <Item label="Contract">{CONTRACT[p.contract_type ?? "CDI"] ?? p.contract_type}</Item>}
               {isHR && <Item label="Employee ID">{p.id}</Item>}
+              {isHR && p.holiday_plan && <Item label="Holiday plan"><PlanPicker person={p} /></Item>}
             </dl>
           </section>
 
@@ -192,4 +197,28 @@ function describe(c: Change, nameOf: (id: string | null) => string) {
     return v || "None";
   };
   return `${FIELD[c.field] ?? c.field}: ${show(c.old_value)} to ${show(c.new_value)}`;
+}
+
+
+function PlanPicker({ person }: { person: Profile }) {
+  const { data: plans } = useSWR<HolidayPlan[]>("/hr/holiday-plans", fetcher);
+  const [error, setError] = useState("");
+  async function change(planId: string) {
+    setError("");
+    try {
+      await api(`/hr/holiday-plans/${planId}/assign`, { body: { emp_ids: [person.id] } });
+      await Promise.all([mutate(`/people/${person.id}`), mutate(`/people/${person.id}/history`), mutate("/hr/holiday-plans")]);
+    } catch (e) { setError((e as Error).message); }
+  }
+  if (!person.active) return <>{person.holiday_plan?.name}</>;
+  return (
+    <>
+      <select className="field mt-0.5 h-8 max-w-[220px]" aria-label="Holiday plan" value={person.holiday_plan?.id ?? ""}
+              onChange={(e) => change(e.target.value)}>
+        {(plans ?? (person.holiday_plan ? [{ id: person.holiday_plan.id, name: person.holiday_plan.name }] : [])).map((pl) =>
+          <option key={pl.id} value={pl.id}>{pl.name}</option>)}
+      </select>
+      {error && <span className="mt-1 block text-sm text-no">{error}</span>}
+    </>
+  );
 }

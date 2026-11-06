@@ -5,7 +5,7 @@ import { ReactNode, useEffect, useRef, useState } from "react";
 import useSWR, { mutate } from "swr";
 import {
   Bell, BookOpen, CalendarCog, CalendarDays, CheckSquare, Contact, Home, Inbox, Menu, MessageCircleQuestion,
-  MessageSquare, Receipt, ShieldCheck, Users, X,
+  MessageSquare, Receipt, ShieldCheck, Sun, Users, X,
 } from "lucide-react";
 import { api, ApiError, fetcher } from "@/lib/api";
 import { initials, readable, timestamp } from "@/lib/format";
@@ -21,6 +21,7 @@ function navFor(me: Person, pending: number, openTickets: number): { title: stri
     items: [
       { href: "/", label: "Home", icon: Home },
       { href: "/time-off", label: "Time off", icon: CalendarDays },
+      { href: "/holidays", label: "Holidays", icon: Sun },
       { href: "/payslips", label: "Payslips", icon: Receipt },
       { href: "/requests", label: "HR requests", icon: MessageSquare },
     ],

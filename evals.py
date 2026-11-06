@@ -133,6 +133,7 @@ def reset_memory():
     with conn:
         conn.execute("DELETE FROM leave_adjustments")
         conn.execute("DELETE FROM leave_runs")
+        conn.execute("UPDATE profiles SET holiday_plan_id = NULL")
     conn.close()
 
 
@@ -288,6 +289,15 @@ TEST_CASES = [
         "input": "Why did my casual leave balance go up?",
         "must_call": ["get_balance_history"],
         "reply_must_match": r"(?i)(?=.*saturday)(?=.*\b2\b)",
+        "expected_requests": 0,
+    },
+    {
+        "name": "lists public and floating holidays from the user's plan",
+        "user": "E001",
+        "auto_confirm": False,
+        "input": "Which public holidays do I have in December 2026, and are there any floating holidays I can take?",
+        "must_call": ["get_holidays"],
+        "reply_must_match": r"(?i)(?=.*christmas day)(?=.*christmas eve)",
         "expected_requests": 0,
     },
     {

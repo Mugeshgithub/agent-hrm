@@ -11,6 +11,7 @@ export type Person = {
 export type Profile = Person & {
   reports: { id: string; name: string; title: string }[];
   balances?: Balances;                               // HR only
+  holiday_plan?: { id: number; name: string } | null;  // HR only
 };
 
 export type Change = {
@@ -53,4 +54,12 @@ export type BalanceHistory = {
   balance: { casual: number; sick: number }; adjustments: Adjustment[]; rules: string;
   [taken: `approved_leave_in_${number}`]: { leave_type: string; start_date: string; end_date: string; days: number }[];
 };
-export type Holiday = { day: string; name: string; weekend: boolean };
+export type Holiday = {
+  day: string; name: string; kind: "mandatory" | "floater"; weekend: boolean; past: boolean;
+  floaters_taken?: number; my_request?: { id: number; status: string };
+};
+export type HolidayPlan = { id: number; name: string; description: string; floater_quota: number; is_default: boolean; people: number; holidays: number };
+export type MyHolidays = {
+  plan: { id: number; name: string; description: string }; year: number; years: string[]; holidays: Holiday[];
+  floaters: { quota: number; used: number; left: number };
+};

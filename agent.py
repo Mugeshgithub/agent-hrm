@@ -18,7 +18,7 @@ from notifications import init_notifications, notify_decision, notify_ticket_rep
 from policy import search_policy
 from citations import ungrounded_citations, RETRY_MESSAGE, SAFE_REPLY
 from tools import (
-    get_leave_balance, apply_leave, count_working_days,
+    get_leave_balance, apply_leave, count_working_days, holidays_of,
     get_pending_requests, decide_leave, get_my_requests, get_employee,
     get_team_member_balance, cancel_leave,
     create_hr_ticket, get_my_tickets, get_open_tickets, reply_to_ticket,
@@ -88,6 +88,7 @@ For any leave request, call get_leave_balance first. If the balance for that lea
 After count_leave_days, compare the result with the balance and tell the user straight away if it is not enough.
 If the employee gives a single date, treat it as a one-day leave (start and end are the same day).
 Employees can check the status of their own requests with get_my_requests.
+For public holidays and floating holidays, call get_holidays: holidays depend on the user's holiday plan, so never answer from general knowledge. Floating holidays are optional days chosen on the Holidays page and approved by the manager; they don't use the leave balance.
 If the user asks why their balance changed or where their days went, call get_balance_history and explain each change with its reason and date. Never guess a reason that isn't in the result.
 To cancel or withdraw leave, call get_my_requests first to find the request ID, then call cancel_leave.
 If exactly one request matches what the user wants to cancel, call cancel_leave straight away. Only ask which one if several requests match.
@@ -297,6 +298,17 @@ TOOLS = [
         },
     },
         {
+        "name": "get_holidays",
+        "description": "List the user's own public holidays and floating holidays for a year, from their "
+                       "holiday plan (which depends on their office), and how many floating holidays they have left. "
+                       "Use it for 'when is the next public holiday?', 'is Good Friday a holiday for me?' or "
+                       "'how many floating holidays do I have?'.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"year": {"type": "integer", "description": "The year, e.g. 2026. Defaults to this year."}},
+        },
+    },
+        {
         "name": "get_balance_history",
         "description": "Explain why the user's own leave balance is what it is: HR adjustments with their "
                        "reasons, the yearly reset (new allowance, casual carry-over, sick days lapsing) and the "
@@ -417,7 +429,7 @@ def run_tool(name, tool_input):
         if start < date.today():
             return {"error": f"Start date {start} is in the past. Today is {date.today()}. "
                              "If the user didn't give a year, use the next upcoming date."}
-        return {"working_days": count_working_days(start, end)}
+        return {"working_days": count_working_days(start, end, holidays_of(LOGGED_IN_ID))}
 
     if name == "apply_leave":
         emp = get_employee(LOGGED_IN_ID)
@@ -428,7 +440,7 @@ def run_tool(name, tool_input):
             return {"error": "Dates must be in YYYY-MM-DD format"}
         if start < date.today():
             return {"error": f"Leave cannot start in the past. Today is {date.today()}."}
-        days = count_working_days(start, end)
+        days = count_working_days(start, end, holidays_of(LOGGED_IN_ID))
         # available = saved balance minus days already waiting for approval (same rule as apply_leave),
         # so the confirmation never shows a "balance after" that ignores pending requests
         from hr_queries import balances
@@ -477,6 +489,10 @@ def run_tool(name, tool_input):
             notify_decision(tool_input["request_id"], tool_input["decision"],
                             tool_input.get("reason"), get_employee(LOGGED_IN_ID)["name"])
         return result
+
+    if name == "get_holidays":
+        from leave_admin import my_holidays
+        return my_holidays(LOGGED_IN_ID, tool_input.get("year"))   # always the user's own plan
 
     if name == "get_balance_history":
         from leave_admin import balance_history
