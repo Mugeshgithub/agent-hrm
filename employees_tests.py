@@ -29,7 +29,7 @@ def fresh():
     demo_data.hr_queries.init_profiles()     # the 6 original profiles again, unchanged
 
 
-NEW_HIRE = {"name": "Anu", "email": "anu@company.com", "role": "employee", "title": "QA Engineer",
+NEW_HIRE = {"name": "Anu", "email": "anu@cognivexai.eu", "role": "employee", "title": "QA Engineer",
             "department": "Engineering", "location": "Paris", "start_date": "2026-12-01", "manager_id": "M001"}
 
 
@@ -38,7 +38,7 @@ def hr_can_hire_and_it_is_logged():
     fresh()
     r = e.create_employee("H001", NEW_HIRE)
     assert r == {"success": True, "id": "E004", "name": "Anu"}, r
-    assert e.directory_entry("E004")["manager"] == "Arjun"
+    assert e.directory_entry("E004")["manager"] == "Lucas"
     log = e.history("H001", "E004")["changes"]
     assert len(log) == 1 and log[0]["new_value"] == "created"
 
@@ -52,7 +52,7 @@ def edit_logs_each_changed_field_with_the_reason():
     log = e.history("H001", "E001")["changes"]
     assert {(c["field"], c["old_value"], c["new_value"]) for c in log} == {
         ("title", "Software Engineer", "Senior Engineer"), ("location", "Paris", "Lyon")}
-    assert all(c["reason"] == "Promotion and move" and c["changed_by"] == "Lakshmi" for c in log)
+    assert all(c["reason"] == "Promotion and move" and c["changed_by"] == "Narmadha" for c in log)
 
 
 @test
@@ -69,7 +69,7 @@ def only_active_hr_can_change_records():
     fresh()
     assert "error" in e.create_employee("E001", NEW_HIRE)
     assert "error" in e.update_employee("M001", "E001", {"title": "Boss"}, "test")
-    e.offboard_employee("H001", "E003", "2026-11-01", "Left")     # Divya has left
+    e.offboard_employee("H001", "E003", "2026-11-01", "Left")     # Clara has left
     e.update_employee("H001", "E003", {}, "x")                    # (no-op, just to show she's gone)
     assert not e.is_active("E003")
 
@@ -84,8 +84,8 @@ def manager_loops_are_blocked():
 @test
 def a_failed_change_leaves_nothing_behind():
     fresh()
-    e.update_employee("H001", "E001", {"email": "karthik@company.com"}, "test")   # clash, refused
-    assert e.directory_entry("E001")["email"] == "priya@company.com"
+    e.update_employee("H001", "E001", {"email": "hugo@cognivexai.eu"}, "test")   # clash, refused
+    assert e.directory_entry("E001")["email"] == "emma@cognivexai.eu"
     assert e.history("H001", "E001")["changes"] == []
 
 

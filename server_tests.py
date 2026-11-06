@@ -37,7 +37,7 @@ def nothing_works_without_a_session():
 
 @test
 def identity_comes_from_the_session_not_the_request():
-    # Priya asks for "E002"'s payslip through her own endpoint: she still only gets her own
+    # Emma asks for "E002"'s payslip through her own endpoint: she still only gets her own
     c = as_person("E001")
     assert c.get("/api/me").json()["id"] == "E001"
     assert c.get("/api/payslips/2026-10").json()["net_paid_eur"] == "€2,195.00"
@@ -65,7 +65,7 @@ def balances_count_pending_days():
 
 @test
 def leave_request_follows_the_same_rules_as_the_agent():
-    c = as_person("E003")                       # Divya has 0 casual days
+    c = as_person("E003")                       # Clara has 0 casual days
     r = c.post("/api/leave", json={"leave_type": "casual", "start_date": "2027-03-01", "end_date": "2027-03-01"})
     assert r.status_code == 400 and "Not enough" in r.json()["detail"]
 
@@ -74,17 +74,17 @@ def leave_request_follows_the_same_rules_as_the_agent():
 def manager_decision_notifies_the_employee():
     c = as_person("M001")
     pending = c.get("/api/approvals").json()
-    karthik = next(p for p in pending if p["employee_id"] == "E002")
-    assert c.post(f"/api/approvals/{karthik['request_id']}", json={"decision": "approve"}).status_code == 200
+    hugo = next(p for p in pending if p["employee_id"] == "E002")
+    assert c.post(f"/api/approvals/{hugo['request_id']}", json={"decision": "approve"}).status_code == 200
     notes = as_person("E002").get("/api/notifications").json()
-    assert any("approved by Arjun" in n["message"] for n in notes)
+    assert any("approved by Lucas" in n["message"] for n in notes)
 
 
 @test
 def rejecting_needs_a_reason():
     c = as_person("M001")
-    divya = next(p for p in c.get("/api/approvals").json() if p["employee_id"] == "E003")
-    r = c.post(f"/api/approvals/{divya['request_id']}", json={"decision": "reject", "reason": ""})
+    clara = next(p for p in c.get("/api/approvals").json() if p["employee_id"] == "E003")
+    r = c.post(f"/api/approvals/{clara['request_id']}", json={"decision": "reject", "reason": ""})
     assert r.status_code == 400
 
 
@@ -123,7 +123,7 @@ def only_hr_can_change_records():
 @test
 def hr_hires_and_edits_and_history_shows_who():
     hr = as_person("H001")
-    r = hr.post("/api/hr/people", json={"name": "Anu", "email": "anu@company.com", "role": "employee",
+    r = hr.post("/api/hr/people", json={"name": "Anu", "email": "anu@cognivexai.eu", "role": "employee",
                                         "title": "QA Engineer", "department": "Engineering",
                                         "location": "Paris", "start_date": "2026-12-01", "manager_id": "M001"})
     assert r.status_code == 200, r.json()
@@ -131,12 +131,12 @@ def hr_hires_and_edits_and_history_shows_who():
     r = hr.patch(f"/api/hr/people/{new_id}", json={"changes": {"title": "Senior QA"}, "reason": "Offer revised"})
     assert r.status_code == 200, r.json()
     log = hr.get(f"/api/people/{new_id}/history").json()["changes"]
-    assert len(log) == 2 and all(c["changed_by"] == "Lakshmi" for c in log)
+    assert len(log) == 2 and all(c["changed_by"] == "Narmadha" for c in log)
     # a colleague sees the safe view, but not the history
-    priya = as_person("E001")
-    card = priya.get(f"/api/people/{new_id}").json()
+    emma = as_person("E001")
+    card = emma.get(f"/api/people/{new_id}").json()
     assert card["title"] == "Senior QA" and "casual_balance" not in card
-    assert priya.get(f"/api/people/{new_id}/history").status_code == 400
+    assert emma.get(f"/api/people/{new_id}/history").status_code == 400
 
 
 @test
@@ -147,7 +147,7 @@ def rule_errors_come_back_with_the_reason():
 @test
 def colleagues_see_the_safe_profile_hr_sees_more():
     card = as_person("E002").get("/api/people/E001").json()
-    assert card["manager_name"] == "Arjun" and "contract_type" not in card and "balances" not in card
+    assert card["manager_name"] == "Lucas" and "contract_type" not in card and "balances" not in card
     assert "contract_type" not in as_person("E002").get("/api/people").json()[0]
     full = as_person("H001").get("/api/people/E001").json()
     assert full["contract_type"] == "CDI" and "casual" in full["balances"]
@@ -158,7 +158,7 @@ def colleagues_see_the_safe_profile_hr_sees_more():
 @test
 def people_who_have_left_lose_access_and_leave_their_team():
     hr = as_person("H001")
-    r = hr.post("/api/hr/people", json={"name": "Temp", "email": "temp@company.com", "role": "employee",
+    r = hr.post("/api/hr/people", json={"name": "Temp", "email": "temp@cognivexai.eu", "role": "employee",
                                         "title": "Intern", "department": "Engineering", "location": "Paris",
                                         "start_date": "2025-01-06", "manager_id": "M001", "contract_type": "Internship"})
     temp = r.json()["id"]

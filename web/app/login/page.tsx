@@ -8,6 +8,9 @@ import { ErrorNote } from "@/components/PageHeader";
 
 type DemoUser = { id: string; name: string; role: string; title: string; department: string };
 
+// the six people the demo story is built around; everyone else is found by search
+const FEATURED = ["E001", "M001", "H001", "C001", "E002", "E003"];
+
 const ROLE_NOTE: Record<string, string> = {
   employee: "Requests time off, reads payslips, asks HR",
   manager: "Also approves the team's leave",
@@ -19,6 +22,7 @@ export default function Login() {
   const { data, error } = useSWR<DemoUser[]>("/demo-users", fetcher);
   const [busy, setBusy] = useState<string | null>(null);
   const [failed, setFailed] = useState("");
+  const [q, setQ] = useState("");
 
   async function choose(id: string) {
     setBusy(id);
@@ -32,15 +36,17 @@ export default function Login() {
     }
   }
 
-  const order = ["employee", "manager", "hr"];
-  const sorted = [...(data ?? [])].sort((a, b) => order.indexOf(a.role) - order.indexOf(b.role) || a.name.localeCompare(b.name));
+  const search = q.trim().toLowerCase();
+  const shown = search
+    ? (data ?? []).filter((u) => `${u.name} ${u.title} ${u.department}`.toLowerCase().includes(search)).slice(0, 8)
+    : FEATURED.map((id) => data?.find((u) => u.id === id)).filter((u): u is DemoUser => !!u);
 
   return (
     <main className="min-h-screen bg-paper px-4 py-12 sm:py-20">
       <div className="mx-auto max-w-[560px]">
         <div className="flex items-center gap-2">
-          <span aria-hidden className="grid h-8 w-8 place-items-center rounded bg-dossier text-white font-semibold">A</span>
-          <span className="text-md font-semibold">Agent HRM</span>
+          <span aria-hidden className="grid h-8 w-8 place-items-center rounded bg-dossier text-white font-semibold">C</span>
+          <span className="text-md font-semibold">CognivexAI</span>
         </div>
         <h1 className="mt-10 text-xl font-semibold tracking-[-0.01em]">Who's signing in?</h1>
         <p className="mt-2 text-ink-soft max-w-[52ch]">
@@ -48,10 +54,13 @@ export default function Login() {
           including what the assistant can access, follows the person you choose.
         </p>
 
-        <ul className="mt-8 panel divide-y divide-rule overflow-hidden">
+        <input className="field mt-8" placeholder={`Search ${data?.length ?? ""} people by name, job or team`}
+               value={q} onChange={(e) => setQ(e.target.value)} aria-label="Search people" />
+        <ul className="mt-3 panel divide-y divide-rule overflow-hidden">
           {error && <li className="p-4"><ErrorNote message="Can't reach the server. Start the API with: uvicorn server:app --port 8000" /></li>}
           {!data && !error && <li className="p-4 text-ink-soft">Loading people…</li>}
-          {sorted.map((u) => (
+          {data && shown.length === 0 && <li className="p-4 text-ink-soft">No one matches &ldquo;{q}&rdquo;.</li>}
+          {shown.map((u) => (
             <li key={u.id}>
               <button onClick={() => choose(u.id)} disabled={!!busy}
                       className="flex w-full items-center gap-3 px-4 py-3 text-left hover:bg-paper disabled:opacity-60">

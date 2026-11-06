@@ -6,12 +6,12 @@ from tools import PENDING, HOLIDAYS
 # job details for the people directory (the employees table only holds what the agent needs)
 SEED_PROFILES = [
     # id, title, department, location, start_date
-    ("C001", "Managing Director", "Leadership", "Paris", "2021-03-01"),
+    ("C001", "Chief Executive Officer", "Leadership", "Paris", "2021-03-01"),
     ("M001", "Engineering Manager", "Engineering", "Paris", "2022-01-10"),
     ("E001", "Software Engineer", "Engineering", "Paris", "2023-09-04"),
     ("E002", "Data Analyst", "Engineering", "Lyon", "2024-02-12"),
     ("E003", "Product Designer", "Engineering", "Paris", "2025-06-02"),
-    ("H001", "HR Business Partner", "People", "Paris", "2022-05-16"),
+    ("H001", "HR Manager", "People", "Paris", "2022-05-16"),
 ]
 
 

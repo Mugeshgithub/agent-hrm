@@ -25,7 +25,7 @@ from tools import (get_employee, apply_leave, cancel_leave, count_working_days, 
 db.DB_PATH = os.getenv("HRM_DB", "hr.db")
 init_all()   # creates any missing tables; never wipes data
 
-app = FastAPI(title="Agent HRM API")
+app = FastAPI(title="CognivexAI HR API")
 # a fixed secret keeps people logged in across restarts; a random one is fine for local demos
 app.add_middleware(SessionMiddleware, secret_key=os.getenv("HRM_SESSION_SECRET") or secrets.token_hex(32),
                    same_site="lax", https_only=False, max_age=60 * 60 * 12)

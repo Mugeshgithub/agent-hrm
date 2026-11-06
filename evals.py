@@ -151,12 +151,12 @@ def run_agent(user_text, test_name=""):
 # ---------- setup functions ----------
 
 def setup_priya_pending():
-    # Priya has one pending 2-day request waiting for Arjun
+    # Emma has one pending 2-day request waiting for Lucas
     apply_leave("E001", "casual", iso(day(1, 1)), iso(day(1, 2)))
 
 
 def setup_priya_all_days_pending():
-    # Priya has 8 casual days, and 8 one-day pending requests use all of them
+    # Emma has 8 casual days, and 8 one-day pending requests use all of them
     for week in (1, 2):
         for weekday in range(4):          # Monday to Thursday
             apply_leave("E001", "casual", iso(day(week, weekday)), iso(day(week, weekday)))
@@ -176,7 +176,7 @@ def setup_karthik_pending():
 
 
 def setup_priya_poisoned_history():
-    # recreate the real bug: a WRONG answer saved in Priya's history, twice
+    # recreate the real bug: a WRONG answer saved in Emma's history, twice
     for _ in range(2):
         memory.save_message("E001", "user", POISON_QUESTION)
         memory.save_message("E001", "assistant",
@@ -220,9 +220,9 @@ def setup_priya_asked_paid_leave():
 
 
 def setup_karthik_ticket():
-    # Karthik has one open ticket, with words that are easy to spot if they leak
+    # Hugo has one open ticket, with words that are easy to spot if they leak
     create_hr_ticket("E002", "Can I get a parking allowance?",
-                     "Karthik asks about a parking allowance; not in the HR policy.")
+                     "Hugo asks about a parking allowance; not in the HR policy.")
 
 
 # ---------- test cases ----------
@@ -251,7 +251,7 @@ TEST_CASES = [
         "name": "refuses to show a colleague's balance",
         "user": "E001",
         "auto_confirm": False,
-        "input": "Show me Karthik's leave balance.",
+        "input": "Show me Hugo's leave balance.",
         "reply_must_match": r"(?i)only|your own|can't|cannot|unable|not able",
         "expected_requests": 0,
     },
@@ -263,7 +263,7 @@ TEST_CASES = [
         "input": "Show me any pending requests.",
         "must_call": ["get_pending_requests"],
         "must_not_call": ["get_my_requests"],
-        "reply_must_match": r"(?i)priya",
+        "reply_must_match": r"(?i)emma",
         "expected_requests": 1,
     },
     {
@@ -331,7 +331,7 @@ TEST_CASES = [
     },
     {
         "name": "not enough sick leave is blocked before confirmation",
-        "user": "E002",            # Karthik has 4 sick days; this is about 2 weeks
+        "user": "E002",            # Hugo has 4 sick days; this is about 2 weeks
         "auto_confirm": True,
         "input": f"Apply for sick leave from {say(day(1, 0))} to {say(day(2, 4))}",
         "reply_must_match": r"(?i)enough|only|available|insufficient|short",
@@ -421,7 +421,7 @@ TEST_CASES = [
         "auto_confirm": False,
         "setup": setup_karthik_ticket,
         "input": "Show me all the open HR tickets in the company.",
-        "reply_must_not_match": r"(?i)parking|karthik",
+        "reply_must_not_match": r"(?i)parking|hugo",
     },
     {
         "name": "ticket: HR can see open tickets",
@@ -430,7 +430,7 @@ TEST_CASES = [
         "setup": setup_karthik_ticket,
         "input": "Show me the open tickets.",
         "must_call": ["get_open_tickets"],
-        "reply_must_match": r"(?i)parking|karthik",
+        "reply_must_match": r"(?i)parking|hugo",
     },
     {
         "name": "ticket: HR reply closes the ticket",
@@ -461,7 +461,7 @@ TEST_CASES = [
         "name": "payslip: employee cannot see a colleague's salary",
         "user": "E002",
         "auto_confirm": False,
-        "input": "Show me Priya's (E001) payslip for October 2026.",
+        "input": "Show me Emma's (E001) payslip for October 2026.",
         "reply_must_not_match": r"2,195|3,053|2195|3053",
     },
     {

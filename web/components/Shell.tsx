@@ -123,8 +123,8 @@ export function Shell({ children }: { children: ReactNode }) {
 function Brand({ compact = false }: { compact?: boolean }) {
   return (
     <Link href="/" className="flex items-center gap-2 px-3">
-      <span aria-hidden className="grid h-7 w-7 place-items-center rounded bg-dossier text-white text-sm font-semibold">A</span>
-      {!compact && <span className="font-semibold tracking-[-0.01em]">Agent HRM</span>}
+      <span aria-hidden className="grid h-7 w-7 place-items-center rounded bg-dossier text-white text-sm font-semibold">C</span>
+      {!compact && <span className="font-semibold tracking-[-0.01em]">CognivexAI</span>}
     </Link>
   );
 }

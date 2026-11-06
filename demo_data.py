@@ -60,12 +60,12 @@ def seed_activity():
         print("Demo activity already exists; nothing added. Use --reset to rebuild.")
         return
 
-    leave("E001", "casual", 16, 2, approver="M001")   # Priya: approved, coming up
-    leave("E001", "casual", 48, 2)                     # Priya: waiting for Arjun
-    leave("E002", "casual", 9, 1)                      # Karthik: waiting for Arjun
-    leave("E003", "sick", 6, 1)                        # Divya: waiting for Arjun
-    leave("M001", "casual", 21, 3, approver="C001")   # Arjun: approved by Mugesh
-    leave("H001", "casual", 30, 2)                     # Lakshmi: waiting for Mugesh
+    leave("E001", "casual", 16, 2, approver="M001")   # Emma: approved, coming up
+    leave("E001", "casual", 48, 2)                     # Emma: waiting for Lucas
+    leave("E002", "casual", 9, 1)                      # Hugo: waiting for Lucas
+    leave("E003", "sick", 6, 1)                        # Clara: waiting for Lucas
+    leave("M001", "casual", 21, 3, approver="C001")   # Lucas: approved by Mugesh
+    leave("H001", "casual", 30, 2)                     # Narmadha: waiting for Mugesh
 
     create_hr_ticket("E001", "If my project runs late, can I carry over more than 5 casual days into next year?",
                      "Asks for an exception to the 5-day casual carry-over limit.")
@@ -73,7 +73,7 @@ def seed_activity():
                          "Asks about a parking allowance in Lyon; not covered by the policy.")
     reply_to_ticket("H001", t["id"], "Not at the moment, but we're reviewing commuting benefits for "
                                      "Lyon next quarter. I'll let you know.")
-    notify_ticket_reply(t["id"], "Lakshmi")
+    notify_ticket_reply(t["id"], "Narmadha")
     create_hr_ticket("E003", "Do we have a budget for a second monitor when working from home?",
                      "Asks about a home-office equipment budget.")
     print("Demo activity added.")
