@@ -44,3 +44,13 @@ export type Payslip = {
 };
 
 export const PENDING = "pending_manager_approval";
+
+export type Adjustment = {
+  leave_type: "casual" | "sick"; days: number; kind: "manual" | "year_start" | "lapse";
+  reason: string; changed_at: string; changed_by: string;
+};
+export type BalanceHistory = {
+  balance: { casual: number; sick: number }; adjustments: Adjustment[]; rules: string;
+  [taken: `approved_leave_in_${number}`]: { leave_type: string; start_date: string; end_date: string; days: number }[];
+};
+export type Holiday = { day: string; name: string; weekend: boolean };

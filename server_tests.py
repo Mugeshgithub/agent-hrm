@@ -172,6 +172,34 @@ def people_who_have_left_lose_access_and_leave_their_team():
     assert any(p["id"] == temp and not p["active"] for p in hr.get("/api/people").json())   # HR still sees the record
 
 
+@test
+def hr_adjusts_a_balance_and_the_person_sees_why():
+    r = as_person("H001").post("/api/hr/people/E002/balance", json={"leave_type": "sick", "days": 1, "reason": "Correction"})
+    assert r.status_code == 200 and r.json()["change"] == 1, r.json()
+    line = as_person("E002").get("/api/leave/history").json()["adjustments"][0]
+    assert line["reason"] == "Correction" and line["changed_by"] == "Narmadha"
+    assert as_person("M001").post("/api/hr/people/E002/balance", json={"leave_type": "sick", "days": 1, "reason": "x"}).status_code == 403
+    assert as_person("E001").get("/api/hr/people/E002/leave-history").status_code == 403
+
+
+@test
+def holidays_are_listed_and_only_hr_edits_them():
+    days = [h["day"] for h in as_person("E001").get("/api/holidays").json()]
+    assert "2026-11-11" in days and "2026-12-25" in days
+    assert as_person("E001").post("/api/hr/holidays", json={"day": "2026-12-24", "name": "x"}).status_code == 403
+    hr = as_person("H001")
+    assert hr.post("/api/hr/holidays", json={"day": "2026-12-24", "name": "Christmas Eve"}).status_code == 200
+    assert hr.delete("/api/hr/holidays/2026-12-24").status_code == 200
+
+
+@test
+def year_start_cannot_run_early_from_the_web():
+    hr = as_person("H001")
+    assert hr.get("/api/hr/leave/year-start?year=2027").json()["people"] >= 6
+    r = hr.post("/api/hr/leave/year-start", json={"year": 2030})
+    assert r.status_code == 400 and "1 January 2030" in r.json()["detail"]
+
+
 if __name__ == "__main__":
     failed = 0
     for t in TESTS:

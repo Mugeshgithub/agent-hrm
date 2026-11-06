@@ -227,3 +227,58 @@ export function OffboardDialog({ person, open, onClose }: { person: Profile; ope
     </Dialog>
   );
 }
+
+
+export function AdjustBalanceDialog({ person, onClose }: { person: Profile; onClose: () => void }) {
+  const { mutate } = useSWRConfig();
+  const [leaveType, setLeaveType] = useState<"casual" | "sick">("casual");
+  const [direction, setDirection] = useState<"add" | "remove">("add");
+  const [days, setDays] = useState("1");
+  const [reason, setReason] = useState("");
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+  const current = person.balances?.[leaveType].balance ?? 0;
+  const n = Math.max(0, Math.floor(Number(days) || 0));
+  const change = direction === "add" ? n : -n;
+
+  async function submit(e: FormEvent) {
+    e.preventDefault();
+    setBusy(true);
+    setError("");
+    try {
+      await api(`/hr/people/${person.id}/balance`, { body: { leave_type: leaveType, days: change, reason } });
+      await Promise.all([mutate(`/people/${person.id}`), mutate(`/hr/people/${person.id}/leave-history`), mutate("/people")]);
+      onClose();
+    } catch (err) { setError((err as Error).message); }
+    finally { setBusy(false); }
+  }
+
+  return (
+    <Dialog open onClose={onClose} title={`Adjust ${person.name}'s balance`}>
+      <form onSubmit={submit} className="space-y-4">
+        <div className="grid gap-4 sm:grid-cols-3">
+          <Field label="Leave type">
+            <select className="field" value={leaveType} onChange={(e) => setLeaveType(e.target.value as "casual" | "sick")}>
+              <option value="casual">Casual</option><option value="sick">Sick</option>
+            </select>
+          </Field>
+          <Field label="Change">
+            <select className="field" value={direction} onChange={(e) => setDirection(e.target.value as "add" | "remove")}>
+              <option value="add">Add days</option><option value="remove">Remove days</option>
+            </select>
+          </Field>
+          <Field label="Days"><input className="field" type="number" min={1} max={30} required value={days} onChange={(e) => setDays(e.target.value)} /></Field>
+        </div>
+        <p className="text-sm">Balance goes from <span className="font-medium">{current}</span> to <span className="font-medium">{current + change}</span> {leaveType} days.</p>
+        <Field label="Reason" hint={`${person.name} sees this in their balance history.`}>
+          <input className="field" required value={reason} onChange={(e) => setReason(e.target.value)} placeholder="For example: worked on a public holiday" />
+        </Field>
+        {error && <ErrorNote message={error} />}
+        <div className="flex justify-end gap-2">
+          <button type="button" className="btn-quiet" onClick={onClose}>Cancel</button>
+          <button className="btn-primary" disabled={busy || n === 0}>{busy ? "Saving…" : "Save adjustment"}</button>
+        </div>
+      </form>
+    </Dialog>
+  );
+}

@@ -12,6 +12,7 @@ import tracing
 import payslips
 import employees
 import hr_queries
+import leave_admin
 from tracing import observe, propagate_attributes
 from tools import apply_leave, decide_leave, create_hr_ticket, count_working_days
 
@@ -127,6 +128,12 @@ def reset_memory():
     payslips.seed_payslips()
     hr_queries.init_profiles()     # job details for lookup_colleague
     employees.init_records()
+    leave_admin.init_leave_admin()
+    conn = db.get_conn()
+    with conn:
+        conn.execute("DELETE FROM leave_adjustments")
+        conn.execute("DELETE FROM leave_runs")
+    conn.close()
 
 
 # ---------- run the agent ----------
@@ -231,6 +238,11 @@ def setup_karthik_ticket():
 
 # ---------- test cases ----------
 
+def setup_balance_adjusted():
+    # HR gave Emma 2 extra casual days for working the Saturday release
+    leave_admin.adjust_balance("H001", "E001", "casual", 2, "Worked on the Saturday release")
+
+
 TEST_CASES = [
     {
         "name": "counts working days correctly",
@@ -266,6 +278,16 @@ TEST_CASES = [
         "input": "Who is Clara's manager?",
         "must_call": ["lookup_colleague"],
         "reply_must_match": r"(?i)lucas",
+        "expected_requests": 0,
+    },
+    {
+        "name": "explains why the balance went up",
+        "user": "E001",
+        "auto_confirm": False,
+        "setup": setup_balance_adjusted,
+        "input": "Why did my casual leave balance go up?",
+        "must_call": ["get_balance_history"],
+        "reply_must_match": r"(?i)(?=.*saturday)(?=.*\b2\b)",
         "expected_requests": 0,
     },
     {

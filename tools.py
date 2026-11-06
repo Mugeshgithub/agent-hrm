@@ -2,7 +2,8 @@
 from datetime import date, timedelta
 from db import get_conn, init_db, ticket_number
 
-HOLIDAYS = {date(2026, 11, 8), date(2026, 12, 25)}  # sample public holidays
+# public holidays; leave_admin.load_holidays() refills this set from the database (HR can edit them)
+HOLIDAYS = {date(2026, 11, 11), date(2026, 12, 25)}
 LEAVE_TYPES = ("casual", "sick")
 PENDING = "pending_manager_approval"
 

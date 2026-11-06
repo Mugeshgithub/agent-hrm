@@ -88,6 +88,7 @@ For any leave request, call get_leave_balance first. If the balance for that lea
 After count_leave_days, compare the result with the balance and tell the user straight away if it is not enough.
 If the employee gives a single date, treat it as a one-day leave (start and end are the same day).
 Employees can check the status of their own requests with get_my_requests.
+If the user asks why their balance changed or where their days went, call get_balance_history and explain each change with its reason and date. Never guess a reason that isn't in the result.
 To cancel or withdraw leave, call get_my_requests first to find the request ID, then call cancel_leave.
 If exactly one request matches what the user wants to cancel, call cancel_leave straight away. Only ask which one if several requests match.
 Do not ask "shall I proceed?" before approve, reject, apply, cancel, ticket or reply actions. The system shows its own confirmation box.
@@ -296,6 +297,13 @@ TOOLS = [
         },
     },
         {
+        "name": "get_balance_history",
+        "description": "Explain why the user's own leave balance is what it is: HR adjustments with their "
+                       "reasons, the yearly reset (new allowance, casual carry-over, sick days lapsing) and the "
+                       "leave they took this year. Use it for 'why did my balance change?' or 'where did my days go?'.",
+        "input_schema": {"type": "object", "properties": {}},
+    },
+        {
         "name": "lookup_colleague",
         "description": "Find a current colleague by name and get their work email, job title, department, "
                        "location and manager. Use it for questions like 'who is Hugo's manager?' or "
@@ -469,6 +477,10 @@ def run_tool(name, tool_input):
             notify_decision(tool_input["request_id"], tool_input["decision"],
                             tool_input.get("reason"), get_employee(LOGGED_IN_ID)["name"])
         return result
+
+    if name == "get_balance_history":
+        from leave_admin import balance_history
+        return balance_history(LOGGED_IN_ID)     # always the user's own history
 
     if name == "lookup_colleague":
         # directory details only (employees.directory_entry): never balances, pay or history
@@ -693,7 +705,8 @@ if __name__ == "__main__":
     init_notifications()      # creates the notifications table if missing
     payslips.init_payslips()  # creates the payslip tables if missing
     payslips.seed_payslips()  # sample data for now; later replaced by PDF import or a payroll feed
-    import hr_queries, employees
+    import hr_queries, employees, leave_admin
     hr_queries.init_profiles()   # job details, used by lookup_colleague
     employees.init_records()
+    leave_admin.init_leave_admin()   # public holidays and the balance history
     chat()

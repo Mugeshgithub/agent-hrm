@@ -5,10 +5,11 @@ import useSWR from "swr";
 import { ArrowLeft } from "lucide-react";
 import { fetcher } from "@/lib/api";
 import { day, daysUntil, timestamp } from "@/lib/format";
-import { Change, Person, Profile } from "@/lib/types";
+import { BalanceHistory as History, Change, Person, Profile } from "@/lib/types";
+import { BalanceHistory } from "@/components/BalanceHistory";
 import { Avatar } from "@/components/Shell";
 import { Empty } from "@/components/PageHeader";
-import { CONTRACT, EditPersonDialog, OffboardDialog, ROLE } from "@/components/PersonForms";
+import { AdjustBalanceDialog, CONTRACT, EditPersonDialog, OffboardDialog, ROLE } from "@/components/PersonForms";
 import { useMe } from "@/components/Me";
 
 const FIELD: Record<string, string> = {
@@ -36,7 +37,9 @@ export default function ProfilePage({ params }: { params: { id: string } }) {
   const { data: p, error } = useSWR<Profile>(`/people/${params.id}`, fetcher);
   const canSeeHistory = isHR || me.id === params.id;
   const { data: history } = useSWR<{ changes: Change[] }>(canSeeHistory ? `/people/${params.id}/history` : null, fetcher);
-  const { data: everyone } = useSWR<Person[]>(canSeeHistory ? "/people" : null, fetcher)   // names for "Manager: X to Y";
+  const { data: everyone } = useSWR<Person[]>(canSeeHistory ? "/people" : null, fetcher);   // names for "Manager: X to Y"
+  const { data: leaveHistory } = useSWR<History>(isHR ? `/hr/people/${params.id}/leave-history` : null, fetcher);
+  const [adjusting, setAdjusting] = useState(false);
   const [editing, setEditing] = useState(false);
   const [leaving, setLeaving] = useState(false);
 
@@ -137,7 +140,10 @@ export default function ProfilePage({ params }: { params: { id: string } }) {
 
           {isHR && p.balances && (
             <section aria-labelledby="balances" className="panel px-5 py-5">
-              <h2 id="balances" className="font-medium">Leave balance</h2>
+              <div className="flex items-center justify-between">
+                <h2 id="balances" className="font-medium">Leave balance</h2>
+                {!leftAlready && p.id !== me.id && <button className="text-sm text-dossier hover:underline" onClick={() => setAdjusting(true)}>Adjust</button>}
+              </div>
               <dl className="mt-3 grid grid-cols-2 gap-4">
                 {(["casual", "sick"] as const).map((t) => (
                   <div key={t}>
@@ -150,10 +156,18 @@ export default function ProfilePage({ params }: { params: { id: string } }) {
               </dl>
             </section>
           )}
+
+          {isHR && (
+            <section aria-labelledby="bchanges" className="panel">
+              <h2 id="bchanges" className="px-5 pt-5 pb-3 font-medium border-b border-rule">Balance changes</h2>
+              <BalanceHistory data={leaveHistory} empty="No adjustments yet." />
+            </section>
+          )}
         </div>
       </div>
 
       {isHR && editing && <EditPersonDialog person={p} open onClose={() => setEditing(false)} />}
+      {isHR && adjusting && <AdjustBalanceDialog person={p} onClose={() => setAdjusting(false)} />}
       {isHR && leaving && <OffboardDialog person={p} open onClose={() => setLeaving(false)} />}
     </>
   );

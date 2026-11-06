@@ -3,7 +3,6 @@
 # Every change goes through tools.py / payslips.py, the same code the agent and the tests use.
 import os
 import secrets
-import employees    
 import threading
 from datetime import date, timedelta
 
@@ -15,7 +14,9 @@ from pydantic import BaseModel
 from starlette.middleware.sessions import SessionMiddleware
 
 import db
+import employees
 import hr_queries
+import leave_admin
 import payslips
 from demo_data import init_all
 from notifications import notify_decision, notify_ticket_reply
@@ -374,6 +375,69 @@ def edit_person(emp_id: str, body: EditIn, request: Request):
 def offboard(emp_id: str, body: OffboardIn, request: Request):
     hr = need(request, "hr")
     return fail_on_error(employees.offboard_employee(hr["id"], emp_id, body.end_date, body.reason))
+
+
+# ---------- leave administration ----------
+class HolidayIn(BaseModel):
+    day: str
+    name: str
+
+
+class AdjustIn(BaseModel):
+    leave_type: str
+    days: int
+    reason: str
+
+
+class YearIn(BaseModel):
+    year: int
+
+
+@app.get("/api/holidays")
+def public_holidays(request: Request):
+    me(request)
+    return leave_admin.list_holidays()
+
+
+@app.post("/api/hr/holidays")
+def add_public_holiday(body: HolidayIn, request: Request):
+    hr = need(request, "hr")
+    return fail_on_error(leave_admin.add_holiday(hr["id"], body.day, body.name))
+
+
+@app.delete("/api/hr/holidays/{day}")
+def remove_public_holiday(day: str, request: Request):
+    hr = need(request, "hr")
+    return fail_on_error(leave_admin.remove_holiday(hr["id"], day))
+
+
+@app.get("/api/leave/history")
+def my_balance_history(request: Request):
+    return fail_on_error(leave_admin.balance_history(me(request)["id"]))
+
+
+@app.get("/api/hr/people/{emp_id}/leave-history")
+def balance_history_for_hr(emp_id: str, request: Request):
+    need(request, "hr")
+    return fail_on_error(leave_admin.balance_history(emp_id))
+
+
+@app.post("/api/hr/people/{emp_id}/balance")
+def adjust_person_balance(emp_id: str, body: AdjustIn, request: Request):
+    hr = need(request, "hr")
+    return fail_on_error(leave_admin.adjust_balance(hr["id"], emp_id, body.leave_type, body.days, body.reason))
+
+
+@app.get("/api/hr/leave/year-start")
+def year_start_preview(request: Request, year: int | None = None):
+    need(request, "hr")
+    return leave_admin.year_start_preview(year or date.today().year + 1)
+
+
+@app.post("/api/hr/leave/year-start")
+def run_year_start(body: YearIn, request: Request):
+    hr = need(request, "hr")
+    return fail_on_error(leave_admin.run_year_start(body.year, ran_by=hr["id"]))
 
 
 # ---------- assistant ----------
