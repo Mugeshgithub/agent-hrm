@@ -15,6 +15,7 @@ jobs:
           python-version: "3.13"
       - run: python unit_tests.py
       - run: python payslips_tests.py
+      - run: python employees_tests.py
 
   web:
     runs-on: ubuntu-latest

@@ -6,12 +6,12 @@ DB_PATH = "hr.db"
 # starting data
 SEED_EMPLOYEES = [
     # id, name, role, manager_id, email, casual, sick
-    ("C001", "Mugesh",  "manager",  None,   "mugesh@company.com",  12, 6),
-    ("M001", "Arjun",   "manager",  "C001", "arjun@company.com",   10, 6),
-    ("E001", "Priya",   "employee", "M001", "priya@company.com",    8, 5),
-    ("E002", "Karthik", "employee", "M001", "karthik@company.com",  2, 4),
-    ("E003", "Divya",   "employee", "M001", "divya@company.com",    0, 1),
-    ("H001", "Lakshmi", "hr",       "C001", "lakshmi@company.com", 10, 6),   # NEW: the HR person
+    ("C001", "Mugesh",  "manager",  None,   "mugesh@cognivexai.eu",  12, 6),
+    ("M001", "Lucas",   "manager",  "C001", "lucas@cognivexai.eu",   10, 6),
+    ("E001", "Emma",   "employee", "M001", "emma@cognivexai.eu",    8, 5),
+    ("E002", "Hugo", "employee", "M001", "hugo@cognivexai.eu",  2, 4),
+    ("E003", "Clara",   "employee", "M001", "clara@cognivexai.eu",    0, 1),
+    ("H001", "Narmadha", "hr",       "C001", "narmadha@cognivexai.eu", 10, 6),   # NEW: the HR person
 ]
 
 

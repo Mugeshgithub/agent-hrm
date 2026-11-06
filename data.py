@@ -2,31 +2,31 @@
 
 employees = {
     "M001": {
-        "name": "Arjun",
+        "name": "Lucas",
         "role": "manager",
         "manager_id": None,
-        "email": "arjun@company.com",
+        "email": "lucas@cognivexai.eu",
         "leave_balance": {"casual": 10, "sick": 6},
     },
     "E001": {
-        "name": "Priya",
+        "name": "Emma",
         "role": "employee",
         "manager_id": "M001",
-        "email": "priya@company.com",
+        "email": "emma@cognivexai.eu",
         "leave_balance": {"casual": 8, "sick": 5},
     },
     "E002": {
-        "name": "Karthik",
+        "name": "Hugo",
         "role": "employee",
         "manager_id": "M001",
-        "email": "karthik@company.com",
+        "email": "hugo@cognivexai.eu",
         "leave_balance": {"casual": 2, "sick": 4},
     },
     "E003": {
-        "name": "Divya",
+        "name": "Clara",
         "role": "employee",
         "manager_id": "M001",
-        "email": "divya@company.com",
+        "email": "clara@cognivexai.eu",
         "leave_balance": {"casual": 0, "sick": 1},
     },
 }

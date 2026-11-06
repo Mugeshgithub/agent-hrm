@@ -6,12 +6,12 @@ from tools import PENDING, HOLIDAYS
 # job details for the people directory (the employees table only holds what the agent needs)
 SEED_PROFILES = [
     # id, title, department, location, start_date
-    ("C001", "Managing Director", "Leadership", "Paris", "2021-03-01"),
+    ("C001", "Chief Executive Officer", "Leadership", "Paris", "2021-03-01"),
     ("M001", "Engineering Manager", "Engineering", "Paris", "2022-01-10"),
     ("E001", "Software Engineer", "Engineering", "Paris", "2023-09-04"),
     ("E002", "Data Analyst", "Engineering", "Lyon", "2024-02-12"),
     ("E003", "Product Designer", "Engineering", "Paris", "2025-06-02"),
-    ("H001", "HR Business Partner", "People", "Paris", "2022-05-16"),
+    ("H001", "HR Manager", "People", "Paris", "2022-05-16"),
 ]
 
 
@@ -26,7 +26,7 @@ def init_profiles():
                 location TEXT NOT NULL,
                 start_date TEXT NOT NULL
             )""")
-        conn.executemany("INSERT OR IGNORE INTO profiles VALUES (?, ?, ?, ?, ?)", SEED_PROFILES)
+        conn.executemany("INSERT OR IGNORE INTO profiles (emp_id, title, department, location, start_date) VALUES (?, ?, ?, ?, ?)", SEED_PROFILES)
     conn.close()
 
 
@@ -38,7 +38,8 @@ def _rows(sql, params=()):
 
 
 PERSON = """SELECT e.id, e.name, e.role, e.email, e.manager_id, m.name AS manager_name,
-                   p.title, p.department, p.location, p.start_date
+                   p.title, p.department, p.location, p.start_date, p.contract_type, p.end_date,
+                   (p.end_date IS NULL OR p.end_date >= date('now', 'localtime')) AS active
             FROM employees e
             LEFT JOIN profiles p ON p.emp_id = e.id
             LEFT JOIN employees m ON m.id = e.manager_id"""
@@ -79,7 +80,9 @@ def my_requests(emp_id):
 
 
 def team(manager_id):
-    members = _rows(PERSON + " WHERE e.manager_id = ? ORDER BY e.name", (manager_id,))
+    # people who have left (end date passed) are no longer on the team
+    members = _rows(PERSON + " WHERE e.manager_id = ? AND (p.end_date IS NULL OR p.end_date >= date('now', 'localtime'))"
+                             " ORDER BY e.name", (manager_id,))
     for m in members:
         m["balances"] = balances(m["id"])
     return members

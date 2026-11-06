@@ -19,6 +19,7 @@ From the project folder, in two terminals:
 # 1. API (first time: pip install -r requirements.txt)
 export HRM_DB=web_demo.db      # the web demo gets its own database; your hr.db stays untouched
 python demo_data.py            # once: sample leave requests, tickets and notifications
+python generate_people.py      # once: 150 more made-up people, so it feels like a real company
 uvicorn server:app --reload --port 8000
 ```
 
@@ -28,8 +29,8 @@ cd web
 npm run dev
 ```
 
-Open http://localhost:3000 and choose a person. Try Priya (employee), Arjun (manager) and
-Lakshmi (HR) to see the three roles.
+Open http://localhost:3000 and choose a person. Try Emma (employee), Lucas (manager) and
+Narmadha (HR) to see the three roles.
 
 `python demo_data.py --reset` rebuilds `hr.db` from scratch (chat history is kept).
 The assistant panel needs the same `.env` keys as `agent.py`; the labour-law answers also need the

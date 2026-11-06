@@ -45,7 +45,7 @@ def past_dates_are_blocked():
 @test
 def zero_balance_is_blocked():
     mon = next_monday()
-    assert "error" in apply_leave("E003", "casual", d(mon), d(mon))   # Divya has 0 casual
+    assert "error" in apply_leave("E003", "casual", d(mon), d(mon))   # Clara has 0 casual
 
 
 @test
@@ -59,7 +59,7 @@ def duplicate_request_is_blocked():
 def pending_days_count_against_balance():
     mon = next_monday()
     tue, wed = mon + timedelta(days=1), mon + timedelta(days=2)
-    assert apply_leave("E002", "casual", d(mon), d(mon)).get("success")   # Karthik has 2 casual
+    assert apply_leave("E002", "casual", d(mon), d(mon)).get("success")   # Hugo has 2 casual
     assert apply_leave("E002", "casual", d(tue), d(tue)).get("success")
     assert "error" in apply_leave("E002", "casual", d(wed), d(wed))      # both already pending
 
@@ -79,7 +79,7 @@ def approve_deducts_once_and_cancel_returns_days():
 def only_the_right_manager_can_decide():
     mon = next_monday()
     rid = apply_leave("E001", "casual", d(mon), d(mon))["request"]["id"]
-    assert "error" in decide_leave("C001", rid, "approve")   # Mugesh is not Priya's manager
+    assert "error" in decide_leave("C001", rid, "approve")   # Mugesh is not Emma's manager
     assert "error" in decide_leave("E002", rid, "approve")   # an employee can't approve
     assert "error" in decide_leave("M001", rid, "reject")    # a rejection needs a reason
 
@@ -118,17 +118,17 @@ def empty_ticket_is_rejected():
 
 @test
 def employees_only_see_their_own_tickets():
-    tools.create_hr_ticket("E001", "Priya's question", "Priya's summary")
-    tools.create_hr_ticket("E002", "Karthik's question", "Karthik's summary")
-    karthik = tools.get_my_tickets("E002")["tickets"]
-    assert len(karthik) == 1
-    assert "Priya" not in str(karthik)
+    tools.create_hr_ticket("E001", "Emma's question", "Emma's summary")
+    tools.create_hr_ticket("E002", "Hugo's question", "Hugo's summary")
+    hugo = tools.get_my_tickets("E002")["tickets"]
+    assert len(hugo) == 1
+    assert "Emma" not in str(hugo)
 
 
 @test
 def only_hr_can_see_open_tickets():
     tools.create_hr_ticket("E001", "A question", "A summary")
-    assert len(tools.get_open_tickets("H001")["tickets"]) == 1   # Lakshmi (HR) can
+    assert len(tools.get_open_tickets("H001")["tickets"]) == 1   # Narmadha (HR) can
     assert "error" in tools.get_open_tickets("E001")             # an employee can't
     assert "error" in tools.get_open_tickets("M001")             # a manager can't either
 
@@ -151,18 +151,25 @@ def get_open_tickets_count():
 # ---------- NEW: tools per role ----------
 
 def fake_tools():
-    # the same 16 tool names the agent uses; payslip tools have an employee_id field
+    # the same 18 tool names the agent uses; payslip tools have an employee_id field
     names = ["get_leave_balance", "get_my_requests", "count_leave_days", "apply_leave",
              "cancel_leave", "search_policy", "create_hr_ticket", "get_my_tickets",
              "get_payslip", "compare_payslips", "get_pay_summary",
              "get_pending_requests", "get_team_member_balance", "decide_leave",
-             "get_open_tickets", "reply_to_ticket","search_labour_code"]
+             "get_open_tickets", "reply_to_ticket", "search_labour_code", "lookup_colleague"]
     tools = [{"name": n, "description": n, "input_schema": {"type": "object", "properties": {}}}
              for n in names]
     for t in tools:
         if t["name"] in ("get_payslip", "compare_payslips", "get_pay_summary"):
             t["input_schema"]["properties"]["employee_id"] = {"type": "string"}
     return tools
+
+
+@test
+def fake_tool_list_matches_the_agent():
+    import re
+    real = set(re.findall(r'"name": "(\w+)",\n\s+"description"', open("agent.py", encoding="utf-8").read()))
+    assert real == {t["name"] for t in fake_tools()}, real ^ {t["name"] for t in fake_tools()}
 
 
 MANAGER_ONLY = {"get_pending_requests", "get_team_member_balance", "decide_leave"}
@@ -178,21 +185,21 @@ def names_for(role):
 def employee_gets_no_manager_or_hr_tools():
     names = names_for("employee")
     assert not names & (MANAGER_ONLY | HR_ONLY), names
-    assert "apply_leave" in names and len(names) == 12, names
+    assert "apply_leave" in names and len(names) == 13, names
 
 
 @test
 def manager_gets_team_tools_but_not_hr_tools():
     names = names_for("manager")
     assert MANAGER_ONLY <= names and not names & HR_ONLY, names
-    assert len(names) == 15, names
+    assert len(names) == 16, names
 
 
 @test
 def hr_gets_ticket_tools_but_not_manager_tools():
     names = names_for("hr")
     assert HR_ONLY <= names and not names & MANAGER_ONLY, names
-    assert len(names) == 14, names
+    assert len(names) == 15, names
 
 
 @test

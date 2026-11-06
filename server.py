@@ -3,6 +3,7 @@
 # Every change goes through tools.py / payslips.py, the same code the agent and the tests use.
 import os
 import secrets
+import employees    
 import threading
 from datetime import date, timedelta
 
@@ -24,7 +25,7 @@ from tools import (get_employee, apply_leave, cancel_leave, count_working_days, 
 db.DB_PATH = os.getenv("HRM_DB", "hr.db")
 init_all()   # creates any missing tables; never wipes data
 
-app = FastAPI(title="Agent HRM API")
+app = FastAPI(title="CognivexAI HR API")
 # a fixed secret keeps people logged in across restarts; a random one is fine for local demos
 app.add_middleware(SessionMiddleware, secret_key=os.getenv("HRM_SESSION_SECRET") or secrets.token_hex(32),
                    same_site="lax", https_only=False, max_age=60 * 60 * 12)
@@ -35,7 +36,7 @@ app.add_middleware(SessionMiddleware, secret_key=os.getenv("HRM_SESSION_SECRET")
 def me(request: Request):
     emp_id = request.session.get("emp_id")
     emp = get_employee(emp_id) if emp_id else None
-    if emp is None:
+    if emp is None or not employees.is_active(emp_id):      # people who have left lose access
         raise HTTPException(401, "Choose who you are to continue.")
     return emp
 
@@ -60,13 +61,15 @@ class SessionIn(BaseModel):
 
 @app.get("/api/demo-users")
 def demo_users():
-    return [{k: p[k] for k in ("id", "name", "role", "title", "department")} for p in hr_queries.people()]
+    return [{k: p[k] for k in ("id", "name", "role", "title", "department")} for p in hr_queries.people() if p["active"]]
 
 
 @app.post("/api/session")
 def login(body: SessionIn, request: Request):
     if get_employee(body.employee_id) is None:
         raise HTTPException(404, "Unknown person")
+    if not employees.is_active(body.employee_id):
+        raise HTTPException(403, "This person no longer works here.")
     request.session.clear()
     request.session["emp_id"] = body.employee_id
     return hr_queries.person(body.employee_id)
@@ -111,7 +114,7 @@ def home(request: Request):
         data["team_leave"] = hr_queries.leave_between(today, _plus_days(today, 21), members)
     if emp["role"] == "hr":
         data["open_hr_tickets"] = len(hr_queries.all_tickets("open"))
-        data["headcount"] = len(hr_queries.people())
+        data["headcount"] = sum(1 for p in hr_queries.people() if p["active"])
     return data
 
 
@@ -281,7 +284,11 @@ def hr_reply(ticket_id: int, body: ReplyIn, request: Request):
 @app.get("/api/people")
 def directory(request: Request):
     emp = me(request)
-    return hr_queries.people(include_balances=emp["role"] == "hr")
+    is_hr = emp["role"] == "hr"
+    rows = hr_queries.people(include_balances=is_hr)
+    if not is_hr:
+        rows = [{k: v for k, v in r.items() if k not in ("contract_type", "end_date")} for r in rows if r["active"]]
+    return rows
 
 
 @app.get("/api/notifications")
@@ -304,6 +311,69 @@ def handbook(request: Request):
         title, _, body = part.partition("\n")
         sections.append({"title": title.strip(), "text": body.strip()})
     return sections
+
+
+# ---------- employee records ----------
+@app.get("/api/people/{emp_id}")
+def person_profile(emp_id: str, request: Request):
+    viewer = me(request)                          # any signed-in colleague
+    person = hr_queries.person(emp_id)
+    is_hr = viewer["role"] == "hr"
+    if person is None or (not person["active"] and not is_hr):
+        raise HTTPException(404, "No such person.")
+    reports = [{"id": r["id"], "name": r["name"], "title": r["title"]} for r in hr_queries.team(emp_id)]
+    if is_hr:
+        return {**person, "reports": reports, "balances": hr_queries.balances(emp_id)}
+    # the colleague view: no contract, no balances, no pay
+    public = ("id", "name", "role", "email", "title", "department", "location", "start_date",
+              "manager_id", "manager_name", "active")
+    return {**{k: person[k] for k in public}, "reports": reports}
+
+
+@app.get("/api/people/{emp_id}/history")
+def person_history(emp_id: str, request: Request):
+    viewer = me(request)
+    return fail_on_error(employees.history(viewer["id"], emp_id))
+
+
+class NewHireIn(BaseModel):
+    name: str
+    email: str
+    role: str
+    title: str
+    department: str
+    location: str
+    start_date: str
+    manager_id: str | None = None
+    contract_type: str = "CDI"
+
+
+class EditIn(BaseModel):
+    changes: dict
+    reason: str
+
+
+class OffboardIn(BaseModel):
+    end_date: str
+    reason: str
+
+
+@app.post("/api/hr/people")
+def hire(body: NewHireIn, request: Request):
+    hr = need(request, "hr")
+    return fail_on_error(employees.create_employee(hr["id"], body.model_dump()))
+
+
+@app.patch("/api/hr/people/{emp_id}")
+def edit_person(emp_id: str, body: EditIn, request: Request):
+    hr = need(request, "hr")
+    return fail_on_error(employees.update_employee(hr["id"], emp_id, body.changes, body.reason))
+
+
+@app.post("/api/hr/people/{emp_id}/offboard")
+def offboard(emp_id: str, body: OffboardIn, request: Request):
+    hr = need(request, "hr")
+    return fail_on_error(employees.offboard_employee(hr["id"], emp_id, body.end_date, body.reason))
 
 
 # ---------- assistant ----------

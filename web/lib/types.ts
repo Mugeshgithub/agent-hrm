@@ -3,7 +3,19 @@ export type Role = "employee" | "manager" | "hr";
 export type Person = {
   id: string; name: string; role: Role; email: string; manager_id: string | null; manager_name: string | null;
   title: string; department: string; location: string; start_date: string;
+  active: number | boolean;                          // false once the end date has passed
+  contract_type?: string; end_date?: string | null;  // HR only
   casual_balance?: number; sick_balance?: number;
+};
+
+export type Profile = Person & {
+  reports: { id: string; name: string; title: string }[];
+  balances?: Balances;                               // HR only
+};
+
+export type Change = {
+  field: string; old_value: string | null; new_value: string | null; reason: string;
+  changed_at: string; changed_by: string | null;
 };
 
 export type Balance = { balance: number; pending: number; available: number };
