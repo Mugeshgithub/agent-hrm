@@ -893,9 +893,11 @@ if __name__ == "__main__":
     # python evals.py                 -> all tests, one after another
     # python evals.py law             -> only tests whose name contains "law"
     # python evals.py --workers 4     -> all tests, split over 4 processes (filter works too)
+    # python evals.py "overtime" --repeat 10 --workers 5   -> run those tests 10 times each: for flaky evals
     parser = argparse.ArgumentParser()
     parser.add_argument("only", nargs="?", help="only tests whose name contains this text")
     parser.add_argument("--workers", type=int, default=1, help="number of parallel processes")
+    parser.add_argument("--repeat", type=int, default=1, help="run the selected tests this many times (to measure a flaky one)")
     parser.add_argument("--worker-db", help=argparse.SUPPRESS)   # internal: used by --workers
     parser.add_argument("--cases", help=argparse.SUPPRESS)       # internal: used by --workers
     args = parser.parse_args()
@@ -909,10 +911,13 @@ if __name__ == "__main__":
 
     if args.workers < 1:
         parser.error("--workers must be 1 or more")
-    indices = select_indices(args.only)
+    if args.repeat < 1:
+        parser.error("--repeat must be 1 or more")
+    indices = select_indices(args.only) * args.repeat
     started = time.time()
     if args.workers == 1 or len(indices) <= 1:
-        ok = run_evals(args.only)
+        passed, ran, _ = run_cases([TEST_CASES[i] for i in indices])
+        ok = passed == ran
     else:
         ok = run_parallel(indices, args.workers)
     minutes, seconds = divmod(int(time.time() - started), 60)
