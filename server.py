@@ -3,6 +3,7 @@
 # Every change goes through tools.py / payslips.py, the same code the agent and the tests use.
 import os
 import secrets
+import employees    
 import threading
 from datetime import date, timedelta
 
@@ -304,6 +305,62 @@ def handbook(request: Request):
         title, _, body = part.partition("\n")
         sections.append({"title": title.strip(), "text": body.strip()})
     return sections
+
+
+# ---------- employee records ----------
+@app.get("/api/people/{emp_id}")
+def person_profile(emp_id: str, request: Request):
+    me(request)                                   # any signed-in colleague
+    entry = employees.directory_entry(emp_id)
+    if entry is None:
+        raise HTTPException(404, "No such person.")
+    return entry
+
+
+@app.get("/api/people/{emp_id}/history")
+def person_history(emp_id: str, request: Request):
+    viewer = me(request)
+    return fail_on_error(employees.history(viewer["id"], emp_id))
+
+
+class NewHireIn(BaseModel):
+    name: str
+    email: str
+    role: str
+    title: str
+    department: str
+    location: str
+    start_date: str
+    manager_id: str | None = None
+    contract_type: str = "CDI"
+
+
+class EditIn(BaseModel):
+    changes: dict
+    reason: str
+
+
+class OffboardIn(BaseModel):
+    end_date: str
+    reason: str
+
+
+@app.post("/api/hr/people")
+def hire(body: NewHireIn, request: Request):
+    hr = need(request, "hr")
+    return fail_on_error(employees.create_employee(hr["id"], body.model_dump()))
+
+
+@app.patch("/api/hr/people/{emp_id}")
+def edit_person(emp_id: str, body: EditIn, request: Request):
+    hr = need(request, "hr")
+    return fail_on_error(employees.update_employee(hr["id"], emp_id, body.changes, body.reason))
+
+
+@app.post("/api/hr/people/{emp_id}/offboard")
+def offboard(emp_id: str, body: OffboardIn, request: Request):
+    hr = need(request, "hr")
+    return fail_on_error(employees.offboard_employee(hr["id"], emp_id, body.end_date, body.reason))
 
 
 # ---------- assistant ----------

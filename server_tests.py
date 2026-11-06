@@ -111,6 +111,39 @@ def hr_reply_closes_the_ticket_and_notifies():
     assert all(x["id"] != t["id"] for x in c.get("/api/hr/tickets?status=open").json())
 
 
+@test
+def only_hr_can_change_records():
+    assert as_person("E001").post("/api/hr/people", json={}).status_code in (403, 422)
+    assert as_person("M001").patch("/api/hr/people/E001",
+                                   json={"changes": {"title": "Boss"}, "reason": "x"}).status_code == 403
+    assert as_person("M001").post("/api/hr/people/E001/offboard",
+                                  json={"end_date": "2027-01-31", "reason": "x"}).status_code == 403
+
+
+@test
+def hr_hires_and_edits_and_history_shows_who():
+    hr = as_person("H001")
+    r = hr.post("/api/hr/people", json={"name": "Anu", "email": "anu@company.com", "role": "employee",
+                                        "title": "QA Engineer", "department": "Engineering",
+                                        "location": "Paris", "start_date": "2026-12-01", "manager_id": "M001"})
+    assert r.status_code == 200, r.json()
+    new_id = r.json()["id"]
+    r = hr.patch(f"/api/hr/people/{new_id}", json={"changes": {"title": "Senior QA"}, "reason": "Offer revised"})
+    assert r.status_code == 200, r.json()
+    log = hr.get(f"/api/people/{new_id}/history").json()["changes"]
+    assert len(log) == 2 and all(c["changed_by"] == "Lakshmi" for c in log)
+    # a colleague sees the safe view, but not the history
+    priya = as_person("E001")
+    card = priya.get(f"/api/people/{new_id}").json()
+    assert card["title"] == "Senior QA" and "casual_balance" not in card
+    assert priya.get(f"/api/people/{new_id}/history").status_code == 400
+
+
+@test
+def rule_errors_come_back_with_the_reason():
+    r = as_person("H001").post("/api/hr/people/M001/offboard", json={"end_date": "2027-01-31", "reason": "test"})
+    assert r.status_code == 400 and "still manages" in r.json()["detail"]
+
 if __name__ == "__main__":
     failed = 0
     for t in TESTS:
