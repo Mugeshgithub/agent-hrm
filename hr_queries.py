@@ -1,7 +1,7 @@
 # hr_queries.py: read-only queries for the web app (directory, team, calendar, inboxes, audit log).
 # Every change still goes through tools.py / payslips.py, so the business rules live in one place.
 import db
-from tools import PENDING, HOLIDAYS
+from tools import PENDING, HOLIDAYS, balance_of, clean_days
 
 # job details for the people directory (the employees table only holds what the agent needs)
 SEED_PROFILES = [
@@ -53,24 +53,23 @@ def person(emp_id):
 def people(include_balances=False):
     rows = _rows(PERSON + " ORDER BY p.department, e.name")
     if include_balances:                       # HR only: balances are personal data
-        bal = {r["id"]: r for r in _rows("SELECT id, casual_balance, sick_balance FROM employees")}
+        bal = {r["id"]: r for r in _rows("SELECT * FROM employees")}
         for r in rows:
-            r["casual_balance"] = bal[r["id"]]["casual_balance"]
-            r["sick_balance"] = bal[r["id"]]["sick_balance"]
+            for kind, value in balance_of(bal[r["id"]]).items():
+                r[f"{kind}_balance"] = value
     return rows
 
 
 def balances(emp_id):
     # saved balance, days waiting for approval, and what is really available to request
-    emp = _rows("SELECT casual_balance, sick_balance FROM employees WHERE id = ?", (emp_id,))[0]
+    emp = _rows("SELECT * FROM employees WHERE id = ?", (emp_id,))[0]
     pending = {r["leave_type"]: r["days"] for r in _rows(
         """SELECT leave_type, SUM(days) AS days FROM leave_requests
            WHERE employee_id = ? AND status = ? GROUP BY leave_type""", (emp_id, PENDING))}
     out = {}
-    for kind in ("casual", "sick"):
-        saved = emp[f"{kind}_balance"]
+    for kind, saved in balance_of(emp).items():
         out[kind] = {"balance": saved, "pending": pending.get(kind, 0),
-                     "available": saved - pending.get(kind, 0)}
+                     "available": clean_days(saved - pending.get(kind, 0))}
     return out
 
 

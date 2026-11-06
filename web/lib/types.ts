@@ -5,7 +5,7 @@ export type Person = {
   title: string; department: string; location: string; start_date: string;
   active: number | boolean;                          // false once the end date has passed
   contract_type?: string; end_date?: string | null;  // HR only
-  casual_balance?: number; sick_balance?: number;
+  casual_balance?: number; sick_balance?: number; paid_balance?: number;
 };
 
 export type Profile = Person & {
@@ -20,7 +20,7 @@ export type Change = {
 };
 
 export type Balance = { balance: number; pending: number; available: number };
-export type Balances = { casual: Balance; sick: Balance };
+export type Balances = { casual: Balance; sick: Balance; paid: Balance };
 
 export type LeaveRequest = {
   id: number; leave_type: string; start_date: string; end_date: string; days: number; status: string; reason: string;
@@ -47,11 +47,11 @@ export type Payslip = {
 export const PENDING = "pending_manager_approval";
 
 export type Adjustment = {
-  leave_type: "casual" | "sick"; days: number; kind: "manual" | "year_start" | "lapse";
+  leave_type: "casual" | "sick" | "paid"; days: number; kind: "manual" | "year_start" | "lapse" | "accrual";
   reason: string; changed_at: string; changed_by: string;
 };
 export type BalanceHistory = {
-  balance: { casual: number; sick: number }; adjustments: Adjustment[]; rules: string;
+  balance: { casual: number; sick: number; paid: number }; adjustments: Adjustment[]; rules: string;
   [taken: `approved_leave_in_${number}`]: { leave_type: string; start_date: string; end_date: string; days: number }[];
 };
 export type Holiday = {

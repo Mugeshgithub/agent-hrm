@@ -5,7 +5,8 @@ from db import get_conn, init_db, ticket_number
 # public holidays of the default plan; leave_admin.load_holidays() refills this set from the database
 HOLIDAYS = {date(2026, 11, 11), date(2026, 12, 25)}
 HOLIDAYS_FOR = None        # set by leave_admin: employee id -> that person's holidays (their holiday plan)
-LEAVE_TYPES = ("casual", "sick")   # leave with a balance
+PAID = "paid"                      # congés payés: earned 2.5 days a month, counted Monday to Saturday
+LEAVE_TYPES = ("casual", "sick", PAID)   # leave with a balance
 FLOATER = "floater"                # a floating holiday the employee picks; counted against a yearly quota
 PENDING = "pending_manager_approval"
 
@@ -17,13 +18,23 @@ def get_employee(employee_id):
     return dict(row) if row else None
 
 
+def clean_days(n):
+    # paid leave comes in halves (2.5 a month): show 12 instead of 12.0, but keep 7.5
+    return int(n) if n == int(n) else n
+
+
+def balance_of(emp):
+    # the three balances of one employee row, the same shape everywhere
+    return {kind: clean_days(emp[f"{kind}_balance"]) for kind in LEAVE_TYPES}
+
+
 def get_leave_balance(employee_id):
     emp = get_employee(employee_id)
     if emp is None:
         return {"error": "Employee not found"}
     return {
         "name": emp["name"],
-        "leave_balance": {"casual": emp["casual_balance"], "sick": emp["sick_balance"]},
+        "leave_balance": balance_of(emp),
     }
 
 
@@ -41,6 +52,25 @@ def count_working_days(start, end, holidays=None):
             days += 1
         current += timedelta(days=1)
     return days
+
+
+def count_ouvrable_days(start, end, holidays=None):
+    # jours ouvrables, how paid leave is counted (hr_policy.md): Monday to Saturday, so a week off
+    # is 6 days. Sundays and public holidays are not counted.
+    holidays = HOLIDAYS if holidays is None else holidays
+    days = 0
+    current = start
+    while current <= end:
+        if current.weekday() < 6 and current not in holidays:
+            days += 1
+        current += timedelta(days=1)
+    return days
+
+
+def days_for(leave_type, start, end, holidays=None):
+    # how many days a request for this kind of leave uses
+    counter = count_ouvrable_days if leave_type == PAID else count_working_days
+    return counter(start, end, holidays)
 
 
 def apply_leave(employee_id, leave_type, start_date, end_date):
@@ -73,9 +103,9 @@ def apply_leave(employee_id, leave_type, start_date, end_date):
                              f"covering {overlap['start_date']} to {overlap['end_date']}. "
                              f"No new request was created."}
 
-        days = count_working_days(start, end, holidays_of(employee_id))
+        days = days_for(leave_type, start, end, holidays_of(employee_id))
         if days == 0:
-            return {"error": "No working days in that range"}
+            return {"error": "No days to take leave on in that range"}
 
         # days already requested but not yet approved also count against the balance
         pending_days = conn.execute(
@@ -83,10 +113,10 @@ def apply_leave(employee_id, leave_type, start_date, end_date):
                WHERE employee_id = ? AND leave_type = ? AND status = ?""",
             (employee_id, leave_type, PENDING),
         ).fetchone()[0]
-        balance = emp[f"{leave_type}_balance"] - pending_days
+        balance = clean_days(emp[f"{leave_type}_balance"] - pending_days)
         if days > balance:
             return {"error": f"Not enough {leave_type} leave: requested {days}, available {balance}. "
-                             f"Saved balance is {emp[f'{leave_type}_balance']}, but {pending_days} days "
+                             f"Saved balance is {clean_days(emp[f'{leave_type}_balance'])}, but {pending_days} days "
                              f"are already in pending requests waiting for approval."}
 
         with conn:  # saves (commits) only if everything inside succeeds
@@ -107,8 +137,8 @@ def apply_leave(employee_id, leave_type, start_date, end_date):
                 "days": days,
                 "status": PENDING,
             },
-            "current_balance": {"casual": emp["casual_balance"], "sick": emp["sick_balance"]},
-            "balance_after_approval": {leave_type: balance - days},
+            "current_balance": balance_of(emp),
+            "balance_after_approval": {leave_type: clean_days(balance - days)},
         }
     finally:
         conn.close()
@@ -136,7 +166,7 @@ def get_pending_requests(manager_id):
     rows = conn.execute(
         """SELECT r.id AS request_id, e.name AS employee_name, r.employee_id,
                   r.leave_type, r.start_date AS start, r.end_date AS end, r.days,
-                  e.casual_balance, e.sick_balance
+                  e.casual_balance, e.sick_balance, e.paid_balance
            FROM leave_requests r JOIN employees e ON e.id = r.employee_id
            WHERE r.manager_id = ? AND r.status = ?
            ORDER BY r.id""",
@@ -188,7 +218,7 @@ def decide_leave(manager_id, request_id, decision, reason=""):
         new_balance = conn.execute(f"SELECT {column} FROM employees WHERE id = ?",
                                    (req["employee_id"],)).fetchone()[0]
         return {"success": True, "request_id": request_id, "status": "approved",
-                "employee_new_balance": new_balance}
+                "employee_new_balance": clean_days(new_balance)}
     finally:
         conn.close()
 
@@ -202,7 +232,7 @@ def get_team_member_balance(manager_id, employee_id):
     return {
         "employee_id": employee_id,
         "name": emp["name"],
-        "leave_balance": {"casual": emp["casual_balance"], "sick": emp["sick_balance"]},
+        "leave_balance": balance_of(emp),
     }
 
 

@@ -43,10 +43,10 @@ export default function TimeOff() {
 
       {data && (
         <section aria-label="Balances" className="panel mb-6">
-          <div className="grid sm:grid-cols-2 divide-y sm:divide-y-0 sm:divide-x divide-rule">
-          {(["casual", "sick"] as const).map((t) => (
+          <div className="grid md:grid-cols-3 divide-y md:divide-y-0 md:divide-x divide-rule">
+          {(["casual", "sick", "paid"] as const).map((t) => (
             <div key={t} className="p-5">
-              <div className="flex items-baseline justify-between">
+              <div className="flex flex-wrap items-baseline justify-between gap-x-3">
                 <p className="font-medium">{leaveLabel(t)}</p>
                 <p className="text-sm text-ink-soft">{data.balances[t].balance} on balance, {data.balances[t].pending} waiting</p>
               </div>

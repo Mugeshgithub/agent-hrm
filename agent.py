@@ -18,10 +18,11 @@ from notifications import init_notifications, notify_decision, notify_ticket_rep
 from policy import search_policy
 from citations import ungrounded_citations, RETRY_MESSAGE, SAFE_REPLY
 from tools import (
-    get_leave_balance, apply_leave, count_working_days, holidays_of,
+    get_leave_balance, apply_leave, days_for, holidays_of, balance_of, clean_days,
     get_pending_requests, decide_leave, get_my_requests, get_employee,
     get_team_member_balance, cancel_leave,
     create_hr_ticket, get_my_tickets, get_open_tickets, reply_to_ticket,
+    PAID, LEAVE_TYPES,
 )
 
 client = anthropic.Anthropic()
@@ -83,7 +84,8 @@ Today's date is {date.today().isoformat()}. When a user gives a date without a y
 Answer in plain, friendly language. Keep replies to 2 or 3 short sentences. No emoji. Do not repeat options already given.
 After submitting a leave request, always tell the employee their current balance and what it will be once approved.
 Only use the tools to get data. Never guess balances or numbers.
-Never count leave days yourself. Always call count_leave_days and quote its result.
+Never count leave days yourself. Always call count_leave_days (with the leave_type) and quote its result.
+Paid leave (congés payés) is a third leave type, leave_type "paid", with its own balance in get_leave_balance: that number is how many paid days the user has now (the policy and the law only say how many they earn). It is counted Monday to Saturday, so a full week off uses 6 days, and its balance can end in a half day like 7.5. To book it, call count_leave_days and apply_leave with leave_type "paid", and say that Saturdays count. Casual and sick leave skip weekends.
 For any leave request, call get_leave_balance first. If the balance for that leave type is 0, tell the employee right away and do not ask for more details.
 After count_leave_days, compare the result with the balance and tell the user straight away if it is not enough.
 If the employee gives a single date, treat it as a one-day leave (start and end are the same day).
@@ -139,13 +141,17 @@ TOOLS = [
     },
     {
         "name": "count_leave_days",
-        "description": "Count the working days between two dates, excluding weekends and public holidays. "
+        "description": "Count the days a leave request would use between two dates, excluding public "
+                       "holidays. Casual and sick leave skip weekends; paid leave (leave_type 'paid') is "
+                       "counted Monday to Saturday and skips only Sundays. "
                        "Call this before submitting any leave request.",
         "input_schema": {
             "type": "object",
             "properties": {
                 "start_date": {"type": "string", "description": "YYYY-MM-DD"},
                 "end_date": {"type": "string", "description": "YYYY-MM-DD"},
+                "leave_type": {"type": "string", "enum": ["casual", "sick", "paid"],
+                               "description": "Which kind of leave; defaults to casual"},
             },
             "required": ["start_date", "end_date"],
         },
@@ -158,7 +164,7 @@ TOOLS = [
         "input_schema": {
             "type": "object",
             "properties": {
-                "leave_type": {"type": "string", "enum": ["casual", "sick"]},
+                "leave_type": {"type": "string", "enum": ["casual", "sick", "paid"]},
                 "start_date": {"type": "string", "description": "YYYY-MM-DD"},
                 "end_date": {"type": "string", "description": "YYYY-MM-DD"},
             },
@@ -429,7 +435,13 @@ def run_tool(name, tool_input):
         if start < date.today():
             return {"error": f"Start date {start} is in the past. Today is {date.today()}. "
                              "If the user didn't give a year, use the next upcoming date."}
-        return {"working_days": count_working_days(start, end, holidays_of(LOGGED_IN_ID))}
+        kind = tool_input.get("leave_type") or "casual"
+        if kind not in LEAVE_TYPES:
+            return {"error": f"Unknown leave type '{kind}'"}
+        result = {"working_days": days_for(kind, start, end, holidays_of(LOGGED_IN_ID))}
+        if kind == PAID:
+            result["counted"] = "Monday to Saturday (jours ouvrables); Sundays and public holidays are not counted"
+        return result
 
     if name == "apply_leave":
         emp = get_employee(LOGGED_IN_ID)
@@ -440,21 +452,21 @@ def run_tool(name, tool_input):
             return {"error": "Dates must be in YYYY-MM-DD format"}
         if start < date.today():
             return {"error": f"Leave cannot start in the past. Today is {date.today()}."}
-        days = count_working_days(start, end, holidays_of(LOGGED_IN_ID))
+        days = days_for(tool_input["leave_type"], start, end, holidays_of(LOGGED_IN_ID))
         # available = saved balance minus days already waiting for approval (same rule as apply_leave),
         # so the confirmation never shows a "balance after" that ignores pending requests
         from hr_queries import balances
         balance = balances(LOGGED_IN_ID)[tool_input["leave_type"]]["available"]
         # refuse BEFORE asking, so the user is never asked to confirm something impossible
         if balance - days < 0:
-            return {"error": f"Not enough {tool_input['leave_type']} leave: needs {days} working days, "
+            return {"error": f"Not enough {tool_input['leave_type']} leave: needs {days} days, "
                              f"only {balance} available (pending requests included). "
                              f"Nothing was submitted and no confirmation was shown."}
         details = {**tool_input,
                    "working_days": days,
                    "current_balance": balance,
-                   "all_balances": {"casual": emp["casual_balance"], "sick": emp["sick_balance"]},
-                   "balance_after_approval": balance - days}
+                   "all_balances": balance_of(emp),
+                   "balance_after_approval": clean_days(balance - days)}
         answer = confirmed(name, tool_input, details)
         if answer == AWAITING_CONFIRMATION:
             return CARD_SHOWN

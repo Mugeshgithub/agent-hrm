@@ -79,13 +79,14 @@ export default function Team() {
         </div>
         <ul className="divide-y divide-rule">
           {team?.map((m) => (
-            <li key={m.id} className="grid gap-3 px-5 py-4 md:grid-cols-[220px_1fr_1fr] md:items-center">
+            <li key={m.id} className="grid gap-3 px-5 py-4 md:grid-cols-[220px_1fr_1fr_1fr] md:items-center">
               <div>
                 <p className="font-medium">{m.name}</p>
                 <p className="text-sm text-ink-soft">{m.title}, {m.location}</p>
               </div>
               <div><p className="text-sm text-ink-soft mb-1.5">Casual, {m.balances.casual.available} available</p><DayTiles size="sm" balance={m.balances.casual} /></div>
               <div><p className="text-sm text-ink-soft mb-1.5">Sick, {m.balances.sick.available} available</p><DayTiles size="sm" balance={m.balances.sick} /></div>
+              <div><p className="text-sm text-ink-soft mb-1.5">Paid, {m.balances.paid.available} available</p><DayTiles size="sm" balance={m.balances.paid} /></div>
             </li>
           ))}
         </ul>

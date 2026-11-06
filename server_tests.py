@@ -208,6 +208,21 @@ def year_start_cannot_run_early_from_the_web():
     assert r.status_code == 400 and "1 January 2030" in r.json()["detail"]
 
 
+@test
+def leave_preview_counts_paid_leave_monday_to_saturday_with_its_own_balance():
+    c = as_person("E001")
+    # Mon 4 to Sat 9 March 2030: paid leave uses 6 days, casual leave only 5 (no Saturday)
+    week = {"start_date": "2030-03-04", "end_date": "2030-03-09"}
+    paid = c.post("/api/leave/preview", json={"leave_type": "paid", **week}).json()
+    casual = c.post("/api/leave/preview", json={"leave_type": "casual", **week}).json()
+    assert paid["working_days"] == 6 and casual["working_days"] == 5, (paid, casual)
+    assert paid["available"] > 0 and paid["after"] == paid["available"] - 6 and paid["enough"] == (paid["available"] >= 6)
+    assert c.post("/api/leave/preview", json={"leave_type": "unpaid", **week}).status_code == 400
+    home = c.get("/api/home").json()["balances"]
+    assert set(home) == {"casual", "sick", "paid"} and home["paid"]["balance"] == 12.5
+
+
+
 if __name__ == "__main__":
     failed = 0
     for t in TESTS:

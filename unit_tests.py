@@ -36,6 +36,53 @@ def counts_working_days():
     assert count_working_days(date(2026, 12, 21), date(2026, 12, 25)) == 4   # Christmas excluded
 
 
+# ---------- paid leave (congés payés): counted Monday to Saturday ----------
+# Fixed dates (Mon 4 March 2030 to Sun 10 March 2030) so no holiday or "today" can change the answer.
+MON, SAT, SUN = date(2030, 3, 4), date(2030, 3, 9), date(2030, 3, 10)
+
+
+@test
+def paid_leave_is_counted_monday_to_saturday():
+    assert tools.count_ouvrable_days(MON, SAT) == 6                 # a week off is 6 days, not 5
+    assert tools.count_ouvrable_days(MON, SUN) == 6                 # Sunday is never counted
+    assert tools.count_ouvrable_days(SUN, SUN) == 0
+    assert count_working_days(MON, SUN) == 5                        # casual and sick still skip weekends
+    # a public holiday is not counted, Saturdays included
+    assert tools.count_ouvrable_days(MON, SAT, holidays={date(2030, 3, 9)}) == 5
+    assert tools.days_for("paid", MON, SAT) == 6 and tools.days_for("casual", MON, SAT) == 5
+
+
+@test
+def paid_leave_balance_shows_halves_but_not_needless_decimals():
+    bal = get_leave_balance("E001")["leave_balance"]                # Emma: 8 casual, 5 sick, 12.5 paid
+    assert bal == {"casual": 8, "sick": 5, "paid": 12.5}
+    assert isinstance(bal["casual"], int)                           # 8, never 8.0
+    assert get_leave_balance("C001")["leave_balance"]["paid"] == 25 and isinstance(
+        get_leave_balance("C001")["leave_balance"]["paid"], int)
+
+
+@test
+def paid_leave_request_approve_and_cancel_use_the_paid_balance_and_saturdays():
+    r = apply_leave("E001", "paid", d(MON), d(SAT))
+    assert r["success"] and r["request"]["days"] == 6, r
+    assert r["balance_after_approval"] == {"paid": 6.5}             # 12.5 - 6
+    assert decide_leave("M001", r["request"]["id"], "approve")["employee_new_balance"] == 6.5
+    bal = get_leave_balance("E001")["leave_balance"]
+    assert bal == {"casual": 8, "sick": 5, "paid": 6.5}             # only the paid balance moved
+    assert cancel_leave("E001", r["request"]["id"])["days_returned"] == 6
+    assert get_leave_balance("E001")["leave_balance"]["paid"] == 12.5
+
+
+@test
+def not_enough_paid_leave_is_blocked_and_pending_paid_days_count():
+    # Clara has 2.5 paid days: a 3-day request is too much, a 2-day one is fine
+    assert "Not enough paid leave" in apply_leave("E003", "paid", d(MON), d(MON + timedelta(days=2)))["error"]
+    assert apply_leave("E003", "paid", d(MON), d(MON + timedelta(days=1))).get("success")
+    assert "error" in apply_leave("E003", "paid", d(SAT), d(SAT))   # 0.5 left, one more day is too much
+    # a Sunday-only request has no days to take
+    assert "No days" in apply_leave("E001", "paid", d(SUN), d(SUN))["error"]
+
+
 @test
 def past_dates_are_blocked():
     yesterday = date.today() - timedelta(days=1)

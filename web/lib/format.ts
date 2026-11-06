@@ -58,7 +58,7 @@ export function timestamp(sql: string) {
 }
 
 export const leaveLabel = (t: string) =>
-  t === "casual" ? "Casual leave" : t === "sick" ? "Sick leave" : t === "floater" ? "Floating holiday" : t;
+  t === "casual" ? "Casual leave" : t === "sick" ? "Sick leave" : t === "paid" ? "Paid leave" : t === "floater" ? "Floating holiday" : t;
 
 export function initials(name: string) {
   return name.split(/\s+/).map((p) => p[0]).join("").slice(0, 2).toUpperCase();

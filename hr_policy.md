@@ -10,7 +10,7 @@ Employees get 12 casual leave days per year. Casual leave must be applied at lea
 Employees get 6 sick leave days per year. Sick leave of more than 2 consecutive days requires a medical certificate, uploaded within 3 days of returning to work.
 
 ## Carry forward
-Up to 5 unused casual leave days can be carried forward to the next year. Unused sick leave cannot be carried forward and lapses on 31 December.
+Up to 5 unused casual leave days can be carried forward to the next year. Unused sick leave cannot be carried forward and lapses on 31 December. Unused paid leave is not lost at the end of the year: it is carried forward in full.
 
 ## Public holidays
 The company follows the published public holiday calendar. If a public holiday falls during approved leave, that day is not counted as leave.

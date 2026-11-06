@@ -1,6 +1,8 @@
 # leave_admin_tests.py: checks public holidays, balance adjustments and the yearly reset.
 # No AI, no API keys, runs in CI.   python leave_admin_tests.py
 import os
+import sqlite3
+import subprocess
 import sys
 import tempfile
 from datetime import date
@@ -9,6 +11,7 @@ import db
 db.DB_PATH = os.path.join(tempfile.mkdtemp(), "leave_admin_test.db")   # throwaway database
 os.environ["HRM_DB"] = db.DB_PATH          # so demo_data.py can't switch back to web_demo.db
 import demo_data
+import hr_queries
 import leave_admin as la
 import tools
 
@@ -27,6 +30,10 @@ def fresh():
         conn.execute("DELETE FROM holidays")
         conn.execute("DELETE FROM holiday_plans")
         conn.execute("UPDATE profiles SET holiday_plan_id = NULL")
+        # profiles survive a reset, so put back everyone's start date and clear any end date a test set
+        conn.execute("UPDATE profiles SET end_date = NULL")
+        for emp_id, _title, _dept, _loc, start in hr_queries.SEED_PROFILES:
+            conn.execute("UPDATE profiles SET start_date = ? WHERE emp_id = ?", (start, emp_id))
     conn.close()
     la.init_leave_admin()
 
@@ -155,7 +162,7 @@ def adjustment_rules():
     assert "error" in la.adjust_balance("H001", "E001", "casual", 1, " ")          # reason needed
     assert "error" in la.adjust_balance("H001", "E001", "casual", 0, "x")
     assert "error" in la.adjust_balance("H001", "E001", "casual", 31, "x")         # too big
-    assert "error" in la.adjust_balance("H001", "E001", "paid", 1, "x")            # unknown type
+    assert "error" in la.adjust_balance("H001", "E001", "unpaid", 1, "x")          # unknown type
     # Emma has 8 casual days; with 2 waiting for approval the balance can't drop below 2
     tools.apply_leave("E001", "casual", "2027-03-01", "2027-03-02")
     assert "can't go below 2" in la.adjust_balance("H001", "E001", "casual", -7, "x")["error"]
@@ -193,6 +200,146 @@ def people_who_have_left_are_not_reset():
     employees.offboard_employee("H001", "E002", "2026-12-31", "Resigned")
     assert la.run_year_start(2027, today=date(2027, 1, 1))["people"] == 5
     assert balance("E002", "casual") == 2                                            # Hugo's stays as it was
+
+
+# ---------- paid leave (congés payés): 2.5 days earned every month ----------
+
+def paid_lines(emp_id):
+    return [(a["kind"], a["days"]) for a in la.balance_history(emp_id)["adjustments"] if a["leave_type"] == "paid"]
+
+
+@test
+def monthly_accrual_adds_2_5_paid_days_and_logs_why():
+    fresh()
+    result = la.run_month_accrual(2026, 10, today=date(2026, 11, 1))
+    assert result == {"success": True, "month": "October 2026", "people": 6, "days_each": 2.5}, result
+    assert balance("E001", "paid") == 15 and balance("E003", "paid") == 5      # 12.5 + 2.5, 2.5 + 2.5
+    line = next(a for a in la.balance_history("E001")["adjustments"] if a["kind"] == "accrual")
+    assert (line["leave_type"], line["days"], line["reason"], line["changed_by"]) == (
+        "paid", 2.5, "Paid leave earned in October 2026", "Automatic update")
+
+
+@test
+def a_month_is_credited_only_once():
+    fresh()
+    assert la.run_month_accrual(2026, 10, today=date(2026, 11, 1))["success"]
+    assert "already been credited" in la.run_month_accrual(2026, 10, today=date(2026, 11, 2))["error"]
+    assert balance("E001", "paid") == 15                                         # not applied twice
+    assert la.month_accrual_preview(2026, 10)["already_done"]["ran_by"] == "system"
+    assert la.run_month_accrual(2026, 11, today=date(2026, 12, 1))["success"]    # next month is its own run
+    assert balance("E001", "paid") == 17.5
+
+
+@test
+def a_month_cannot_be_credited_before_it_ends():
+    fresh()
+    assert "from 2026-10-31" in la.run_month_accrual(2026, 10, today=date(2026, 10, 30))["error"]
+    assert balance("E001", "paid") == 12.5                                       # nothing happened
+    assert la.run_month_accrual(2026, 10, today=date(2026, 10, 31))["success"]   # the last day itself is fine
+    assert la.last_finished_month(date(2026, 11, 1)) == (2026, 10)
+    assert la.last_finished_month(date(2027, 1, 15)) == (2026, 12)
+
+
+@test
+def only_hr_can_run_the_accrual_by_hand():
+    fresh()
+    for who in ("E001", "M001", "C001"):
+        assert "error" in la.run_month_accrual(2026, 10, ran_by=who, today=date(2026, 11, 1))
+    assert balance("E001", "paid") == 12.5
+    assert la.run_month_accrual(2026, 10, ran_by="H001", today=date(2026, 11, 1))["success"]
+    line = next(a for a in la.balance_history("E001")["adjustments"] if a["kind"] == "accrual")
+    assert line["changed_by"] == "Narmadha"                                      # the log says who
+
+
+@test
+def a_month_needs_four_weeks_of_work_to_be_earned():
+    fresh()
+    conn = db.get_conn()
+    with conn:
+        conn.execute("UPDATE profiles SET start_date = '2026-10-03' WHERE emp_id = 'E001'")   # 29 days in October
+        conn.execute("UPDATE profiles SET start_date = '2026-10-04' WHERE emp_id = 'E002'")   # 28 days: exactly four weeks
+        conn.execute("UPDATE profiles SET start_date = '2026-10-05' WHERE emp_id = 'E003'")   # 27 days: not yet
+        conn.execute("UPDATE profiles SET end_date = '2026-10-15' WHERE emp_id = 'H001'")     # left half way through
+        conn.execute("UPDATE profiles SET end_date = '2026-09-30' WHERE emp_id = 'M001'")     # left the month before
+    conn.close()
+    preview = la.month_accrual_preview(2026, 10)
+    assert preview["people_earning"] == 3 and preview["days_in_total"] == 7.5
+    assert set(preview["not_earning"]) == {"Clara", "Narmadha", "Lucas"}
+    assert la.run_month_accrual(2026, 10, today=date(2026, 11, 1))["people"] == 3
+    assert (balance("C001", "paid"), balance("E001", "paid"), balance("E002", "paid")) == (27.5, 15, 10)
+    assert (balance("E003", "paid"), balance("H001", "paid"), balance("M001", "paid")) == (2.5, 15, 20)  # unchanged
+    assert la._days_employed_in_month("2027-02-01", None, 2027, 2) == 28         # a whole February counts
+
+
+@test
+def year_start_carries_every_paid_day_by_default():
+    fresh()
+    preview = la.year_start_preview(2027)
+    assert preview["paid_days_carried"] == 82.5 and preview["paid_days_lapsing"] == 0   # 25+20+12.5+7.5+2.5+15
+    assert la.run_year_start(2027, today=date(2027, 1, 1))["success"]
+    assert (balance("E001", "paid"), balance("E002", "paid"), balance("C001", "paid")) == (12.5, 7.5, 25)
+    assert paid_lines("E001") == []                                              # nothing changed, nothing to explain
+
+
+@test
+def year_start_can_cap_paid_leave_if_the_company_sets_a_limit():
+    fresh()
+    la.PAID_CARRY_MAX = 10
+    try:
+        assert la.run_year_start(2027, today=date(2027, 1, 1))["success"]
+    finally:
+        la.PAID_CARRY_MAX = None
+    assert (balance("C001", "paid"), balance("E001", "paid"), balance("E002", "paid")) == (10, 10, 7.5)
+    assert paid_lines("E001") == [("lapse", -2.5)] and paid_lines("E002") == []
+
+
+@test
+def paid_leave_adjustments_may_be_half_days_but_casual_and_sick_may_not():
+    fresh()
+    assert la.adjust_balance("H001", "E001", "paid", 2.5, "Days brought from a previous employer")["balance_after"] == 15
+    assert la.adjust_balance("H001", "E001", "paid", -0.5, "Correction")["balance_after"] == 14.5
+    assert "half days" in la.adjust_balance("H001", "E001", "paid", 0.3, "x")["error"]
+    assert "whole number" in la.adjust_balance("H001", "E001", "casual", 0.5, "x")["error"]
+    assert balance("E001", "paid") == 14.5 and balance("E001", "casual") == 8
+    assert la.balance_history("E001")["balance"] == {"casual": 8, "sick": 5, "paid": 14.5}
+
+
+@test
+def databases_made_before_paid_leave_get_the_column():
+    old_path = db.DB_PATH
+    db.DB_PATH = os.path.join(tempfile.mkdtemp(), "before_paid_leave.db")
+    try:
+        conn = sqlite3.connect(db.DB_PATH)     # the employees table as it was before this feature
+        conn.execute("""CREATE TABLE employees (id TEXT PRIMARY KEY, name TEXT NOT NULL, role TEXT NOT NULL,
+                        manager_id TEXT, email TEXT, casual_balance INTEGER NOT NULL, sick_balance INTEGER NOT NULL)""")
+        conn.execute("INSERT INTO employees VALUES ('E009', 'Old Timer', 'employee', NULL, 'o@x.eu', 3, 2)")
+        conn.commit()
+        conn.close()
+        db.init_db()
+        db.init_db()                                                     # running it twice is harmless
+        assert tools.get_employee("E009")["paid_balance"] == 0           # existing people start at 0
+        assert tools.get_employee("E001")["paid_balance"] == 12.5        # seed people are added as before
+    finally:
+        db.DB_PATH = old_path
+
+
+@test
+def the_monthly_job_runs_from_the_command_line():
+    fresh()
+    env = {**os.environ, "HRM_DB": db.DB_PATH}
+    here = os.path.dirname(os.path.abspath(__file__))
+    def job(*args):
+        return subprocess.run([sys.executable, "leave_jobs.py", *args], cwd=here, env=env,
+                              capture_output=True, text=True)
+    first = job("month-end", "2026-10")
+    assert first.returncode == 0 and "'success': True" in first.stdout, first.stdout + first.stderr
+    assert balance("E001", "paid") == 15
+    again = job("month-end", "2026-10")
+    assert again.returncode == 0 and "already been credited" in again.stdout      # a daily cron is safe
+    assert balance("E001", "paid") == 15
+    assert job("month-end", "banana").returncode != 0                              # bad input is a failure
+    assert job("month-end", "2999-01").returncode != 0                             # a month that hasn't ended is too
+    assert balance("E001", "paid") == 15
 
 
 if __name__ == "__main__":

@@ -59,7 +59,8 @@ def edit_logs_each_changed_field_with_the_reason():
 def offboarding_sets_the_end_date_and_returns_the_final_balance():
     fresh()
     r = e.offboard_employee("H001", "E002", "2026-12-31", "Resigned")
-    assert r["success"] and r["final_balance"] == {"casual": 2, "sick": 4}, r
+    # Hugo's unused paid days (7.5) are in the final balance: they are paid out when someone leaves
+    assert r["success"] and r["final_balance"] == {"casual": 2, "sick": 4, "paid": 7.5}, r
     assert e.is_active("E002")                              # still here today
     assert not e.is_active("E002", on=__import__("datetime").date(2027, 1, 1))   # gone after the end date
 

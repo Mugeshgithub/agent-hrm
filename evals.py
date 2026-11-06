@@ -19,7 +19,7 @@ import employees
 import hr_queries
 import leave_admin
 from tracing import observe, propagate_attributes
-from tools import apply_leave, decide_leave, create_hr_ticket, count_working_days
+from tools import apply_leave, decide_leave, create_hr_ticket, count_working_days, count_ouvrable_days
 
 # tests use their own database, never the real hr.db
 db.DB_PATH = "test_hr.db"
@@ -54,6 +54,10 @@ def say_no_year(d):
 COUNT_START, COUNT_END = day(2, 1), day(2, 6)
 COUNT_EXPECTED = count_working_days(COUNT_START, COUNT_END)
 
+# paid leave counts Monday to Saturday: a Monday-to-Saturday week is 6 days (fewer if a holiday falls in it)
+PAID_START, PAID_END = day(3, 0), day(3, 5)
+PAID_EXPECTED = count_ouvrable_days(PAID_START, PAID_END)
+
 # Monday to Thursday never contain a holiday, so this is always 4 working days
 POISON_START, POISON_END = day(2, 0), day(2, 3)
 POISON_QUESTION = f"How many working days from {say_no_year(POISON_START)} to {say_no_year(POISON_END)}?"
@@ -75,6 +79,23 @@ def status_of(request_id):
     ).fetchone()
     conn.close()
     return row[0] if row else None
+
+
+def paid_balance(emp_id):
+    conn = db.get_conn()
+    n = conn.execute(
+        "SELECT paid_balance FROM employees WHERE id = ?", (emp_id,)
+    ).fetchone()[0]
+    conn.close()
+    return n
+
+
+def paid_request_days():
+    # days stored on the paid leave requests that exist, as a list
+    conn = db.get_conn()
+    rows = conn.execute("SELECT days FROM leave_requests WHERE leave_type = 'paid' ORDER BY id").fetchall()
+    conn.close()
+    return [r[0] for r in rows]
 
 
 def casual_balance(emp_id):
@@ -248,6 +269,17 @@ def setup_karthik_ticket():
 def setup_balance_adjusted():
     # HR gave Emma 2 extra casual days for working the Saturday release
     leave_admin.adjust_balance("H001", "E001", "casual", 2, "Worked on the Saturday release")
+
+
+def setup_emma_pending_paid():
+    # Emma (12.5 paid days) has a pending paid request for a Monday-to-Saturday week
+    apply_leave("E001", "paid", iso(day(2, 0)), iso(day(2, 5)))
+
+
+def setup_paid_leave_earned():
+    # the monthly job credited last month's 2.5 paid days
+    year, month = leave_admin.last_finished_month()
+    leave_admin.run_month_accrual(year, month)
 
 
 TEST_CASES = [
@@ -662,6 +694,54 @@ TEST_CASES = [
         "must_call": ["search_labour_code"],
         # 16 weeks in total, or the same rule split as 6 weeks before + 10 weeks after
         "reply_must_match": r"(?is)(?=.*L\.?\s?1225-17)(?=.*(\b16\b|sixteen|seize|\b6\b[^.]{0,60}\b10\b))",
+    },
+    {
+        "name": "paid leave: says how many paid days I have",
+        "user": "E001",
+        "auto_confirm": False,
+        "input": "How many paid leave days do I have left?",
+        "must_call": ["get_leave_balance"],
+        "reply_must_match": r"12[.,]5",
+        "expected_requests": 0,
+    },
+    {
+        "name": "paid leave: a Monday to Saturday week is counted with Saturday",
+        "user": "E001",
+        "auto_confirm": True,
+        "input": f"Please book paid leave from {say(PAID_START)} to {say(PAID_END)}.",
+        "must_call": ["count_leave_days", "apply_leave"],
+        "reply_must_match": rf"\b{PAID_EXPECTED}\b",
+        "expected_requests": 1,
+        "check": lambda: paid_request_days() == [PAID_EXPECTED],
+    },
+    {
+        "name": "paid leave: more days than the paid balance is refused",
+        "user": "E003",
+        "auto_confirm": True,
+        "input": f"Please book paid leave from {say(day(3, 0))} to {say(day(3, 4))}.",
+        "reply_must_match": r"(?i)enough|only|2[.,]5|insufficient|available|can't|cannot",
+        "expected_requests": 0,
+        "check": lambda: paid_balance("E003") == 2.5,
+    },
+    {
+        "name": "paid leave: approving takes the days from the paid balance only",
+        "user": "M001",
+        "auto_confirm": True,
+        "setup": setup_emma_pending_paid,
+        "input": "Please approve Emma's pending leave request.",
+        "must_call": ["get_pending_requests", "decide_leave"],
+        "check": lambda: status_of(1) == "approved" and paid_balance("E001") == 12.5 - paid_request_days()[0]
+                         and casual_balance("E001") == 8,
+    },
+    {
+        "name": "paid leave: explains the monthly 2.5 days",
+        "user": "E001",
+        "auto_confirm": False,
+        "setup": setup_paid_leave_earned,
+        "input": "Why did my paid leave go up?",
+        "must_call": ["get_balance_history"],
+        "reply_must_match": r"2[.,]5",
+        "expected_requests": 0,
     },
 ]
 

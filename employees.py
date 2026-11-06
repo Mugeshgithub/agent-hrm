@@ -4,7 +4,7 @@ import re
 from datetime import date
 
 import db
-from tools import PENDING, get_employee
+from tools import PENDING, get_employee, balance_of
 
 ROLES = ("employee", "manager", "hr")
 CONTRACTS = ("CDI", "CDD", "Apprenticeship", "Internship")
@@ -144,7 +144,9 @@ def create_employee(hr_id, data):
     conn = db.get_conn()
     try:
         with conn:   # person, profile and log line are saved together, or not at all
-            conn.execute("INSERT INTO employees VALUES (?, ?, ?, ?, ?, ?, ?)",
+            # paid leave starts at 0: a new hire earns 2.5 days a month from the monthly job
+            conn.execute("""INSERT INTO employees (id, name, role, manager_id, email, casual_balance, sick_balance)
+                            VALUES (?, ?, ?, ?, ?, ?, ?)""",
                          (emp_id, d["name"], d["role"], d.get("manager_id") or None, d["email"], casual, sick))
             conn.execute("""INSERT INTO profiles (emp_id, title, department, location, start_date, contract_type)
                             VALUES (?, ?, ?, ?, ?, ?)""",
@@ -255,7 +257,7 @@ def offboard_employee(hr_id, emp_id, end_date, reason):
         conn.close()
     # what payroll needs for the final payslip: unused paid leave is paid out (L3141-28)
     return {"success": True, "id": emp_id, "end_date": end.isoformat(),
-            "final_balance": {"casual": emp["casual_balance"], "sick": emp["sick_balance"]}}
+            "final_balance": balance_of(emp)}
 
 def history(viewer_id, emp_id):
     viewer = get_employee(viewer_id)

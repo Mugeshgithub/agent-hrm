@@ -150,9 +150,9 @@ export default function ProfilePage({ params }: { params: { id: string } }) {
                 {!leftAlready && p.id !== me.id && <button className="text-sm text-dossier hover:underline" onClick={() => setAdjusting(true)}>Adjust</button>}
               </div>
               <dl className="mt-3 grid grid-cols-2 gap-4">
-                {(["casual", "sick"] as const).map((t) => (
-                  <div key={t}>
-                    <dt className="text-sm text-ink-soft">{t === "casual" ? "Casual" : "Sick"}</dt>
+                {(["casual", "sick", "paid"] as const).map((t) => (
+                  <div key={t} className={t === "paid" ? "col-span-2" : undefined}>
+                    <dt className="text-sm text-ink-soft">{t === "casual" ? "Casual" : t === "sick" ? "Sick" : "Paid"}</dt>
                     <dd><span className="text-lg font-semibold">{p.balances![t].available}</span>
                       <span className="ml-1 text-ink-soft">available</span></dd>
                     {p.balances![t].pending > 0 && <dd className="text-sm text-ink-soft">{p.balances![t].pending} waiting for approval</dd>}

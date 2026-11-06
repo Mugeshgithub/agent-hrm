@@ -14,6 +14,7 @@ type PlanDetail = { plan: HolidayPlan; holidays: Holiday[]; years: string[] };
 type Preview = {
   year: number; people: number; already_done: { ran_by: string; ran_at: string } | null;
   casual_days_carried: number; casual_days_lapsing: number; sick_days_lapsing: number; people_losing_casual_days: number;
+  paid_days_carried: number; paid_days_lapsing: number;
 };
 type ImportRow = { line: number; date: string; name: string; kind: string; ok: boolean; problem: string | null };
 type ImportResult = { dry_run: boolean; rows: ImportRow[]; will_add?: number; added?: number; skipped: number };
@@ -379,8 +380,10 @@ function YearStart() {
             <Row label="Casual days carried over" value={preview.casual_days_carried} hint="Up to 5 per person" />
             <Row label="Casual days that lapse" value={preview.casual_days_lapsing} hint={`${preview.people_losing_casual_days} people have more than 5`} />
             <Row label="Sick days that lapse" value={preview.sick_days_lapsing} hint="Sick leave doesn't carry over" />
+            <Row label="Paid days carried over" value={preview.paid_days_carried} hint="Paid leave is earned monthly; unused days carry over in full" />
+            {preview.paid_days_lapsing > 0 && <Row label="Paid days that lapse" value={preview.paid_days_lapsing} />}
           </dl>
-          <p className="mt-4 rounded border border-rule bg-paper px-3 py-2 text-sm">Then everyone gets 12 casual and 6 sick days for {preview.year}, and a new set of floating holidays from their plan. Each change appears in the person's balance history.</p>
+          <p className="mt-4 rounded border border-rule bg-paper px-3 py-2 text-sm">Then everyone gets 12 casual and 6 sick days for {preview.year}, and a new set of floating holidays from their plan. Paid leave isn't topped up in January: it is earned at 2.5 days a month. Each change appears in the person's balance history.</p>
         </>
       )}
     </section>
