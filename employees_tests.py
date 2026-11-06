@@ -100,6 +100,14 @@ def colleague_lookup_is_safe_and_skips_people_who_left():
     assert "error" in e.find_colleagues("c")                            # too short to search
 
 
+@test
+def my_record_shows_my_manager_and_my_reports():
+    fresh()
+    emma = e.my_record("E001")["people"][0]
+    assert emma["manager"] == "Lucas" and emma["reports"] == []
+    assert sorted(e.my_record("M001")["people"][0]["reports"]) == ["Clara", "Emma", "Hugo"]
+
+
 if __name__ == "__main__":
     failed = 0
     for t in TESTS:

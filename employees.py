@@ -296,3 +296,12 @@ def find_colleagues(query, limit=5):
     if not people:
         return {"found": 0, "message": f"No current colleague matches '{query}'."}
     return {"found": len(people), "people": people}
+
+
+def my_record(emp_id):
+    # the assistant's "me" lookup: the signed-in person's own directory entry, plus who reports to them
+    entry = directory_entry(emp_id)
+    if entry is None:
+        return {"error": "No such person."}
+    entry["reports"] = [r["name"] for r in _reports(emp_id)]
+    return {"found": 1, "people": [entry], "this_is_the_user": True}

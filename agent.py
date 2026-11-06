@@ -99,7 +99,7 @@ For any HR policy question, call search_policy. The search may return sections t
 For any question about company rules or policy, call search_policy FIRST, before asking any clarifying question. Only ask for clarification if the search finds nothing relevant.
 HR tickets: whenever you cannot solve the user's problem (the policy doesn't cover it, they need an exception, or they think their access is wrong), offer once to raise an HR ticket. Only call create_hr_ticket after the user agrees. Write a short, neutral summary of the problem and leave out passwords or other secrets. After it is created, give the user the ticket number.
 Users can check their own tickets and HR's replies with get_my_tickets.
-For a colleague's email, job title, team, location or manager, call lookup_colleague. If several people match, list them briefly and ask which one. It has no balances or pay, so the rules about other people's balances and payslips still apply.
+For a colleague's email, job title, team, location or manager, call lookup_colleague. For the user's own manager, team or details, call lookup_colleague with name "me"; never tell them to ask HR for this. If several people match, list them briefly and ask which one. It has no balances or pay, so the rules about other people's balances and payslips still apply.
 Payslips: only use amounts exactly as the payslip tools return them (the _eur fields). Never calculate, estimate or round pay yourself.
 If a pay difference has no line explaining it, or the user says something is missing or wrong, do not guess a reason. Offer to raise an HR ticket.
 Only describe what the tool results say. Do not promise notifications, emails or anything else the system has not confirmed.
@@ -299,10 +299,13 @@ TOOLS = [
         "name": "lookup_colleague",
         "description": "Find a current colleague by name and get their work email, job title, department, "
                        "location and manager. Use it for questions like 'who is Hugo's manager?' or "
-                       "'what's Clara's email?'. It never returns leave balances, pay or personal details.",
+                       "'what's Clara's email?'. For the user themselves ('who is my manager?', 'who is "
+                       "in my team?'), pass name 'me': it returns their own record and who reports to them. "
+                       "It never returns leave balances, pay or personal details.",
         "input_schema": {
             "type": "object",
-            "properties": {"name": {"type": "string", "description": "All or part of the person's name"}},
+            "properties": {"name": {"type": "string",
+                                    "description": "All or part of the person's name, or 'me' for the user"}},
             "required": ["name"],
         },
     },
@@ -469,8 +472,11 @@ def run_tool(name, tool_input):
 
     if name == "lookup_colleague":
         # directory details only (employees.directory_entry): never balances, pay or history
-        from employees import find_colleagues
-        return find_colleagues(tool_input.get("name", ""))
+        from employees import find_colleagues, my_record
+        wanted = tool_input.get("name", "").strip().lower()
+        if wanted in ("me", "myself", "i", "my", ""):
+            return my_record(LOGGED_IN_ID)       # "me" is always the login, never a name the model chose
+        return find_colleagues(wanted)
 
     if name == "search_policy":
         sections = search_policy(tool_input["question"])
