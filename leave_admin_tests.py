@@ -1,6 +1,8 @@
 # leave_admin_tests.py: checks public holidays, balance adjustments and the yearly reset.
 # No AI, no API keys, runs in CI.   python leave_admin_tests.py
 import os
+import sqlite3
+import subprocess
 import sys
 import tempfile
 from datetime import date
@@ -9,6 +11,7 @@ import db
 db.DB_PATH = os.path.join(tempfile.mkdtemp(), "leave_admin_test.db")   # throwaway database
 os.environ["HRM_DB"] = db.DB_PATH          # so demo_data.py can't switch back to web_demo.db
 import demo_data
+import hr_queries
 import leave_admin as la
 import tools
 
@@ -27,6 +30,10 @@ def fresh():
         conn.execute("DELETE FROM holidays")
         conn.execute("DELETE FROM holiday_plans")
         conn.execute("UPDATE profiles SET holiday_plan_id = NULL")
+        # profiles survive a reset, so put back everyone's start date and clear any end date a test set
+        conn.execute("UPDATE profiles SET end_date = NULL")
+        for emp_id, _title, _dept, _loc, start in hr_queries.SEED_PROFILES:
+            conn.execute("UPDATE profiles SET start_date = ? WHERE emp_id = ?", (start, emp_id))
     conn.close()
     la.init_leave_admin()
 
@@ -155,7 +162,7 @@ def adjustment_rules():
     assert "error" in la.adjust_balance("H001", "E001", "casual", 1, " ")          # reason needed
     assert "error" in la.adjust_balance("H001", "E001", "casual", 0, "x")
     assert "error" in la.adjust_balance("H001", "E001", "casual", 31, "x")         # too big
-    assert "error" in la.adjust_balance("H001", "E001", "paid", 1, "x")            # unknown type
+    assert "error" in la.adjust_balance("H001", "E001", "unpaid", 1, "x")          # unknown type
     # Emma has 8 casual days; with 2 waiting for approval the balance can't drop below 2
     tools.apply_leave("E001", "casual", "2027-03-01", "2027-03-02")
     assert "can't go below 2" in la.adjust_balance("H001", "E001", "casual", -7, "x")["error"]
@@ -193,6 +200,176 @@ def people_who_have_left_are_not_reset():
     employees.offboard_employee("H001", "E002", "2026-12-31", "Resigned")
     assert la.run_year_start(2027, today=date(2027, 1, 1))["people"] == 5
     assert balance("E002", "casual") == 2                                            # Hugo's stays as it was
+
+
+# ---------- paid leave (congés payés): 2.5 days earned every month ----------
+
+def paid_lines(emp_id):
+    return [(a["kind"], a["days"]) for a in la.balance_history(emp_id)["adjustments"] if a["leave_type"] == "paid"]
+
+
+@test
+def monthly_accrual_adds_2_5_paid_days_and_logs_why():
+    fresh()
+    result = la.run_month_accrual(2026, 10, today=date(2026, 11, 1))
+    assert result == {"success": True, "month": "October 2026", "people": 6, "days_in_total": 15}, result
+    assert balance("E001", "paid") == 15 and balance("E003", "paid") == 5      # 12.5 + 2.5, 2.5 + 2.5
+    line = next(a for a in la.balance_history("E001")["adjustments"] if a["kind"] == "accrual")
+    assert (line["leave_type"], line["days"], line["reason"], line["changed_by"]) == (
+        "paid", 2.5, "Paid leave earned in October 2026", "Automatic update")
+
+
+@test
+def a_month_is_credited_only_once():
+    fresh()
+    assert la.run_month_accrual(2026, 10, today=date(2026, 11, 1))["success"]
+    assert "already been credited" in la.run_month_accrual(2026, 10, today=date(2026, 11, 2))["error"]
+    assert balance("E001", "paid") == 15                                         # not applied twice
+    assert la.month_accrual_preview(2026, 10)["already_done"]["ran_by"] == "system"
+    assert la.run_month_accrual(2026, 11, today=date(2026, 12, 1))["success"]    # next month is its own run
+    assert balance("E001", "paid") == 17.5
+
+
+@test
+def a_month_cannot_be_credited_before_it_ends():
+    fresh()
+    assert "from 2026-10-31" in la.run_month_accrual(2026, 10, today=date(2026, 10, 30))["error"]
+    assert balance("E001", "paid") == 12.5                                       # nothing happened
+    assert la.run_month_accrual(2026, 10, today=date(2026, 10, 31))["success"]   # the last day itself is fine
+    assert la.last_finished_month(date(2026, 11, 1)) == (2026, 10)
+    assert la.last_finished_month(date(2027, 1, 15)) == (2026, 12)
+
+
+@test
+def only_hr_can_run_the_accrual_by_hand():
+    fresh()
+    for who in ("E001", "M001", "C001"):
+        assert "error" in la.run_month_accrual(2026, 10, ran_by=who, today=date(2026, 11, 1))
+    assert balance("E001", "paid") == 12.5
+    assert la.run_month_accrual(2026, 10, ran_by="H001", today=date(2026, 11, 1))["success"]
+    line = next(a for a in la.balance_history("E001")["adjustments"] if a["kind"] == "accrual")
+    assert line["changed_by"] == "Narmadha"                                      # the log says who
+
+
+@test
+def a_part_month_earns_a_share_in_proportion_to_the_days_employed():
+    fresh()
+    conn = db.get_conn()
+    with conn:
+        conn.execute("UPDATE profiles SET start_date = '2026-10-03' WHERE emp_id = 'E001'")   # 29 of 31 days
+        conn.execute("UPDATE profiles SET start_date = '2026-10-04' WHERE emp_id = 'E002'")   # 28 of 31 days
+        conn.execute("UPDATE profiles SET start_date = '2026-10-05' WHERE emp_id = 'E003'")   # 27 of 31 days
+        conn.execute("UPDATE profiles SET end_date = '2026-10-15' WHERE emp_id = 'H001'")     # left half way: 15 of 31
+        conn.execute("UPDATE profiles SET end_date = '2026-09-30' WHERE emp_id = 'M001'")     # left the month before
+    conn.close()
+    preview = la.month_accrual_preview(2026, 10)
+    assert preview["people_earning"] == 5 and preview["days_in_total"] == 10.49   # 2.5+2.34+2.26+2.18+1.21
+    assert set(preview["part_month"]) == {"Emma", "Hugo", "Clara", "Narmadha"} and preview["not_earning"] == ["Lucas"]
+    assert la.run_month_accrual(2026, 10, today=date(2026, 11, 1))["people"] == 5
+    # 2.5 x 29/31 = 2.3387 -> 2.34, 2.5 x 28/31 = 2.2581 -> 2.26, 2.5 x 27/31 = 2.1774 -> 2.18, 2.5 x 15/31 = 1.2097 -> 1.21
+    assert [round(balance(e, "paid"), 2) for e in ("E001", "E002", "E003", "H001")] == [14.84, 9.76, 4.68, 16.21]
+    assert (balance("C001", "paid"), balance("M001", "paid")) == (27.5, 20)          # a full month is exactly 2.5; Lucas had left
+    line = next(a for a in la.balance_history("E001")["adjustments"] if a["kind"] == "accrual")
+    assert (line["days"], line["reason"]) == (2.34, "Paid leave earned in October 2026, pro-rated: 29 of 31 days")
+    assert tools.get_leave_balance("E001")["leave_balance"]["paid"] == 14.84         # no 14.839999 on screen
+    # February has 28 days: joining on the 15th is 14 of 28, exactly half
+    plan = {p["id"]: p["days"] for p in la._accrual_plan(2027, 2)}
+    assert plan["C001"] == 2.5
+    assert la._days_employed_in_month("2027-02-15", None, 2027, 2) == 14 and round(2.5 * 14 / 28, 2) == 1.25
+
+
+@test
+def year_start_carries_every_paid_day_and_rounds_the_total_up():
+    fresh()
+    preview = la.year_start_preview(2027)
+    # 25, 20, 12.5, 7.5, 2.5, 15 become 25, 20, 13, 8, 3, 15
+    assert preview["paid_days_carried"] == 84 and preview["paid_days_rounded_up"] == 1.5
+    assert la.run_year_start(2027, today=date(2027, 1, 1))["success"]
+    assert [balance(e, "paid") for e in ("C001", "E001", "E002", "E003")] == [25, 13, 8, 3]
+    assert paid_lines("E001") == [("round_up", 0.5)]                             # the rounding is explained
+    assert paid_lines("C001") == []                                              # a whole number needs none
+    reason = next(a["reason"] for a in la.balance_history("E001")["adjustments"] if a["kind"] == "round_up")
+    assert "L3141-7" in reason
+
+
+@test
+def year_start_rounds_up_by_the_exact_fraction_and_ignores_float_noise():
+    fresh()
+    conn = db.get_conn()
+    with conn:
+        conn.execute("UPDATE employees SET paid_balance = 14.01 WHERE id = 'E001'")           # up to 15
+        conn.execute("UPDATE employees SET paid_balance = 14.0000000001 WHERE id = 'E002'")   # noise: stays 14
+        conn.execute("UPDATE employees SET paid_balance = 14.84 WHERE id = 'E003'")
+    conn.close()
+    assert la.run_year_start(2027, today=date(2027, 1, 1))["success"]
+    assert [balance(e, "paid") for e in ("E001", "E002", "E003")] == [15, 14, 15]
+    assert paid_lines("E001") == [("round_up", 0.99)] and paid_lines("E003") == [("round_up", 0.16)]
+    assert paid_lines("E002") == []
+
+
+@test
+def paid_leave_adjustments_may_be_half_days_but_casual_and_sick_may_not():
+    fresh()
+    assert la.adjust_balance("H001", "E001", "paid", 2.5, "Days brought from a previous employer")["balance_after"] == 15
+    assert la.adjust_balance("H001", "E001", "paid", -0.5, "Correction")["balance_after"] == 14.5
+    assert "half days" in la.adjust_balance("H001", "E001", "paid", 0.3, "x")["error"]
+    assert "whole number" in la.adjust_balance("H001", "E001", "casual", 0.5, "x")["error"]
+    assert balance("E001", "paid") == 14.5 and balance("E001", "casual") == 8
+    assert la.balance_history("E001")["balance"] == {"casual": 8, "sick": 5, "paid": 14.5}
+
+
+@test
+def accrual_status_names_the_last_month_and_the_next_one_with_its_date():
+    fresh()
+    s = la.accrual_status(today=date(2026, 11, 7))
+    assert s["last_credited"] is None                                     # nothing credited yet: start with last month
+    assert (s["next"]["label"], s["next"]["can_run_from"], s["next"]["can_run_now"]) == ("October 2026", "2026-10-31", True)
+    assert la.run_month_accrual(2026, 10, ran_by="H001", today=date(2026, 11, 7))["success"]
+    s = la.accrual_status(today=date(2026, 11, 7))
+    assert (s["last_credited"]["month"], s["last_credited"]["ran_by"]) == ("October 2026", "Narmadha")
+    assert (s["next"]["label"], s["next"]["can_run_from"], s["next"]["can_run_now"]) == ("November 2026", "2026-11-30", False)
+    assert la.accrual_status(today=date(2026, 11, 30))["next"]["can_run_now"]      # the last day itself is enough
+    assert la.run_month_accrual(2026, 11, today=date(2026, 12, 1))["success"]
+    assert la.run_month_accrual(2026, 12, today=date(2027, 1, 1))["success"]
+    assert la.accrual_status(today=date(2027, 1, 2))["next"]["label"] == "January 2027"   # December rolls over
+
+
+@test
+def databases_made_before_paid_leave_get_the_column():
+    old_path = db.DB_PATH
+    db.DB_PATH = os.path.join(tempfile.mkdtemp(), "before_paid_leave.db")
+    try:
+        conn = sqlite3.connect(db.DB_PATH)     # the employees table as it was before this feature
+        conn.execute("""CREATE TABLE employees (id TEXT PRIMARY KEY, name TEXT NOT NULL, role TEXT NOT NULL,
+                        manager_id TEXT, email TEXT, casual_balance INTEGER NOT NULL, sick_balance INTEGER NOT NULL)""")
+        conn.execute("INSERT INTO employees VALUES ('E009', 'Old Timer', 'employee', NULL, 'o@x.eu', 3, 2)")
+        conn.commit()
+        conn.close()
+        db.init_db()
+        db.init_db()                                                     # running it twice is harmless
+        assert tools.get_employee("E009")["paid_balance"] == 0           # existing people start at 0
+        assert tools.get_employee("E001")["paid_balance"] == 12.5        # seed people are added as before
+    finally:
+        db.DB_PATH = old_path
+
+
+@test
+def the_monthly_job_runs_from_the_command_line():
+    fresh()
+    env = {**os.environ, "HRM_DB": db.DB_PATH}
+    here = os.path.dirname(os.path.abspath(__file__))
+    def job(*args):
+        return subprocess.run([sys.executable, "leave_jobs.py", *args], cwd=here, env=env,
+                              capture_output=True, text=True)
+    first = job("month-end", "2026-10")
+    assert first.returncode == 0 and "'success': True" in first.stdout, first.stdout + first.stderr
+    assert balance("E001", "paid") == 15
+    again = job("month-end", "2026-10")
+    assert again.returncode == 0 and "already been credited" in again.stdout      # a daily cron is safe
+    assert balance("E001", "paid") == 15
+    assert job("month-end", "banana").returncode != 0                              # bad input is a failure
+    assert job("month-end", "2999-01").returncode != 0                             # a month that hasn't ended is too
+    assert balance("E001", "paid") == 15
 
 
 if __name__ == "__main__":

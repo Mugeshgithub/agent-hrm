@@ -246,7 +246,8 @@ def save(co):
     profile_cols = {r["name"] for r in conn.execute("PRAGMA table_info(profiles)")}
     with conn:   # everyone or no one
         for p in co.people:
-            conn.execute("INSERT INTO employees VALUES (?, ?, ?, ?, ?, ?, ?)",
+            conn.execute("""INSERT INTO employees (id, name, role, manager_id, email, casual_balance, sick_balance)
+                            VALUES (?, ?, ?, ?, ?, ?, ?)""",
                          (p["id"], p["name"], p["role"], p["manager_id"], p["email"], p["casual"], p["sick"]))
             if "contract_type" in profile_cols:
                 conn.execute("""INSERT OR REPLACE INTO profiles (emp_id, title, department, location, start_date, contract_type)

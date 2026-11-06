@@ -43,14 +43,16 @@ export function LeaveForm({ open, onClose }: { open: boolean; onClose: () => voi
   }
 
   const blocked = !preview || !preview.enough || preview.in_past || preview.working_days === 0;
+  const paid = type === "paid";      // paid leave is counted Monday to Saturday, not as "working days"
+  const unit = (n: number) => (paid ? "" : "working ") + (n === 1 ? "day" : "days");
 
   return (
     <Dialog open={open} onClose={onClose} title="Request time off">
       <div className="space-y-4">
         <fieldset>
           <legend className="label">Type</legend>
-          <div className="grid grid-cols-2 gap-2">
-            {["casual", "sick"].map((t) => (
+          <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
+            {["casual", "sick", "paid"].map((t) => (
               <label key={t} className={`flex cursor-pointer items-center gap-2 rounded border px-3 h-10 ${
                 type === t ? "border-dossier bg-dossier-tint" : "border-rule-strong hover:bg-paper"}`}>
                 <input type="radio" name="type" value={t} checked={type === t} onChange={() => setType(t)} className="accent-dossier" />
@@ -71,13 +73,15 @@ export function LeaveForm({ open, onClose }: { open: boolean; onClose: () => voi
 
         {preview && (
           <div className="rounded border border-rule bg-paper px-4 py-3">
-            <p className="font-medium">{range(start, end)}: {preview.working_days} working {preview.working_days === 1 ? "day" : "days"}</p>
+            <p className="font-medium">{range(start, end)}: {preview.working_days} {unit(preview.working_days)}</p>
             <p className="text-sm text-ink-soft mt-0.5">
               {preview.in_past ? "Leave can't start in the past." :
-               preview.working_days === 0 ? "There are no working days in these dates." :
+               preview.working_days === 0 ? `There are no ${paid ? "days to take" : "working days"} in these dates.` :
                preview.enough ? `You'll have ${preview.after} ${leaveLabel(type).toLowerCase()} days left once it's approved.` :
                `You have ${preview.available} ${leaveLabel(type).toLowerCase()} days available, including requests still waiting.`}
             </p>
+            {paid && !preview.in_past && preview.working_days > 0 &&
+              <p className="text-sm text-ink-soft mt-0.5">Paid leave counts Monday to Saturday. Sundays and public holidays aren't counted.</p>}
           </div>
         )}
         {error && <ErrorNote message={error} />}

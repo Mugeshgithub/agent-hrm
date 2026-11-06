@@ -20,8 +20,8 @@ import leave_admin
 import payslips
 from demo_data import init_all
 from notifications import notify_decision, notify_ticket_reply
-from tools import (get_employee, apply_leave, cancel_leave, count_working_days, holidays_of, get_pending_requests,
-                   decide_leave, create_hr_ticket, get_my_tickets, reply_to_ticket, PENDING)
+from tools import (get_employee, apply_leave, cancel_leave, days_for, holidays_of, get_pending_requests,
+                   decide_leave, create_hr_ticket, get_my_tickets, reply_to_ticket, PENDING, LEAVE_TYPES)
 
 db.DB_PATH = os.getenv("HRM_DB", "hr.db")
 init_all()   # creates any missing tables; never wipes data
@@ -146,11 +146,11 @@ def leave_preview(body: LeaveIn, request: Request):
         start, end = date.fromisoformat(body.start_date), date.fromisoformat(body.end_date)
     except ValueError:
         raise HTTPException(400, "Use real dates.")
-    if body.leave_type not in ("casual", "sick"):
-        raise HTTPException(400, "Choose casual or sick leave.")
+    if body.leave_type not in LEAVE_TYPES:
+        raise HTTPException(400, "Choose casual, sick or paid leave.")
     if end < start:
         raise HTTPException(400, "The end date is before the start date.")
-    days = count_working_days(start, end, holidays_of(emp["id"]))
+    days = days_for(body.leave_type, start, end, holidays_of(emp["id"]))
     available = hr_queries.balances(emp["id"])[body.leave_type]["available"]
     return {"working_days": days, "available": available, "after": available - days,
             "enough": days <= available, "in_past": start < date.today()}
@@ -420,7 +420,7 @@ class FloaterIn(BaseModel):
 
 class AdjustIn(BaseModel):
     leave_type: str
-    days: int
+    days: float      # paid leave moves in half days; leave_admin checks the rest
     reason: str
 
 
@@ -525,6 +525,21 @@ def year_start_preview(request: Request, year: int | None = None):
 def run_year_start(body: YearIn, request: Request):
     hr = need(request, "hr")
     return fail_on_error(leave_admin.run_year_start(body.year, ran_by=hr["id"]))
+
+
+@app.get("/api/hr/leave/month-accrual")
+def month_accrual_status(request: Request):
+    need(request, "hr")
+    return leave_admin.accrual_status()
+
+
+@app.post("/api/hr/leave/month-accrual")
+def run_month_accrual(request: Request):
+    # same rules as the cron job (leave_jobs.py month-end): only after the month has ended, once per
+    # month, written to the balance history with this person's name. Always the next month in line.
+    hr = need(request, "hr")
+    nxt = leave_admin.accrual_status()["next"]
+    return fail_on_error(leave_admin.run_month_accrual(nxt["year"], nxt["month"], ran_by=hr["id"]))
 
 
 # ---------- assistant ----------

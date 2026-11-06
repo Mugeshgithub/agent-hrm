@@ -46,8 +46,8 @@ export default function HomePage() {
             <button className="btn-primary" onClick={() => setAsking(true)}>Request time off</button>
           </div>
           <div className="grid sm:grid-cols-2 gap-6 px-5 py-5">
-            {(["casual", "sick"] as const).map((t) => (
-              <div key={t}>
+            {(["paid", "casual", "sick"] as const).map((t) => (
+              <div key={t} className={t === "paid" ? "sm:col-span-2" : undefined}>
                 <p className="text-sm text-ink-soft">{leaveLabel(t)}</p>
                 <p className="mt-0.5"><span className="text-xl font-semibold">{data.balances[t].available}</span>
                   <span className="ml-1.5 text-ink-soft">{data.balances[t].available === 1 ? "day" : "days"} available</span></p>

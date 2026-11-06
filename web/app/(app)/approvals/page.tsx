@@ -35,7 +35,7 @@ function Request({ p }: { p: Pending }) {
   const [reason, setReason] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
-  const after = p.balances[p.leave_type as "casual" | "sick"] as Pending["balances"]["casual"] | undefined;   // undefined for floating holidays
+  const after = p.balances[p.leave_type as keyof Balances] as Pending["balances"]["casual"] | undefined;   // undefined for floating holidays
 
   async function decide(decision: "approve" | "reject") {
     setBusy(true);
@@ -54,7 +54,7 @@ function Request({ p }: { p: Pending }) {
           <div>
             <p className="font-medium">{p.employee_name}</p>
             <p>{leaveLabel(p.leave_type)}, {range(p.start, p.end)}</p>
-            <p className="text-sm text-ink-soft">{p.days} working {p.days === 1 ? "day" : "days"}, starts {relative(p.start)}</p>
+            <p className="text-sm text-ink-soft">{p.days} {p.leave_type === "paid" ? "" : "working "}{p.days === 1 ? "day" : "days"}, starts {relative(p.start)}</p>
           </div>
         </div>
         <div className="text-sm space-y-1">

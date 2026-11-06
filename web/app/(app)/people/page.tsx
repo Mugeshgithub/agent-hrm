@@ -54,7 +54,7 @@ export default function People() {
               <th className="table-head px-3 py-2.5">Team</th>
               <th className="table-head px-3 py-2.5">Reports to</th>
               <th className="table-head px-3 py-2.5">Since</th>
-              {isHR && <th className="table-head px-3 py-2.5 text-right">Casual / sick</th>}
+              {isHR && <th className="table-head px-3 py-2.5 text-right whitespace-nowrap">Casual / sick / paid</th>}
               {isHR && <th className="table-head px-5 py-2.5"><span className="sr-only">Actions</span></th>}
             </tr>
           </thead>
@@ -71,7 +71,7 @@ export default function People() {
                 <td className="px-3 py-3"><span className="block">{p.department}</span><span className="block text-sm text-ink-soft">{p.location}, {ROLE[p.role]}</span></td>
                 <td className="px-3 py-3">{p.manager_name ?? <span className="text-ink-faint">None</span>}</td>
                 <td className="px-3 py-3 whitespace-nowrap">{day(p.start_date)} {p.start_date.slice(0, 4)}</td>
-                {isHR && <td className="px-3 py-3 text-right">{p.casual_balance} / {p.sick_balance}</td>}
+                {isHR && <td className="px-3 py-3 text-right whitespace-nowrap">{p.casual_balance} / {p.sick_balance} / {p.paid_balance}</td>}
                 {isHR && <td className="px-5 py-3 text-right">{p.id !== me.id && <button className="text-sm text-dossier hover:underline whitespace-nowrap" onClick={() => setViewing(p)}>Open payslip</button>}</td>}
               </tr>
             ))}

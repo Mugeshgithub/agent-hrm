@@ -123,7 +123,7 @@ function ConfirmCard({ card, busy, onDecide }: { card: Card; busy: boolean; onDe
   const rows: [string, ReactNode][] =
     card.tool === "apply_leave" ? [
       ["Type", leaveLabel(d.leave_type)], ["Dates", range(d.start_date, d.end_date)],
-      ["Working days", d.working_days], ["Left after approval", `${d.balance_after_approval} days`]]
+      [d.leave_type === "paid" ? "Days (Mon–Sat)" : "Working days", d.working_days], ["Left after approval", `${d.balance_after_approval} days`]]
     : card.tool === "cancel_leave" ? [["Request", `#${i.request_id}`]]
     : card.tool === "decide_leave" ? [["Request", `#${i.request_id}`], ["Decision", i.decision === "approve" ? "Approve" : "Reject"],
       ...(i.reason ? [["Reason", i.reason] as [string, ReactNode]] : [])]

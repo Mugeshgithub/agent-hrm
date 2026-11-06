@@ -87,6 +87,22 @@ def seed_activity():
     print("Demo activity added.")
 
 
+def catch_up_paid_leave():
+    # a demo database starts with 0 paid days. Credit January up to last month with the REAL monthly
+    # job, once, so people have what they would have earned (the job refuses to credit a month twice)
+    today = date.today()
+    conn = db.get_conn()
+    started = conn.execute("SELECT COUNT(*) FROM leave_runs WHERE key LIKE 'accrual-%'").fetchone()[0]
+    conn.close()
+    if started:
+        return
+    last_year, last_month = leave_admin.last_finished_month(today)
+    for month in range(1, last_month + 1):
+        leave_admin.run_month_accrual(last_year, month, today=today)
+    print(f"Paid leave credited for January to {date(last_year, last_month, 1):%B}.")
+
+
 if __name__ == "__main__":
     init_all(reset="--reset" in sys.argv)
     seed_activity()
+    catch_up_paid_leave()
