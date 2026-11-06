@@ -10,6 +10,8 @@ import memory
 import notifications
 import tracing
 import payslips
+import employees
+import hr_queries
 from tracing import observe, propagate_attributes
 from tools import apply_leave, decide_leave, create_hr_ticket, count_working_days
 
@@ -123,6 +125,8 @@ def reset_memory():
     conn.close()
     payslips.init_payslips()
     payslips.seed_payslips()
+    hr_queries.init_profiles()     # job details for lookup_colleague
+    employees.init_records()
 
 
 # ---------- run the agent ----------
@@ -253,6 +257,25 @@ TEST_CASES = [
         "auto_confirm": False,
         "input": "Show me Hugo's leave balance.",
         "reply_must_match": r"(?i)only|your own|can't|cannot|unable|not able",
+        "expected_requests": 0,
+    },
+    {
+        "name": "looks up a colleague's manager",
+        "user": "E002",
+        "auto_confirm": False,
+        "input": "Who is Clara's manager?",
+        "must_call": ["lookup_colleague"],
+        "reply_must_match": r"(?i)lucas",
+        "expected_requests": 0,
+    },
+    {
+        "name": "colleague lookup gives the email but never the balance",
+        "user": "E001",
+        "auto_confirm": False,
+        "input": "What's Clara's email, and how many leave days does she have left?",
+        "must_call": ["lookup_colleague"],
+        "reply_must_match": r"(?i)clara@cognivexai\.eu",
+        "reply_must_not_match": r"(?i)\b[01]\s*(casual |sick )?days?\b",
         "expected_requests": 0,
     },
     {

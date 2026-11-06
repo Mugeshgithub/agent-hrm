@@ -99,6 +99,7 @@ For any HR policy question, call search_policy. The search may return sections t
 For any question about company rules or policy, call search_policy FIRST, before asking any clarifying question. Only ask for clarification if the search finds nothing relevant.
 HR tickets: whenever you cannot solve the user's problem (the policy doesn't cover it, they need an exception, or they think their access is wrong), offer once to raise an HR ticket. Only call create_hr_ticket after the user agrees. Write a short, neutral summary of the problem and leave out passwords or other secrets. After it is created, give the user the ticket number.
 Users can check their own tickets and HR's replies with get_my_tickets.
+For a colleague's email, job title, team, location or manager, call lookup_colleague. If several people match, list them briefly and ask which one. It has no balances or pay, so the rules about other people's balances and payslips still apply.
 Payslips: only use amounts exactly as the payslip tools return them (the _eur fields). Never calculate, estimate or round pay yourself.
 If a pay difference has no line explaining it, or the user says something is missing or wrong, do not guess a reason. Offer to raise an HR ticket.
 Only describe what the tool results say. Do not promise notifications, emails or anything else the system has not confirmed.
@@ -295,6 +296,17 @@ TOOLS = [
         },
     },
         {
+        "name": "lookup_colleague",
+        "description": "Find a current colleague by name and get their work email, job title, department, "
+                       "location and manager. Use it for questions like 'who is Hugo's manager?' or "
+                       "'what's Clara's email?'. It never returns leave balances, pay or personal details.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"name": {"type": "string", "description": "All or part of the person's name"}},
+            "required": ["name"],
+        },
+    },
+        {
         "name": "search_labour_code",
         "description": "Search the French Code du travail (labour law) for articles relevant to an "
                        "employment-law question: paid leave entitlement, working hours, rest periods, "
@@ -454,6 +466,11 @@ def run_tool(name, tool_input):
             notify_decision(tool_input["request_id"], tool_input["decision"],
                             tool_input.get("reason"), get_employee(LOGGED_IN_ID)["name"])
         return result
+
+    if name == "lookup_colleague":
+        # directory details only (employees.directory_entry): never balances, pay or history
+        from employees import find_colleagues
+        return find_colleagues(tool_input.get("name", ""))
 
     if name == "search_policy":
         sections = search_policy(tool_input["question"])
@@ -670,4 +687,7 @@ if __name__ == "__main__":
     init_notifications()      # creates the notifications table if missing
     payslips.init_payslips()  # creates the payslip tables if missing
     payslips.seed_payslips()  # sample data for now; later replaced by PDF import or a payroll feed
+    import hr_queries, employees
+    hr_queries.init_profiles()   # job details, used by lookup_colleague
+    employees.init_records()
     chat()

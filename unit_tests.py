@@ -151,18 +151,25 @@ def get_open_tickets_count():
 # ---------- NEW: tools per role ----------
 
 def fake_tools():
-    # the same 16 tool names the agent uses; payslip tools have an employee_id field
+    # the same 18 tool names the agent uses; payslip tools have an employee_id field
     names = ["get_leave_balance", "get_my_requests", "count_leave_days", "apply_leave",
              "cancel_leave", "search_policy", "create_hr_ticket", "get_my_tickets",
              "get_payslip", "compare_payslips", "get_pay_summary",
              "get_pending_requests", "get_team_member_balance", "decide_leave",
-             "get_open_tickets", "reply_to_ticket","search_labour_code"]
+             "get_open_tickets", "reply_to_ticket", "search_labour_code", "lookup_colleague"]
     tools = [{"name": n, "description": n, "input_schema": {"type": "object", "properties": {}}}
              for n in names]
     for t in tools:
         if t["name"] in ("get_payslip", "compare_payslips", "get_pay_summary"):
             t["input_schema"]["properties"]["employee_id"] = {"type": "string"}
     return tools
+
+
+@test
+def fake_tool_list_matches_the_agent():
+    import re
+    real = set(re.findall(r'"name": "(\w+)",\n\s+"description"', open("agent.py", encoding="utf-8").read()))
+    assert real == {t["name"] for t in fake_tools()}, real ^ {t["name"] for t in fake_tools()}
 
 
 MANAGER_ONLY = {"get_pending_requests", "get_team_member_balance", "decide_leave"}
@@ -178,21 +185,21 @@ def names_for(role):
 def employee_gets_no_manager_or_hr_tools():
     names = names_for("employee")
     assert not names & (MANAGER_ONLY | HR_ONLY), names
-    assert "apply_leave" in names and len(names) == 12, names
+    assert "apply_leave" in names and len(names) == 13, names
 
 
 @test
 def manager_gets_team_tools_but_not_hr_tools():
     names = names_for("manager")
     assert MANAGER_ONLY <= names and not names & HR_ONLY, names
-    assert len(names) == 15, names
+    assert len(names) == 16, names
 
 
 @test
 def hr_gets_ticket_tools_but_not_manager_tools():
     names = names_for("hr")
     assert HR_ONLY <= names and not names & MANAGER_ONLY, names
-    assert len(names) == 14, names
+    assert len(names) == 15, names
 
 
 @test

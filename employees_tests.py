@@ -89,6 +89,17 @@ def a_failed_change_leaves_nothing_behind():
     assert e.history("H001", "E001")["changes"] == []
 
 
+@test
+def colleague_lookup_is_safe_and_skips_people_who_left():
+    fresh()
+    r = e.find_colleagues("hug")
+    assert r["found"] == 1 and r["people"][0]["manager"] == "Lucas", r
+    assert not {"casual_balance", "sick_balance", "contract_type", "end_date"} & set(r["people"][0])
+    e.offboard_employee("H001", "E003", "2026-01-01", "Left")          # Clara left in January
+    assert e.find_colleagues("clara")["found"] == 0
+    assert "error" in e.find_colleagues("c")                            # too short to search
+
+
 if __name__ == "__main__":
     failed = 0
     for t in TESTS:

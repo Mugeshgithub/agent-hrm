@@ -281,3 +281,18 @@ def directory_entry(emp_id):
             "title": p.get("title"), "department": p.get("department"),
             "location": p.get("location"), "manager": mgr["name"] if mgr else None,
             "active": is_active(emp_id)}
+
+
+def find_colleagues(query, limit=5):
+    # the assistant's lookup: search current staff by name, return only the safe colleague view
+    text = (query or "").strip().lower()
+    if len(text) < 2:
+        return {"error": "Give at least 2 letters of the person's name."}
+    conn = db.get_conn()
+    rows = conn.execute("SELECT id FROM employees WHERE lower(name) LIKE ? ORDER BY name",
+                        (f"%{text}%",)).fetchall()
+    conn.close()
+    people = [directory_entry(r["id"]) for r in rows if is_active(r["id"])][:limit]
+    if not people:
+        return {"found": 0, "message": f"No current colleague matches '{query}'."}
+    return {"found": len(people), "people": people}
