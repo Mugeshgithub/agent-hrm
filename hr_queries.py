@@ -38,7 +38,8 @@ def _rows(sql, params=()):
 
 
 PERSON = """SELECT e.id, e.name, e.role, e.email, e.manager_id, m.name AS manager_name,
-                   p.title, p.department, p.location, p.start_date
+                   p.title, p.department, p.location, p.start_date, p.contract_type, p.end_date,
+                   (p.end_date IS NULL OR p.end_date >= date('now', 'localtime')) AS active
             FROM employees e
             LEFT JOIN profiles p ON p.emp_id = e.id
             LEFT JOIN employees m ON m.id = e.manager_id"""
@@ -79,7 +80,9 @@ def my_requests(emp_id):
 
 
 def team(manager_id):
-    members = _rows(PERSON + " WHERE e.manager_id = ? ORDER BY e.name", (manager_id,))
+    # people who have left (end date passed) are no longer on the team
+    members = _rows(PERSON + " WHERE e.manager_id = ? AND (p.end_date IS NULL OR p.end_date >= date('now', 'localtime'))"
+                             " ORDER BY e.name", (manager_id,))
     for m in members:
         m["balances"] = balances(m["id"])
     return members

@@ -144,6 +144,34 @@ def rule_errors_come_back_with_the_reason():
     r = as_person("H001").post("/api/hr/people/M001/offboard", json={"end_date": "2027-01-31", "reason": "test"})
     assert r.status_code == 400 and "still manages" in r.json()["detail"]
 
+@test
+def colleagues_see_the_safe_profile_hr_sees_more():
+    card = as_person("E002").get("/api/people/E001").json()
+    assert card["manager_name"] == "Arjun" and "contract_type" not in card and "balances" not in card
+    assert "contract_type" not in as_person("E002").get("/api/people").json()[0]
+    full = as_person("H001").get("/api/people/E001").json()
+    assert full["contract_type"] == "CDI" and "casual" in full["balances"]
+    reports = {r["id"] for r in as_person("E001").get("/api/people/M001").json()["reports"]}
+    assert {"E001", "E002", "E003"} <= reports
+
+
+@test
+def people_who_have_left_lose_access_and_leave_their_team():
+    hr = as_person("H001")
+    r = hr.post("/api/hr/people", json={"name": "Temp", "email": "temp@company.com", "role": "employee",
+                                        "title": "Intern", "department": "Engineering", "location": "Paris",
+                                        "start_date": "2025-01-06", "manager_id": "M001", "contract_type": "Internship"})
+    temp = r.json()["id"]
+    temp_client = as_person(temp)                                   # signed in while still employed
+    assert hr.post(f"/api/hr/people/{temp}/offboard", json={"end_date": "2025-06-30", "reason": "End of internship"}).status_code == 200
+    assert temp_client.get("/api/me").status_code == 401           # the open session stops working
+    assert TestClient(server.app).post("/api/session", json={"employee_id": temp}).status_code == 403
+    assert temp not in [m["id"] for m in as_person("M001").get("/api/team").json()]
+    assert temp not in [p["id"] for p in as_person("E001").get("/api/people").json()]
+    assert as_person("E001").get(f"/api/people/{temp}").status_code == 404
+    assert any(p["id"] == temp and not p["active"] for p in hr.get("/api/people").json())   # HR still sees the record
+
+
 if __name__ == "__main__":
     failed = 0
     for t in TESTS:

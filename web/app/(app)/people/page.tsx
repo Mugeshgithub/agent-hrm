@@ -1,7 +1,9 @@
 "use client";
+import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { useState } from "react";
 import useSWR from "swr";
-import { Search } from "lucide-react";
+import { Plus, Search } from "lucide-react";
 import { api, fetcher } from "@/lib/api";
 import { day } from "@/lib/format";
 import { Payslip, Person } from "@/lib/types";
@@ -10,23 +12,39 @@ import { Dialog } from "@/components/Dialog";
 import { ErrorNote, PageHeader } from "@/components/PageHeader";
 import { PayslipDoc } from "@/components/PayslipDoc";
 import { useMe } from "@/components/Me";
-
-const ROLE: Record<string, string> = { employee: "Employee", manager: "Manager", hr: "HR" };
+import { AddPersonDialog, ROLE } from "@/components/PersonForms";
 
 export default function People() {
   const me = useMe();
   const { data } = useSWR<Person[]>("/people", fetcher);
   const [q, setQ] = useState("");
   const [viewing, setViewing] = useState<Person | null>(null);
+  const [adding, setAdding] = useState(false);
+  const [showLeft, setShowLeft] = useState(false);
+  const router = useRouter();
   const isHR = me.role === "hr";
-  const rows = (data ?? []).filter((p) => `${p.name} ${p.title} ${p.department} ${p.location}`.toLowerCase().includes(q.toLowerCase()));
+  const formerCount = (data ?? []).filter((p) => !p.active).length;
+  const rows = (data ?? [])
+    .filter((p) => p.active || showLeft)
+    .filter((p) => `${p.name} ${p.title} ${p.department} ${p.location}`.toLowerCase().includes(q.toLowerCase()));
 
   return (
     <>
-      <PageHeader title="People" description={isHR ? "Everyone at the company. Leave balances and payslips are visible to HR only, and every payslip you open is logged." : "Who's who, and who they report to."} />
-      <div className="relative mb-4 max-w-sm">
-        <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-ink-faint" aria-hidden />
-        <input className="field pl-9" placeholder="Search by name, team or city" value={q} onChange={(e) => setQ(e.target.value)} aria-label="Search people" />
+      <PageHeader title="People"
+        description={isHR ? "Everyone at the company. Leave balances and payslips are visible to HR only, and every payslip you open is logged." : "Who's who, and who they report to."}
+        actions={isHR && <button className="btn-primary" onClick={() => setAdding(true)}><Plus size={16} aria-hidden /> Add person</button>} />
+      <div className="mb-4 flex flex-wrap items-center gap-x-5 gap-y-3">
+        <div className="relative w-full max-w-sm">
+          <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-ink-faint" aria-hidden />
+          <input className="field pl-9" placeholder="Search by name, team or city" value={q} onChange={(e) => setQ(e.target.value)} aria-label="Search people" />
+        </div>
+        <p className="text-sm text-ink-soft">{rows.length} {rows.length === 1 ? "person" : "people"}</p>
+        {isHR && formerCount > 0 && (
+          <label className="inline-flex items-center gap-2 text-sm">
+            <input type="checkbox" className="h-4 w-4 accent-dossier" checked={showLeft} onChange={(e) => setShowLeft(e.target.checked)} />
+            Show people who have left ({formerCount})
+          </label>
+        )}
       </div>
       <section className="panel overflow-x-auto">
         <table className="w-full min-w-[680px]">
@@ -46,8 +64,8 @@ export default function People() {
                 <td className="px-5 py-3">
                   <span className="flex items-center gap-3">
                     <Avatar name={p.name} size={32} />
-                    <span><span className="block font-medium">{p.name}{p.id === me.id && <span className="ml-1.5 font-normal text-ink-soft">(you)</span>}</span>
-                      <span className="block text-sm text-ink-soft">{p.title}</span></span>
+                    <span><Link href={`/people/${p.id}`} className="block font-medium hover:text-dossier hover:underline">{p.name}{p.id === me.id && <span className="ml-1.5 font-normal text-ink-soft">(you)</span>}</Link>
+                      <span className="block text-sm text-ink-soft">{p.title}{!p.active && p.end_date && `, left ${day(p.end_date)} ${p.end_date.slice(0, 4)}`}</span></span>
                   </span>
                 </td>
                 <td className="px-3 py-3"><span className="block">{p.department}</span><span className="block text-sm text-ink-soft">{p.location}, {ROLE[p.role]}</span></td>
@@ -61,6 +79,7 @@ export default function People() {
         </table>
       </section>
       {isHR && <PayslipViewer person={viewing} onClose={() => setViewing(null)} />}
+      {isHR && <AddPersonDialog open={adding} onClose={() => setAdding(false)} onAdded={(id) => { setAdding(false); router.push(`/people/${id}`); }} />}
     </>
   );
 }
