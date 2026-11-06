@@ -335,7 +335,7 @@ TEST_CASES = [
         "auto_confirm": False,
         "input": "Which public holidays do I have in December 2026, and are there any floating holidays I can take?",
         "must_call": ["get_holidays"],
-        "reply_must_match": r"(?i)(?=.*christmas day)(?=.*christmas eve)",
+        "reply_must_match": r"(?is)(?=.*christmas day)(?=.*christmas eve)",
         "expected_requests": 0,
     },
     {

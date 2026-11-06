@@ -527,6 +527,21 @@ def run_year_start(body: YearIn, request: Request):
     return fail_on_error(leave_admin.run_year_start(body.year, ran_by=hr["id"]))
 
 
+@app.get("/api/hr/leave/month-accrual")
+def month_accrual_status(request: Request):
+    need(request, "hr")
+    return leave_admin.accrual_status()
+
+
+@app.post("/api/hr/leave/month-accrual")
+def run_month_accrual(request: Request):
+    # same rules as the cron job (leave_jobs.py month-end): only after the month has ended, once per
+    # month, written to the balance history with this person's name. Always the next month in line.
+    hr = need(request, "hr")
+    nxt = leave_admin.accrual_status()["next"]
+    return fail_on_error(leave_admin.run_month_accrual(nxt["year"], nxt["month"], ran_by=hr["id"]))
+
+
 # ---------- assistant ----------
 # The agent keeps one conversation in memory at a time, so calls are serialised with a lock.
 # Good for a local demo; a multi-user deployment would keep per-session agent state instead.

@@ -20,6 +20,7 @@ def get_employee(employee_id):
 
 def clean_days(n):
     # paid leave comes in halves (2.5 a month): show 12 instead of 12.0, but keep 7.5
+    n = round(n, 2)                   # pro-rated paid leave has up to 2 decimals; no 2.3399999
     return int(n) if n == int(n) else n
 
 
@@ -209,7 +210,7 @@ def decide_leave(manager_id, request_id, decision, reason=""):
         column = f"{req['leave_type']}_balance"  # safe: leave_type was checked when the request was created
         with conn:
             cur = conn.execute(
-                f"UPDATE employees SET {column} = {column} - ? WHERE id = ? AND {column} >= ?",
+                f"UPDATE employees SET {column} = ROUND({column} - ?, 2) WHERE id = ? AND {column} >= ?",
                 (req["days"], req["employee_id"], req["days"]),
             )
             if cur.rowcount == 0:
@@ -261,7 +262,7 @@ def cancel_leave(employee_id, request_id):
             column = f"{req['leave_type']}_balance"
             with conn:  # give the days back and cancel together, or not at all
                 conn.execute("UPDATE leave_requests SET status = 'cancelled' WHERE id = ?", (request_id,))
-                conn.execute(f"UPDATE employees SET {column} = {column} + ? WHERE id = ?",
+                conn.execute(f"UPDATE employees SET {column} = ROUND({column} + ?, 2) WHERE id = ?",
                              (req["days"], employee_id))
             return {"cancelled": True, "days_returned": req["days"],
                     "message": "Approved leave cancelled and days returned to your balance."}

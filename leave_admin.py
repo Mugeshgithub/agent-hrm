@@ -4,6 +4,7 @@
 # Every balance change that isn't a leave request is written to leave_adjustments, so anyone can
 # see why their balance moved. No AI here, so it's unit-tested in CI (leave_admin_tests.py).
 import calendar
+import math
 from datetime import date, timedelta
 
 import db
@@ -16,9 +17,8 @@ MAX_ADJUSTMENT = 30                      # one adjustment can't move a balance b
 
 # paid leave (congés payés, hr_policy.md "Paid leave"): earned monthly, not given in January
 PAID_PER_MONTH = 2.5                     # Code du travail L3141-3: 2.5 jours ouvrables per month worked
-PAID_MONTH_MIN_DAYS = 28                 # L3141-4: four weeks of work count as a month
-PAID_CARRY_MAX = None                    # None = unused paid days carry over in full. The policy sets no
-                                         # limit, and losing days the employer never let someone take is risky
+                                         # (a part month is pro-rated by the days employed, to 2 decimals)
+                                         # Unused paid days carry over in full: there is no cap.
 
 # ---------- holiday plans (like Keka's holiday calendars) ----------
 # A plan is a list of holidays for a group of people, usually an office or region. Each holiday is
@@ -67,7 +67,7 @@ def init_leave_admin():
                             emp_id TEXT NOT NULL,
                             leave_type TEXT NOT NULL,
                             days REAL NOT NULL,             -- + adds to the balance, - takes away (paid leave comes in halves)
-                            kind TEXT NOT NULL,             -- manual, year_start, lapse, accrual
+                            kind TEXT NOT NULL,             -- manual, year_start, lapse, accrual, round_up
                             reason TEXT NOT NULL,
                             changed_by TEXT NOT NULL,       -- an HR id, or 'system' for the yearly job
                             changed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)""")
@@ -539,7 +539,7 @@ def adjust_balance(hr_id, emp_id, leave_type, days, reason):
                              f"{'day' if pending == 1 else 'days'} waiting for approval, so the balance "
                              f"can't go below {pending}."}
         with conn:   # the balance and its history line change together, or not at all
-            conn.execute(f"UPDATE employees SET {column} = {column} + ? WHERE id = ?", (days, emp_id))
+            conn.execute(f"UPDATE employees SET {column} = ROUND({column} + ?, 2) WHERE id = ?", (days, emp_id))
             conn.execute("""INSERT INTO leave_adjustments (emp_id, leave_type, days, kind, reason, changed_by)
                             VALUES (?, ?, ?, 'manual', ?, ?)""", (emp_id, leave_type, days, reason.strip(), hr_id))
     finally:
@@ -570,7 +570,8 @@ def balance_history(emp_id, year=None):
             f"approved_leave_in_{year}": taken,
             "rules": f"Each year starts with {ALLOWANCE['casual']} casual and {ALLOWANCE['sick']} sick days. "
                      f"Up to {CASUAL_CARRY_MAX} unused casual days carry over; unused sick days lapse. "
-                     f"Paid leave is earned at {PAID_PER_MONTH} days a month and unused days carry over."}
+                     f"Paid leave is earned at {PAID_PER_MONTH} days a month (a part month is pro-rated); unused days "
+                     f"carry over, rounded up to a whole day at the start of the year."}
 
 
 # ---------- start of the year ----------
@@ -587,9 +588,13 @@ def _year_plan(year):
         if not employees.is_active(p["id"], on=date(year, 1, 1)):
             continue
         carry = min(p["casual_balance"], CASUAL_CARRY_MAX)
-        paid_carry = p["paid_balance"] if PAID_CARRY_MAX is None else min(p["paid_balance"], PAID_CARRY_MAX)
+        # L3141-7: "Lorsque le nombre de jours ouvrables ... n'est pas un nombre entier, la durée du congé
+        # est portée au nombre entier immédiatement supérieur." So the paid total is rounded UP to a whole
+        # day. Rounded to 2 decimals first, so float noise (12.000000001) can't push it up a day.
+        paid_now = round(p["paid_balance"], 2)
+        paid_after = math.ceil(paid_now)
         plan.append({"id": p["id"], "name": p["name"],
-                     "paid_carried": paid_carry, "paid_lapsing": p["paid_balance"] - paid_carry,
+                     "paid_after": paid_after, "paid_rounded_up": round(paid_after - paid_now, 2),
                      "casual_lapsing": p["casual_balance"] - carry, "casual_carried": carry,
                      "sick_lapsing": p["sick_balance"],
                      "casual_after": carry + ALLOWANCE["casual"], "sick_after": ALLOWANCE["sick"]})
@@ -603,8 +608,8 @@ def year_start_preview(year):
     conn.close()
     return {"year": year, "people": len(plan), "already_done": dict(done) if done else None,
             "runs_on": f"{year}-01-01",
-            "paid_days_carried": clean_days(sum(p["paid_carried"] for p in plan)),
-            "paid_days_lapsing": clean_days(sum(p["paid_lapsing"] for p in plan)),
+            "paid_days_carried": clean_days(sum(p["paid_after"] for p in plan)),
+            "paid_days_rounded_up": clean_days(sum(p["paid_rounded_up"] for p in plan)),
             "casual_days_carried": sum(p["casual_carried"] for p in plan),
             "casual_days_lapsing": sum(p["casual_lapsing"] for p in plan),
             "sick_days_lapsing": sum(p["sick_lapsing"] for p in plan),
@@ -634,16 +639,16 @@ def run_year_start(year, ran_by="system", today=None):
                 if p["sick_lapsing"]:
                     rows.append(("sick", -p["sick_lapsing"], "lapse", "Unused sick days lapse at year end"))
                 rows.append(("sick", ALLOWANCE["sick"], "year_start", f"{year} sick allowance"))
-                # paid leave has no January allowance (it is earned monthly): it only carries over,
-                # and only the part above PAID_CARRY_MAX (if the company ever sets one) lapses
-                if p["paid_lapsing"]:
-                    rows.append((PAID, -p["paid_lapsing"], "lapse",
-                                 f"Unused paid days above the {PAID_CARRY_MAX}-day carry-over limit"))
+                # paid leave has no January allowance (it is earned monthly): every unused day carries over,
+                # and a part day is rounded up to the next whole day (L3141-7, see _year_plan)
+                if p["paid_rounded_up"]:
+                    rows.append((PAID, p["paid_rounded_up"], "round_up",
+                                 "Paid leave rounded up to the next whole day (Code du travail L3141-7)"))
                 for leave_type, days, kind, reason in rows:
                     conn.execute("""INSERT INTO leave_adjustments (emp_id, leave_type, days, kind, reason, changed_by)
                                     VALUES (?, ?, ?, ?, ?, ?)""", (p["id"], leave_type, days, kind, reason, ran_by))
                 conn.execute("UPDATE employees SET casual_balance = ?, sick_balance = ?, paid_balance = ? WHERE id = ?",
-                             (p["casual_after"], p["sick_after"], p["paid_carried"], p["id"]))
+                             (p["casual_after"], p["sick_after"], p["paid_after"], p["id"]))
             conn.execute("INSERT INTO leave_runs (key, ran_by, people) VALUES (?, ?, ?)", (key, ran_by, len(plan)))
     finally:
         conn.close()
@@ -668,8 +673,9 @@ def _days_employed_in_month(start, end, year, month):
 
 
 def _accrual_plan(year, month):
-    # who earns this month. L3141-4: four weeks of work count as a month, so someone who joined or
-    # left part way through earns it only if they were employed for at least 28 days of the month.
+    # what each person earns this month: 2.5 days x (days employed in the month / days in the month),
+    # to 2 decimals. A whole month is exactly 2.5; someone who joined or left part way gets a share.
+    in_month = calendar.monthrange(year, month)[1]
     conn = db.get_conn()
     people = [dict(r) for r in conn.execute(
         """SELECT e.id, e.name, e.paid_balance, p.start_date, p.end_date
@@ -678,8 +684,8 @@ def _accrual_plan(year, month):
     plan = []
     for p in people:
         worked = _days_employed_in_month(p["start_date"], p["end_date"], year, month)
-        plan.append({"id": p["id"], "name": p["name"], "days_employed": worked,
-                     "earns": worked >= PAID_MONTH_MIN_DAYS, "paid_before": p["paid_balance"]})
+        plan.append({"id": p["id"], "name": p["name"], "days_employed": worked, "days_in_month": in_month,
+                     "days": round(PAID_PER_MONTH * worked / in_month, 2), "paid_before": p["paid_balance"]})
     return plan
 
 
@@ -689,16 +695,17 @@ def month_accrual_preview(year, month):
     done = conn.execute("SELECT ran_by, ran_at FROM leave_runs WHERE key = ?",
                         (f"accrual-{year}-{month:02d}",)).fetchone()
     conn.close()
-    earners = [p for p in plan if p["earns"]]
+    earners = [p for p in plan if p["days"] > 0]
     return {"month": _month_label(year, month), "people_earning": len(earners),
-            "days_each": PAID_PER_MONTH, "days_in_total": clean_days(len(earners) * PAID_PER_MONTH),
-            "not_earning": [p["name"] for p in plan if not p["earns"]],
+            "days_in_total": clean_days(sum(p["days"] for p in earners)),
+            "part_month": [p["name"] for p in earners if p["days"] < PAID_PER_MONTH],
+            "not_earning": [p["name"] for p in plan if p["days"] == 0],
             "already_done": dict(done) if done else None}
 
 
 def run_month_accrual(year, month, ran_by="system", today=None):
-    # credits 2.5 paid days to everyone who earned the month; once per month, from the month's
-    # last day (scheduled: python leave_jobs.py month-end)
+    # credits everyone their share of 2.5 paid days; once per month, from the month's last day
+    # (scheduled: python leave_jobs.py month-end, or HR's "Run now" in Leave settings)
     today = today or date.today()
     if ran_by != "system" and (err := _not_hr(ran_by)):
         return err
@@ -706,24 +713,25 @@ def run_month_accrual(year, month, ran_by="system", today=None):
     if today < last_day:
         return {"error": f"{_month_label(year, month)} can only be credited from {last_day.isoformat()}."}
     key = f"accrual-{year}-{month:02d}"
-    plan = [p for p in _accrual_plan(year, month) if p["earns"]]
+    plan = [p for p in _accrual_plan(year, month) if p["days"] > 0]
     conn = db.get_conn()
     try:
         if conn.execute("SELECT 1 FROM leave_runs WHERE key = ?", (key,)).fetchone():
             return {"error": f"{_month_label(year, month)} has already been credited."}
         with conn:   # everyone or no one, and the run is recorded in the same transaction
             for p in plan:
-                conn.execute("UPDATE employees SET paid_balance = paid_balance + ? WHERE id = ?",
-                             (PAID_PER_MONTH, p["id"]))
+                conn.execute("UPDATE employees SET paid_balance = ROUND(paid_balance + ?, 2) WHERE id = ?",
+                             (p["days"], p["id"]))
+                reason = f"Paid leave earned in {_month_label(year, month)}"
+                if p["days_employed"] < p["days_in_month"]:
+                    reason += f", pro-rated: {p['days_employed']} of {p['days_in_month']} days"
                 conn.execute("""INSERT INTO leave_adjustments (emp_id, leave_type, days, kind, reason, changed_by)
-                                VALUES (?, ?, ?, 'accrual', ?, ?)""",
-                             (p["id"], PAID, PAID_PER_MONTH,
-                              f"Paid leave earned in {_month_label(year, month)}", ran_by))
+                                VALUES (?, ?, ?, 'accrual', ?, ?)""", (p["id"], PAID, p["days"], reason, ran_by))
             conn.execute("INSERT INTO leave_runs (key, ran_by, people) VALUES (?, ?, ?)", (key, ran_by, len(plan)))
     finally:
         conn.close()
     return {"success": True, "month": _month_label(year, month), "people": len(plan),
-            "days_each": PAID_PER_MONTH}
+            "days_in_total": clean_days(sum(p["days"] for p in plan))}
 
 
 def last_finished_month(today=None):
@@ -731,3 +739,29 @@ def last_finished_month(today=None):
     today = today or date.today()
     last = date(today.year, today.month, 1) - timedelta(days=1)
     return last.year, last.month
+
+
+def accrual_status(today=None):
+    # for HR's Leave settings: the last month credited, and the next one (the month after it, or the
+    # last finished month if nothing was ever credited) with the date it can run from
+    today = today or date.today()
+    conn = db.get_conn()
+    last = conn.execute(
+        """SELECT r.key, r.ran_at, COALESCE(e.name, 'Automatic update') AS ran_by
+           FROM leave_runs r LEFT JOIN employees e ON e.id = r.ran_by
+           WHERE r.key LIKE 'accrual-%' ORDER BY r.key DESC LIMIT 1""").fetchone()
+    conn.close()
+    if last:
+        year, month = int(last["key"][8:12]), int(last["key"][13:15])
+        year, month = (year + 1, 1) if month == 12 else (year, month + 1)
+    else:
+        year, month = last_finished_month(today)
+    last_day = date(year, month, calendar.monthrange(year, month)[1])
+    preview = month_accrual_preview(year, month)
+    return {
+        "last_credited": ({"month": _month_label(int(last["key"][8:12]), int(last["key"][13:15])),
+                           "ran_by": last["ran_by"], "ran_at": last["ran_at"]} if last else None),
+        "next": {"year": year, "month": month, "label": _month_label(year, month),
+                 "can_run_from": last_day.isoformat(), "can_run_now": today >= last_day,
+                 "people_earning": preview["people_earning"], "days_in_total": preview["days_in_total"]},
+    }

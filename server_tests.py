@@ -223,6 +223,33 @@ def leave_preview_counts_paid_leave_monday_to_saturday_with_its_own_balance():
 
 
 
+@test
+def hr_can_credit_paid_leave_only_for_months_that_have_ended_and_only_once():
+    for who in ("E001", "M001"):                    # employees and managers have no access
+        c = as_person(who)
+        assert c.get("/api/hr/leave/month-accrual").status_code == 403
+        assert c.post("/api/hr/leave/month-accrual").status_code == 403
+    hr = as_person("H001")
+    status = hr.get("/api/hr/leave/month-accrual").json()
+    assert status["last_credited"] is None and status["next"]["can_run_now"]      # last month has ended
+    assert status["next"]["people_earning"] == 6 and status["next"]["days_in_total"] > 0
+    before = hr.get("/api/hr/people/E001/leave-history").json()["balance"]["paid"]
+    done = hr.post("/api/hr/leave/month-accrual")
+    assert done.status_code == 200 and done.json()["success"], done.text
+    assert hr.get("/api/hr/people/E001/leave-history").json()["balance"]["paid"] == round(before + 2.5, 2)
+    line = next(a for a in hr.get("/api/hr/people/E001/leave-history").json()["adjustments"] if a["kind"] == "accrual")
+    assert line["changed_by"] == "Narmadha" and line["days"] == 2.5                # logged with who ran it
+    # a month can be credited once: credit what has ended (a month more if today is its last day),
+    # then the next one is refused until it ends
+    while hr.get("/api/hr/leave/month-accrual").json()["next"]["can_run_now"]:
+        assert hr.post("/api/hr/leave/month-accrual").status_code == 200
+    status = hr.get("/api/hr/leave/month-accrual").json()
+    assert status["last_credited"]["ran_by"] == "Narmadha"
+    refused = hr.post("/api/hr/leave/month-accrual")
+    assert refused.status_code == 400 and f"from {status['next']['can_run_from']}" in refused.json()["detail"]
+
+
+
 if __name__ == "__main__":
     failed = 0
     for t in TESTS:

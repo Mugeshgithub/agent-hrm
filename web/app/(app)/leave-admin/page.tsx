@@ -4,7 +4,7 @@ import { FormEvent, useEffect, useState } from "react";
 import useSWR, { mutate } from "swr";
 import { Plus, Upload } from "lucide-react";
 import { api, fetcher } from "@/lib/api";
-import { dayWithWeekday, timestamp } from "@/lib/format";
+import { day, dayWithWeekday, timestamp } from "@/lib/format";
 import { Holiday, HolidayPlan, Person } from "@/lib/types";
 import { Dialog } from "@/components/Dialog";
 import { Empty, ErrorNote, PageHeader } from "@/components/PageHeader";
@@ -14,7 +14,7 @@ type PlanDetail = { plan: HolidayPlan; holidays: Holiday[]; years: string[] };
 type Preview = {
   year: number; people: number; already_done: { ran_by: string; ran_at: string } | null;
   casual_days_carried: number; casual_days_lapsing: number; sick_days_lapsing: number; people_losing_casual_days: number;
-  paid_days_carried: number; paid_days_lapsing: number;
+  paid_days_carried: number; paid_days_rounded_up: number;
 };
 type ImportRow = { line: number; date: string; name: string; kind: string; ok: boolean; problem: string | null };
 type ImportResult = { dry_run: boolean; rows: ImportRow[]; will_add?: number; added?: number; skipped: number };
@@ -28,7 +28,7 @@ export default function LeaveAdmin() {
   const isHR = me.role === "hr";
   const { data: plans } = useSWR<HolidayPlan[]>(isHR ? "/hr/holiday-plans" : null, fetcher);
   const [selected, setSelected] = useState<number | null>(null);
-  const [tab, setTab] = useState<"plans" | "year">("plans");
+  const [tab, setTab] = useState<"plans" | "year" | "paid">("plans");
   const [creating, setCreating] = useState(false);
   useEffect(() => { if (plans?.length && !plans.some((p) => p.id === selected)) setSelected(plans[0].id); }, [plans, selected]);
 
@@ -39,13 +39,13 @@ export default function LeaveAdmin() {
       <PageHeader title="Leave settings" description="Holiday plans decide which days are public holidays for each person. Leave is always counted with the person's own plan." />
 
       <div role="tablist" aria-label="Section" className="mb-5 flex gap-1 border-b border-rule">
-        {([["plans", "Holiday plans"], ["year", "Start of year"]] as const).map(([k, label]) => (
+        {([["plans", "Holiday plans"], ["year", "Start of year"], ["paid", "Paid leave"]] as const).map(([k, label]) => (
           <button key={k} role="tab" aria-selected={tab === k} onClick={() => setTab(k)}
                   className={`-mb-px border-b-2 px-3 pb-2.5 pt-1 ${tab === k ? "border-dossier text-ink font-medium" : "border-transparent text-ink-soft hover:text-ink"}`}>{label}</button>
         ))}
       </div>
 
-      {tab === "year" ? <YearStart /> : (
+      {tab === "year" ? <YearStart /> : tab === "paid" ? <PaidLeaveCredit /> : (
         <div className="grid gap-6 lg:grid-cols-[260px_minmax(0,1fr)]">
           <aside aria-label="Holiday plans" className="space-y-2">
             {(plans ?? []).map((p) => (
@@ -381,11 +381,76 @@ function YearStart() {
             <Row label="Casual days that lapse" value={preview.casual_days_lapsing} hint={`${preview.people_losing_casual_days} people have more than 5`} />
             <Row label="Sick days that lapse" value={preview.sick_days_lapsing} hint="Sick leave doesn't carry over" />
             <Row label="Paid days carried over" value={preview.paid_days_carried} hint="Paid leave is earned monthly; unused days carry over in full" />
-            {preview.paid_days_lapsing > 0 && <Row label="Paid days that lapse" value={preview.paid_days_lapsing} />}
+            {preview.paid_days_rounded_up > 0 && <Row label="Paid days added by rounding up" value={preview.paid_days_rounded_up} hint="Each total goes up to the next whole day (L3141-7)" />}
           </dl>
-          <p className="mt-4 rounded border border-rule bg-paper px-3 py-2 text-sm">Then everyone gets 12 casual and 6 sick days for {preview.year}, and a new set of floating holidays from their plan. Paid leave isn't topped up in January: it is earned at 2.5 days a month. Each change appears in the person's balance history.</p>
+          <p className="mt-4 rounded border border-rule bg-paper px-3 py-2 text-sm">Then everyone gets 12 casual and 6 sick days for {preview.year}, and a new set of floating holidays from their plan. Paid leave isn't topped up in January: it is earned monthly, and each total is rounded up to a whole day. Each change appears in the person's balance history.</p>
         </>
       )}
+    </section>
+  );
+}
+
+type Accrual = {
+  last_credited: { month: string; ran_by: string; ran_at: string } | null;
+  next: { year: number; month: number; label: string; can_run_from: string; can_run_now: boolean;
+          people_earning: number; days_in_total: number };
+};
+
+// the monthly paid-leave credit. A scheduled job does this on the 1st; "Run now" uses the same rules
+// (only after the month has ended, once per month) and is logged with the name of the person who ran it.
+function PaidLeaveCredit() {
+  const { data } = useSWR<Accrual>("/hr/leave/month-accrual", fetcher);
+  const [confirming, setConfirming] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+
+  async function run() {
+    setBusy(true);
+    setError("");
+    try {
+      await api("/hr/leave/month-accrual", { body: {} });
+      await mutate(() => true);             // balances changed on every page
+      setConfirming(false);
+    } catch (e) { setError((e as Error).message); }
+    finally { setBusy(false); }
+  }
+
+  return (
+    <section aria-labelledby="paidcredit" className="panel max-w-xl px-5 py-5">
+      <h2 id="paidcredit" className="font-medium">Paid leave credit</h2>
+      <p className="mt-1 text-sm text-ink-soft">Everyone earns 2.5 days a month, in proportion to the days they worked that month. A scheduled job credits it on the 1st. Each month counts once, and only after it has ended.</p>
+      {!data ? <p className="mt-3 text-ink-soft">Loading…</p> : (
+        <>
+          <dl className="mt-4 space-y-3">
+            <div>
+              <dt className="text-sm text-ink-soft">Last credit</dt>
+              <dd>{data.last_credited
+                ? <>{data.last_credited.month}<span className="block text-sm text-ink-soft">by {data.last_credited.ran_by}, {timestamp(data.last_credited.ran_at)}</span></>
+                : "None yet"}</dd>
+            </div>
+            <div>
+              <dt className="text-sm text-ink-soft">Next</dt>
+              <dd>{data.next.label} can run from {day(data.next.can_run_from)} {data.next.can_run_from.slice(0, 4)}
+                {data.next.can_run_now && <span className="block text-sm text-ink-soft">{data.next.people_earning} people would earn {data.next.days_in_total} days in total.</span>}
+              </dd>
+            </div>
+          </dl>
+          <div className="mt-4 flex items-center gap-3">
+            <button className="btn-primary" disabled={!data.next.can_run_now} onClick={() => { setError(""); setConfirming(true); }}>Run now</button>
+            {!data.next.can_run_now && <p className="text-sm text-ink-soft">{data.next.label} hasn't ended yet.</p>}
+          </div>
+        </>
+      )}
+      <Dialog open={confirming} onClose={() => setConfirming(false)} title={`Credit paid leave for ${data?.next.label ?? ""}?`}>
+        <div className="space-y-4">
+          <p>{data?.next.people_earning} people earn {data?.next.days_in_total} days in total. Each change appears in the person's balance history with your name. This month can't be credited twice.</p>
+          {error && <ErrorNote message={error} />}
+          <div className="flex justify-end gap-2">
+            <button className="btn-quiet" onClick={() => setConfirming(false)}>Cancel</button>
+            <button className="btn-primary" disabled={busy} onClick={run}>{busy ? "Crediting…" : "Credit paid leave"}</button>
+          </div>
+        </div>
+      </Dialog>
     </section>
   );
 }
