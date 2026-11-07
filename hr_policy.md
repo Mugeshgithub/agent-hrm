@@ -1,7 +1,7 @@
 # HR Leave Policy
 
 ## Paid leave (congés payés)
-Employees earn 2.5 days of paid leave per month worked, so 30 days per year (5 weeks), counted in working days from Monday to Saturday (jours ouvrables). A month that is only partly worked, such as the month someone joins or leaves, earns a share of the 2.5 days in proportion to the days worked. This is exactly the legal minimum in France (Code du travail, article L3141-3); the company does not give less. Paid leave is separate from casual leave and sick leave. Paid leave is normally taken between 1 May and 31 October. Outside this period it can still be requested and is handled like any other leave request: your manager approves it.
+Employees earn 2.5 days of paid leave per month worked, so 30 days per year (5 weeks), counted in working days from Monday to Saturday (jours ouvrables). A month that is only partly worked, such as the month someone joins or leaves, earns a share of the 2.5 days in proportion to the days worked. This is exactly the legal minimum in France (Code du travail, article L3141-3); the company does not give less. Paid leave is separate from casual leave and sick leave. Paid leave is normally taken between 1 May and 31 October. Outside this period, paid leave can still be requested and is handled like any other leave request: your manager decides whether to approve it.
 
 ## Casual leave
 Employees get 12 casual leave days per year. Casual leave must be applied at least 2 working days in advance, except in emergencies. A maximum of 5 consecutive casual leave days can be taken at once.

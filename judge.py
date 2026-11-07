@@ -25,6 +25,13 @@ or what the system did (e.g. whether a ticket was created, and why). For each cl
 Do NOT flag: greetings, questions to the user, offers to help (e.g. offering to raise an HR ticket),
 advice to contact HR or a manager, or simple restatements of what the user asked.
 Translations and paraphrases of the sources are fine if the meaning is the same.
+A statement that the company policy does not cover a topic, or does not say something, is SUPPORTED when none of
+the policy sections in the tool results answers the question: a section about another topic, or only loosely
+related, does not answer it, and neither does a result with "found": false. The policy search ranks the whole
+policy and returns the closest sections, so when those are unrelated the policy has nothing on the topic: do not
+flag the statement because the search might have missed something. It is UNSUPPORTED when a returned section
+does answer the question (then the policy does cover it). Anything else claimed next to it (an allowance, a
+condition, a consequence) still needs support of its own.
 The tool results are the ground truth about what happened in this turn. Before any change (leave request,
 ticket, cancellation) the system shows the user a confirmation box OUTSIDE the chat; the tool result reports
 their answer (e.g. "The user chose not to raise a ticket"). So a tool result can override what the user typed.

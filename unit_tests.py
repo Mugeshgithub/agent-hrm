@@ -6,6 +6,7 @@ import db
 db.DB_PATH = "unit_test_hr.db"   # its own database, never the real hr.db
 
 import tools
+from eval_retry import MAX_RETRIED, retry_report, run_with_retry
 from judge_parse import verdict
 from tools import (count_working_days, apply_leave, decide_leave, cancel_leave,
                    get_leave_balance, get_team_member_balance)
@@ -105,9 +106,11 @@ def the_note_and_the_window_are_read_from_hr_policy_md_and_the_note_carries_the_
     text = open("hr_policy.md", encoding="utf-8").read()
     assert tools.PAID_POLICY_NOTE in text
     assert tools.PAID_WINDOW == ((5, 1), (10, 31))
-    # the note must not read as a blocker: it says outside the window it can still be requested and who approves
+    # the note must not read as a blocker, or as a promise: outside the window it can still be requested, and
+    # the manager decides
     assert "normally taken between 1 May and 31 October" in tools.PAID_POLICY_NOTE
-    assert "can still be requested" in tools.PAID_POLICY_NOTE and "your manager approves it" in tools.PAID_POLICY_NOTE
+    assert "can still be requested" in tools.PAID_POLICY_NOTE
+    assert "your manager decides whether to approve it" in tools.PAID_POLICY_NOTE and "approves it" not in tools.PAID_POLICY_NOTE
 
 
 @test
@@ -397,6 +400,47 @@ def an_answer_without_a_complete_verdict_is_never_read_as_a_pass():
     assert verdict('{"unsupported": [%s, {"claim": "2nd", "why' % CLAIM) is None
     assert verdict(CLAIM) is None                                          # a claim alone is not a verdict
     assert verdict('{"unsupported": "none"}') is None                      # the list is required
+
+
+# ---------- retrying a failed eval once, in the open (eval_retry.py) ----------
+
+def attempts(*results):
+    # a fake test that gives these results one after another: each is a list of problems ([] = passed)
+    calls = []
+
+    def run_once():
+        calls.append(1)
+        return results[len(calls) - 1], f"attempt {len(calls)}"
+    return run_once, calls
+
+
+@test
+def a_test_that_passes_is_not_retried_and_a_failed_one_is_retried_once():
+    run_once, calls = attempts([], ["never used"])
+    assert run_with_retry(run_once, 1) == ([], "attempt 1", []) and len(calls) == 1
+    run_once, calls = attempts(["reply did not match"], [])
+    problems, info, failed_before = run_with_retry(run_once, 1)
+    assert problems == [] and info == "attempt 2" and len(calls) == 2
+    assert failed_before == [(["reply did not match"], "attempt 1")]      # the first failure is kept for the log
+    run_once, calls = attempts(["bad"], ["bad again"], [])
+    problems, info, failed_before = run_with_retry(run_once, 1)
+    assert problems == ["bad again"] and len(calls) == 2 and len(failed_before) == 1     # only one retry, then it fails
+
+
+@test
+def without_retries_a_failure_is_final_so_local_measurements_count_every_failure():
+    run_once, calls = attempts(["bad"], [])
+    assert run_with_retry(run_once, 0) == (["bad"], "attempt 1", []) and len(calls) == 1
+
+
+@test
+def the_retry_report_lists_the_tests_and_fails_the_run_when_more_than_two_needed_one():
+    assert retry_report([]) == ([], False)
+    lines, too_many = retry_report([("a", True), ("b", False)])
+    assert too_many is False and lines == ["Retried tests (2):", "  a: passed on retry", "  b: failed again"]
+    assert MAX_RETRIED == 2
+    lines, too_many = retry_report([("a", True), ("b", True), ("c", True)])        # all passed, but three were unlucky
+    assert too_many is True and lines[-1].startswith("FAIL: 3 tests needed a retry, more than the 2 allowed")
 
 
 if __name__ == "__main__":

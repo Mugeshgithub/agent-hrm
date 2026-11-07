@@ -20,6 +20,7 @@ import hr_queries
 import leave_admin
 import onboarding
 from tracing import observe, propagate_attributes
+from eval_retry import run_with_retry, retry_report
 from tools import apply_leave, decide_leave, create_hr_ticket, count_working_days, count_ouvrable_days
 
 # tests use their own database, never the real hr.db
@@ -672,8 +673,9 @@ TEST_CASES = [
         "input": "Can I take paid leave in December?",
         "must_call": ["search_policy"],
         "reply_must_match": r"(?is)(?=.*\bMay\b)(?=.*\bOctober\b)",    # it mentions the usual window, in any wording
-        # the policy says outside the window it can still be requested and goes to the manager like any other
-        # request; the reply must not add an "exception", a special or HR approval, or a condition
+        # the policy says outside the window it can still be requested, like any other leave request, and
+        # the manager decides whether to approve it; the reply must not add an "exception", a special or HR
+        # approval, or a condition
         "reply_must_not_match": r"(?i)exception|special (approval|permission|case)|HR (approval|permission)|extra approval|must be approved by HR|only if",
         "expected_requests": 0,
     },
@@ -843,75 +845,105 @@ def select_indices(only=None):
     return [i for i, c in enumerate(TEST_CASES) if not only or only.lower() in c["name"].lower()]
 
 
+def retries_allowed():
+    # in CI a failed test gets one more try (see eval_retry.py); locally none, so that measuring a flaky
+    # test with --repeat counts every failure. --retries N (or EVAL_RETRIES) overrides both.
+    return int(os.environ.get("EVAL_RETRIES") or (1 if os.environ.get("CI") else 0))
+
+
+def attempt(case):
+    """One run of one test from a fresh database. Returns (problems, info)."""
+    # fresh test database, empty chat memory, logged-in user and simulated yes/no for every test
+    db.init_db(reset=True)
+    reset_memory()
+    agent.LOGGED_IN_ID = case["user"]
+    agent.confirm_with_human = lambda tool_input, answer=case["auto_confirm"]: answer
+    if "setup" in case:
+        case["setup"]()
+
+    reply, tools_called, trace_id = run_agent(case["input"], test_name=case["name"])
+
+    problems = []
+    for tool in case.get("must_call", []):
+        if tool not in tools_called:
+            problems.append(f"did not call {tool}")
+    for tool in case.get("must_not_call", []):
+        if tool in tools_called:
+            problems.append(f"wrongly called {tool}")
+    if "reply_must_match" in case and not re.search(case["reply_must_match"], reply):
+        problems.append("reply did not match expected wording")
+    if "reply_must_not_match" in case and re.search(case["reply_must_not_match"], reply):
+        problems.append("reply contains something it must not")
+    if "expected_requests" in case:
+        n = count_requests()
+        if n != case["expected_requests"]:
+            problems.append(f"{n} requests in database, expected {case['expected_requests']}")
+    if case.get("citations_grounded"):
+        bad = ungrounded_citations(reply, agent.last_turn["sources"])
+        if bad:
+            problems.append(f"cites articles no tool returned this turn: {', '.join(bad)}")
+    # LLM-as-judge on answers built from sources (policy and law): catches invented reasons and
+    # wrong attributions that keyword checks miss. Leave, permission and pay tests are checked by code.
+    if case["name"].startswith(("policy:", "law:")):
+        for issue in judge(case["input"], reply, agent.last_turn["sources"]):
+            problems.append(f"judge: unsupported \"{issue.get('claim')}\" ({issue.get('why')})")
+    if "check" in case and not case["check"]():
+        problems.append("database check failed")
+
+    # send the result to Langfuse: passed = 1 or 0, with the reasons as a comment
+    print("trace id:", trace_id)
+    tracing.score_trace(trace_id, passed=not problems, comment=", ".join(problems))
+    return problems, {"reply": reply, "tools": tools_called}
+
+
+def show_failure(label, name, problems, info):
+    print(f"{label} {name}: {', '.join(problems)}")
+    print(f"     tools: {info['tools']}")
+    print(f"     reply: {info['reply']}\n")
+
+
 def run_cases(cases):
-    """Run these tests one after another in THIS process. Returns (passed, ran, skipped)."""
+    """Run these tests one after another in THIS process.
+    Returns (passed, ran, skipped, retried), retried = [(test name, passed on the retry)]."""
     passed = skipped = 0
+    retried = []
+    retries = retries_allowed()
     labour_db = labour_db_available()
     print(f"Eval run: {RUN_ID}  (tracing {'ON' if tracing.ENABLED else 'OFF'}, "
-          f"labour-law database {'ON' if labour_db else 'OFF'})\n")
+          f"labour-law database {'ON' if labour_db else 'OFF'}, retries {retries})\n")
     for case in cases:
         if case.get("needs_labour_db") and not labour_db:
             skipped += 1
             print(f"SKIP {case['name']}  (no labour-law database)")
             continue
-        # fresh test database, empty chat memory, logged-in user and simulated yes/no for every test
-        db.init_db(reset=True)
-        reset_memory()
-        agent.LOGGED_IN_ID = case["user"]
-        agent.confirm_with_human = lambda tool_input, answer=case["auto_confirm"]: answer
-        if "setup" in case:
-            case["setup"]()
-
-        reply, tools_called, trace_id = run_agent(case["input"], test_name=case["name"])
-
-        problems = []
-        for tool in case.get("must_call", []):
-            if tool not in tools_called:
-                problems.append(f"did not call {tool}")
-        for tool in case.get("must_not_call", []):
-            if tool in tools_called:
-                problems.append(f"wrongly called {tool}")
-        if "reply_must_match" in case and not re.search(case["reply_must_match"], reply):
-            problems.append("reply did not match expected wording")
-        if "reply_must_not_match" in case and re.search(case["reply_must_not_match"], reply):
-            problems.append("reply contains something it must not")
-        if "expected_requests" in case:
-            n = count_requests()
-            if n != case["expected_requests"]:
-                problems.append(f"{n} requests in database, expected {case['expected_requests']}")
-        if case.get("citations_grounded"):
-            bad = ungrounded_citations(reply, agent.last_turn["sources"])
-            if bad:
-                problems.append(f"cites articles no tool returned this turn: {', '.join(bad)}")
-        # LLM-as-judge on answers built from sources (policy and law): catches invented reasons and
-        # wrong attributions that keyword checks miss. Leave, permission and pay tests are checked by code.
-        if case["name"].startswith(("policy:", "law:")):
-            for issue in judge(case["input"], reply, agent.last_turn["sources"]):
-                problems.append(f"judge: unsupported \"{issue.get('claim')}\" ({issue.get('why')})")
-        if "check" in case and not case["check"]():
-            problems.append("database check failed")
-
-        # send the result to Langfuse: passed = 1 or 0, with the reasons as a comment
-        print("trace id:", trace_id)
-        tracing.score_trace(trace_id, passed=not problems, comment=", ".join(problems))
-
+        problems, info, failed_before = run_with_retry(lambda: attempt(case), retries)
+        for earlier_problems, earlier_info in failed_before:
+            show_failure("RETRY (first attempt failed, running it once more)", case["name"], earlier_problems, earlier_info)
+        if failed_before:
+            retried.append((case["name"], not problems))
         if problems:
-            print(f"FAIL {case['name']}: {', '.join(problems)}")
-            print(f"     tools: {tools_called}")
-            print(f"     reply: {reply}\n")
+            show_failure("FAIL (failed again)" if failed_before else "FAIL", case["name"], problems, info)
         else:
             passed += 1
-            print(f"PASS {case['name']}")
+            print(f"PASS (retry) {case['name']}" if failed_before else f"PASS {case['name']}")
 
     ran = len(cases) - skipped
     print(f"\n{passed}/{ran} passed" + (f", {skipped} skipped" if skipped else ""))
     tracing.flush()   # send all eval traces and scores before the program exits
-    return passed, ran, skipped
+    return passed, ran, skipped, retried
 
 
 def run_evals(only=None):
-    passed, ran, _ = run_cases([TEST_CASES[i] for i in select_indices(only)])
-    return passed == ran
+    passed, ran, _, retried = run_cases([TEST_CASES[i] for i in select_indices(only)])
+    return finish(passed, ran, retried)
+
+
+def finish(passed, ran, retried):
+    # the end of a run: list the retried tests; too many retries fail the run even if every test passed
+    lines, too_many = retry_report(retried)
+    for line in lines:
+        print(line)
+    return passed == ran and not too_many
 
 
 # ---------- parallel run ----------
@@ -925,7 +957,7 @@ def run_parallel(indices, workers):
     workers = min(workers, len(indices))
     # round-robin, so slow tests that sit next to each other (policy, law) land on different workers
     groups = [indices[w::workers] for w in range(workers)]
-    env = {**os.environ, "EVAL_RUN_ID": RUN_ID, "PYTHONUNBUFFERED": "1"}
+    env = {**os.environ, "EVAL_RUN_ID": RUN_ID, "PYTHONUNBUFFERED": "1"}   # workers inherit EVAL_RETRIES too
     print(f"Eval run: {RUN_ID}  ({len(indices)} tests on {workers} workers, "
           f"{', '.join(str(len(g)) for g in groups)} each)\n")
 
@@ -971,12 +1003,13 @@ def run_parallel(indices, workers):
     passed = sum(r["passed"] for r in results.values())
     ran = sum(r["ran"] for r in results.values())
     skipped = sum(r["skipped"] for r in results.values())
+    retried = [tuple(t) for r in results.values() for t in r["retried"]]
     print(f"\n{passed}/{ran} passed" + (f", {skipped} skipped" if skipped else "")
           + f"  (all {workers} workers)")
     if crashed:
         print("WORKER CRASHED, results incomplete: "
               + ", ".join(f"w{n} (exit code {procs[n - 1].returncode})" for n in crashed))
-    return passed == ran and not crashed
+    return finish(passed, ran, retried) and not crashed
 
 
 if __name__ == "__main__":
@@ -984,10 +1017,14 @@ if __name__ == "__main__":
     # python evals.py law             -> only tests whose name contains "law"
     # python evals.py --workers 4     -> all tests, split over 4 processes (filter works too)
     # python evals.py "overtime" --repeat 10 --workers 5   -> run those tests 10 times each: for flaky evals
+    # In CI (the CI variable is set) a failed test is retried once and listed at the end ("PASS (retry)"); the
+    # run fails anyway if more than 2 tests needed a retry. Locally there is no retry, so --repeat counts every
+    # failure; --retries N turns it on or off by hand.
     parser = argparse.ArgumentParser()
     parser.add_argument("only", nargs="?", help="only tests whose name contains this text")
     parser.add_argument("--workers", type=int, default=1, help="number of parallel processes")
     parser.add_argument("--repeat", type=int, default=1, help="run the selected tests this many times (to measure a flaky one)")
+    parser.add_argument("--retries", type=int, help="retry a failed test this many times (default: 1 in CI, 0 otherwise)")
     parser.add_argument("--worker-db", help=argparse.SUPPRESS)   # internal: used by --workers
     parser.add_argument("--cases", help=argparse.SUPPRESS)       # internal: used by --workers
     args = parser.parse_args()
@@ -995,19 +1032,21 @@ if __name__ == "__main__":
     if args.worker_db:
         # I am a worker: my own database file, only the tests the parent gave me
         db.DB_PATH = args.worker_db
-        passed, ran, skipped = run_cases([TEST_CASES[int(i)] for i in args.cases.split(",")])
-        print("RESULT " + json.dumps({"passed": passed, "ran": ran, "skipped": skipped}))
+        passed, ran, skipped, retried = run_cases([TEST_CASES[int(i)] for i in args.cases.split(",")])
+        print("RESULT " + json.dumps({"passed": passed, "ran": ran, "skipped": skipped, "retried": retried}))
         sys.exit(0 if passed == ran else 1)
 
     if args.workers < 1:
         parser.error("--workers must be 1 or more")
     if args.repeat < 1:
         parser.error("--repeat must be 1 or more")
+    if args.retries is not None:
+        os.environ["EVAL_RETRIES"] = str(args.retries)      # workers read it from the environment
     indices = select_indices(args.only) * args.repeat
     started = time.time()
     if args.workers == 1 or len(indices) <= 1:
-        passed, ran, _ = run_cases([TEST_CASES[i] for i in indices])
-        ok = passed == ran
+        passed, ran, _, retried = run_cases([TEST_CASES[i] for i in indices])
+        ok = finish(passed, ran, retried)
     else:
         ok = run_parallel(indices, args.workers)
     minutes, seconds = divmod(int(time.time() - started), 60)
