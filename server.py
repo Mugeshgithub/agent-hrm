@@ -17,6 +17,7 @@ import db
 import employees
 import hr_queries
 import leave_admin
+import onboarding
 import payslips
 from demo_data import init_all
 import needs_you
@@ -384,6 +385,37 @@ def edit_person(emp_id: str, body: EditIn, request: Request):
 def offboard(emp_id: str, body: OffboardIn, request: Request):
     hr = need(request, "hr")
     return fail_on_error(employees.offboard_employee(hr["id"], emp_id, body.end_date, body.reason))
+
+
+# ---------- onboarding ----------
+# The rules (who may change which step, a reason to skip or reopen) are in onboarding.py.
+class StepNoteIn(BaseModel):
+    note: str = ""
+
+
+class StepReasonIn(BaseModel):
+    reason: str
+
+
+@app.get("/api/hr/people/{emp_id}/onboarding")
+def person_onboarding(emp_id: str, request: Request):
+    hr = need(request, "hr")
+    return fail_on_error(onboarding.checklist(hr["id"], emp_id))      # null when they have no checklist
+
+
+@app.post("/api/onboarding/steps/{step_id}/complete")
+def complete_onboarding_step(step_id: int, body: StepNoteIn, request: Request):
+    return fail_on_error(onboarding.complete_step(me(request)["id"], step_id, body.note))
+
+
+@app.post("/api/onboarding/steps/{step_id}/skip")
+def skip_onboarding_step(step_id: int, body: StepReasonIn, request: Request):
+    return fail_on_error(onboarding.skip_step(me(request)["id"], step_id, body.reason))
+
+
+@app.post("/api/onboarding/steps/{step_id}/reopen")
+def reopen_onboarding_step(step_id: int, body: StepReasonIn, request: Request):
+    return fail_on_error(onboarding.reopen_step(me(request)["id"], step_id, body.reason))
 
 
 # ---------- leave administration ----------

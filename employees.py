@@ -4,6 +4,7 @@ import re
 from datetime import date
 
 import db
+import onboarding
 from tools import PENDING, get_employee, balance_of
 
 ROLES = ("employee", "manager", "hr")
@@ -152,6 +153,7 @@ def create_employee(hr_id, data):
                             VALUES (?, ?, ?, ?, ?, ?)""",
                          (emp_id, d["title"], d["department"], d["location"], d["start_date"], contract))
             _log(conn, emp_id, hr_id, "record", None, "created", d.get("reason") or "New hire")
+            onboarding.start(conn, emp_id, d["start_date"], hr_id)    # only if they start in the future
     finally:
         conn.close()
     return {"success": True, "id": emp_id, "name": d["name"]}

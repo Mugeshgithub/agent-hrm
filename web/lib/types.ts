@@ -52,8 +52,23 @@ export type Pending = {
   days: number; balances: Balances; overlaps: CalendarLeave[];
 };
 
+// onboarding: the checklist of a new hire, and the steps in it that wait on HR or a manager
+export type StepOwner = "new_hire" | "hr" | "manager";
+export type OnboardingStep = {
+  id: number; step_key: string; title: string; detail: string; owner: StepOwner; due_date: string;
+  status: "todo" | "done" | "skipped"; note: string; done_at: string | null; done_by_name: string | null; overdue: boolean;
+};
+export type Onboarding = {
+  emp_id: string; name: string; title: string; start_date: string; manager_name: string | null; steps: OnboardingStep[];
+  progress: { done: number; skipped: number; total: number; complete: boolean };
+};
+export type WaitingStep = {
+  step_id: number; employee_id: string; employee_name: string; job_title: string; start_date: string;
+  step_title: string; detail: string; owner: StepOwner; due_date: string; overdue: boolean;
+};
+
 export type NeedsYou = {
-  role: Role; waiting_on_you: number; leave_requests: Pending[];
+  role: Role; waiting_on_you: number; leave_requests: Pending[]; onboarding_steps: WaitingStep[];
   hr_requests: { id: number; ticket: string; employee_id: string; employee_name: string; question: string; summary: string; created_at: string }[];
   paid_leave_warnings: { employee_id: string; name: string; paid_days: number; message: string }[];
 };

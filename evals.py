@@ -18,6 +18,7 @@ import payslips
 import employees
 import hr_queries
 import leave_admin
+import onboarding
 from tracing import observe, propagate_attributes
 from tools import apply_leave, decide_leave, create_hr_ticket, count_working_days, count_ouvrable_days
 
@@ -120,6 +121,13 @@ def ticket_status(ticket_id):
     conn.close()
     return row[0] if row else None
 
+def onboarding_steps_changed():
+    conn = db.get_conn()
+    n = conn.execute("SELECT COUNT(*) FROM onboarding_steps WHERE status != 'todo'").fetchone()[0]
+    conn.close()
+    return n
+
+
 def payslip_access_count():
     conn = db.get_conn()
     n = conn.execute("SELECT COUNT(*) FROM payslip_access_log").fetchone()[0]
@@ -156,10 +164,14 @@ def reset_memory():
     hr_queries.init_profiles()     # job details for lookup_colleague
     employees.init_records()
     leave_admin.init_leave_admin()
+    onboarding.init_onboarding()
     conn = db.get_conn()
     with conn:
         conn.execute("DELETE FROM leave_adjustments")
         conn.execute("DELETE FROM leave_runs")
+        conn.execute("DELETE FROM onboarding_steps")
+        conn.execute("DELETE FROM onboardings")
+        conn.execute("DELETE FROM profiles WHERE emp_id NOT IN (SELECT id FROM employees)")   # hired by an earlier test
         conn.execute("UPDATE profiles SET holiday_plan_id = NULL")
     conn.close()
 
@@ -286,6 +298,13 @@ def setup_hr_inbox():
     # HR has Hugo's open request waiting, and Hugo has 31 unused paid days
     setup_karthik_ticket()
     leave_admin.adjust_balance("H001", "E002", "paid", 23.5, "Days brought over for the test")
+
+
+def setup_new_hire():
+    # Lea Martin starts in one to two weeks and reports to Lucas: HR owns 3 of her onboarding steps, Lucas owns 2
+    employees.create_employee("H001", {"name": "Lea Martin", "email": "lea.martin@cognivexai.eu", "role": "employee",
+                                       "title": "Frontend Engineer", "department": "Engineering", "location": "Paris",
+                                       "start_date": iso(day(2, 0)), "manager_id": "M001"})
 
 
 def setup_paid_leave_earned():
@@ -776,6 +795,27 @@ TEST_CASES = [
         "must_not_call": ["reply_to_ticket"],
         "reply_must_match": r"(?is)(?=.*(parking|hugo))(?=.*paid)",
         "check": lambda: count_tickets() == 1 and ticket_status(1) == "open",
+    },
+    {
+        "name": "inbox: HR is told about the onboarding steps waiting on HR for a new hire",
+        "user": "H001",
+        "auto_confirm": True,
+        "setup": setup_new_hire,
+        "input": "What needs my attention?",
+        "must_call": ["get_needs_attention"],
+        "reply_must_match": r"(?is)(?=.*lea)(?=.*(contract|dpae|account))",
+        "check": lambda: onboarding_steps_changed() == 0,     # listing marks nothing done
+    },
+    {
+        "name": "inbox: a manager is told about the onboarding steps waiting on them for a new hire",
+        "user": "M001",
+        "auto_confirm": True,
+        "setup": setup_new_hire,
+        "input": "What's waiting for me?",
+        "must_call": ["get_needs_attention"],
+        "reply_must_match": r"(?is)(?=.*lea)(?=.*(equipment|laptop|welcome))",
+        "reply_must_not_match": r"(?i)dpae",                  # that step is HR's, not the manager's
+        "check": lambda: onboarding_steps_changed() == 0,
     },
 ]
 
