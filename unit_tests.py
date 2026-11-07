@@ -6,6 +6,7 @@ import db
 db.DB_PATH = "unit_test_hr.db"   # its own database, never the real hr.db
 
 import tools
+from judge_parse import verdict
 from tools import (count_working_days, apply_leave, decide_leave, cancel_leave,
                    get_leave_balance, get_team_member_balance)
 
@@ -364,6 +365,39 @@ def retrieved_article_is_allowed():
     assert ungrounded_citations(reply, sources) == []
     # an article named inside a policy section also counts as a source
     assert ungrounded_citations("L3141-3 sets the minimum.", ['{"sections": [{"text": "article L3141-3"}]}']) == []
+
+# ---------- reading the judge's answer (judge_parse.py): its text is free-form, a bad read must never pass ----------
+
+CLAIM = '{"claim": "30 days a year", "why": "the policy says 25"}'
+
+
+@test
+def the_judge_verdict_is_read_with_or_without_a_code_fence_and_text_around_it():
+    assert verdict('{"unsupported": []}') == []
+    assert verdict('```json\n{"unsupported": []}\n```') == []
+    assert verdict('Here is my check:\n{"unsupported": [%s]}\nDone.' % CLAIM) == [
+        {"claim": "30 days a year", "why": "the policy says 25"}]
+
+
+@test
+def when_the_judge_corrects_itself_its_last_verdict_counts():
+    # the real failure: a flagged claim, "Wait, let me reconsider", then an empty list. The old reader took
+    # everything from the first "{" to the last "}", which is not JSON, so a good reply was reported as invalid
+    flagged_then_clean = ('```json\n{"unsupported": [%s]}\n```\n\nWait, let me reconsider. It is a fair '
+                          'paraphrase.\n\n```json\n{"unsupported": []}\n```' % CLAIM)
+    assert verdict(flagged_then_clean) == []
+    clean_then_flagged = '{"unsupported": []}\nActually, no: the number is wrong.\n{"unsupported": [%s]}' % CLAIM
+    assert [c["claim"] for c in verdict(clean_then_flagged)] == ["30 days a year"]
+
+
+@test
+def an_answer_without_a_complete_verdict_is_never_read_as_a_pass():
+    assert verdict("") is None and verdict("I think it is fine.") is None
+    assert verdict('{"unsupported": [%s' % CLAIM) is None                 # cut off half-way
+    assert verdict('{"unsupported": [%s, {"claim": "2nd", "why' % CLAIM) is None
+    assert verdict(CLAIM) is None                                          # a claim alone is not a verdict
+    assert verdict('{"unsupported": "none"}') is None                      # the list is required
+
 
 if __name__ == "__main__":
     failed = 0
