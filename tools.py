@@ -1,4 +1,7 @@
 # tools.py
+import calendar
+import os
+import re
 from datetime import date, timedelta
 from db import get_conn, init_db, ticket_number
 
@@ -9,6 +12,26 @@ PAID = "paid"                      # congés payés: earned 2.5 days a month, co
 LEAVE_TYPES = ("casual", "sick", PAID)   # leave with a balance
 FLOATER = "floater"                # a floating holiday the employee picks; counted against a yearly quota
 PENDING = "pending_manager_approval"
+
+
+def _read_paid_policy():
+    # the paid-leave window and the note shown to the user are both read from hr_policy.md (Paid leave),
+    # so the policy text is the only place they are written; fails loudly if the wording changes
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "hr_policy.md")
+    text = open(path, encoding="utf-8").read()
+    m = re.search(r"Paid leave is normally taken between (\d+) (\w+) and (\d+) (\w+)\..*?your manager approves it\.",
+                  text, re.S)
+    if not m:
+        raise RuntimeError("hr_policy.md: the Paid leave section no longer has the 'normally taken between ... "
+                           "your manager approves it.' sentences that tools.py reads")
+    months = list(calendar.month_name)
+    window = ((months.index(m.group(2)), int(m.group(1))), (months.index(m.group(4)), int(m.group(3))))
+    return window, " ".join(m.group(0).split())
+
+
+PAID_WINDOW, PAID_POLICY_NOTE = _read_paid_policy()    # ((5, 1), (10, 31)): (month, day) of the first and last day
+
+
 
 
 def get_employee(employee_id):
@@ -29,14 +52,26 @@ def balance_of(emp):
     return {kind: clean_days(emp[f"{kind}_balance"]) for kind in LEAVE_TYPES}
 
 
-def get_leave_balance(employee_id):
+def paid_policy_note(start, end):
+    # the note to attach when paid leave falls, even partly, outside the usual window; None if inside it
+    def inside(d):
+        return PAID_WINDOW[0] <= (d.month, d.day) <= PAID_WINDOW[1]
+    if start.year != end.year or not (inside(start) and inside(end)):
+        return PAID_POLICY_NOTE
+    return None
+
+
+def get_leave_balance(employee_id, leave_type=None):
     emp = get_employee(employee_id)
     if emp is None:
         return {"error": "Employee not found"}
-    return {
+    result = {
         "name": emp["name"],
         "leave_balance": balance_of(emp),
     }
+    if leave_type == PAID:       # asked about paid leave: no dates yet, so always remind of the usual window
+        result["policy_note"] = PAID_POLICY_NOTE
+    return result
 
 
 def holidays_of(employee_id):
@@ -140,6 +175,7 @@ def apply_leave(employee_id, leave_type, start_date, end_date):
             },
             "current_balance": balance_of(emp),
             "balance_after_approval": {leave_type: clean_days(balance - days)},
+            **({"policy_note": note} if leave_type == PAID and (note := paid_policy_note(start, end)) else {}),
         }
     finally:
         conn.close()

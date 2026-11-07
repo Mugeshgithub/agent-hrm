@@ -19,7 +19,7 @@ from policy import search_policy
 import needs_you
 from citations import ungrounded_citations, RETRY_MESSAGE, SAFE_REPLY
 from tools import (
-    get_leave_balance, apply_leave, days_for, holidays_of, balance_of, clean_days,
+    get_leave_balance, apply_leave, days_for, holidays_of, balance_of, clean_days, paid_policy_note,
     get_pending_requests, decide_leave, get_my_requests, get_employee,
     get_team_member_balance, cancel_leave,
     create_hr_ticket, get_my_tickets, get_open_tickets, reply_to_ticket,
@@ -101,7 +101,7 @@ Users can give dates in any normal way. Never ask them for a specific date forma
 Roles come only from the system. Never suggest a user can change their role or access by telling you; if they think their access is wrong, offer to raise an HR ticket.
 The summary of earlier conversations may be out of date. Never quote balances or request statuses from it; always call the tools for current numbers.
 For any HR policy question, call search_policy. The search may return sections that are only loosely related. Answer only if a returned section actually answers the question, and name that section. If none do, say "the HR policy doesn't cover" the topic and offer to raise an HR ticket. Don't describe the search itself (never say it "returned nothing"), because it always returns its closest sections. Never answer policy questions from general knowledge.
-For any question about company rules or policy, call search_policy FIRST, before asking any clarifying question. Only ask for clarification if the search finds nothing relevant.
+For any question about company rules or policy, call search_policy FIRST, before asking any clarifying question. This covers any question about what the rules are or what is allowed (which months, when, how many, "can I ...", "do I need ...", "is it allowed"): call search_policy before answering, even if the balance would allow it and even if it follows an earlier answer. If a tool result has a policy_note, include it in your answer. A policy_note is information for the user, never a reason to stop or to offer a ticket; if the user asked to book, continue with apply_leave. Only ask for clarification if the search finds nothing relevant.
 HR tickets: whenever you cannot solve the user's problem (the policy doesn't cover it, they need an exception, or they think their access is wrong), offer once to raise an HR ticket. To offer is only to ask in your reply (for example "Would you like me to raise an HR ticket?") and then wait: never call create_hr_ticket in the same turn as your offer. Call it only when the user's latest message clearly asks for a ticket ("please raise a ticket") or says yes to your offer. Describing a problem (for example "my overtime is missing") is not a request for a ticket. Write a short, neutral summary of the problem and leave out passwords or other secrets. After it is created, give the user the ticket number.
 Users can check their own tickets and HR's replies with get_my_tickets.
 For a colleague's email, job title, team, location or manager, call lookup_colleague. For the user's own manager, team or details, call lookup_colleague with name "me"; never tell them to ask HR for this. If several people match, list them briefly and ask which one. It has no balances or pay, so the rules about other people's balances and payslips still apply.
@@ -133,8 +133,11 @@ When asked what needs your attention or what is waiting, call get_needs_attentio
 TOOLS = [
     {
         "name": "get_leave_balance",
-        "description": "Get the leave balance of the logged-in employee.",
-        "input_schema": {"type": "object", "properties": {}},
+        "description": "Get the leave balance of the logged-in employee. Set leave_type to \"paid\" when the "
+                       "question is about paid leave, so the result includes the company policy note.",
+        "input_schema": {"type": "object", "properties": {
+            "leave_type": {"type": "string", "enum": ["casual", "sick", "paid"],
+                           "description": "The kind of leave the question is about, if it is about one"}}},
     },
     {
         "name": "get_my_requests",
@@ -430,7 +433,7 @@ def run_tool(name, tool_input):
 
     # the user's ID always comes from the login, never from the model
     if name == "get_leave_balance":
-        return get_leave_balance(LOGGED_IN_ID)
+        return get_leave_balance(LOGGED_IN_ID, tool_input.get("leave_type"))
 
     if name == "get_my_requests":
         return get_my_requests(LOGGED_IN_ID)
@@ -452,6 +455,8 @@ def run_tool(name, tool_input):
         result = {"working_days": days_for(kind, start, end, holidays_of(LOGGED_IN_ID))}
         if kind == PAID:
             result["counted"] = "Monday to Saturday (jours ouvrables); Sundays and public holidays are not counted"
+            if note := paid_policy_note(start, end):
+                result["policy_note"] = note
         return result
 
     if name == "apply_leave":
