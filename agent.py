@@ -150,6 +150,7 @@ TOOLS = [
         "description": "Count the days a leave request would use between two dates, excluding public "
                        "holidays. Casual and sick leave skip weekends; paid leave (leave_type 'paid') is "
                        "counted Monday to Saturday and skips only Sundays. "
+                       "If the user does not say which kind of leave, leave leave_type out and answer: never ask which kind first. "
                        "Call this before submitting any leave request.",
         "input_schema": {
             "type": "object",

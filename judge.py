@@ -1,11 +1,10 @@
 # judge.py: LLM-as-judge. Checks that every claim in a reply is supported by THIS turn's tool results
 # and attributed to the right source (company policy vs law vs what the system did).
 # Keyword tests catch wrong facts; this catches invented reasons and wrong attributions.
-import json
-import re
-
 import anthropic
 from dotenv import load_dotenv
+
+from judge_parse import verdict
 
 load_dotenv()
 client = anthropic.Anthropic()
@@ -43,10 +42,7 @@ def judge(question, reply, sources):
     resp = client.messages.create(model=JUDGE_MODEL, max_tokens=600, system=JUDGE_PROMPT,
                                   messages=[{"role": "user", "content": content}])
     text = "".join(b.text for b in resp.content if b.type == "text")
-    match = re.search(r"\{.*\}", text, re.S)          # tolerate text around the JSON
-    if not match:
-        return [{"claim": "(judge gave no JSON)", "why": text[:200]}]   # fail loudly, never silently pass
-    try:
-        return json.loads(match.group(0)).get("unsupported", [])
-    except json.JSONDecodeError:
-        return [{"claim": "(judge gave invalid JSON)", "why": text[:200]}]
+    unsupported = verdict(text)          # tolerates text around the JSON, and a verdict the judge corrected
+    if unsupported is None:
+        return [{"claim": "(judge gave no usable verdict)", "why": text[-300:]}]   # fail loudly, never silently pass
+    return unsupported
