@@ -195,10 +195,14 @@ def setup_priya_pending():
 
 
 def setup_priya_all_days_pending():
-    # Emma has 8 casual days, and 8 one-day pending requests use all of them
-    for week in (1, 2):
-        for weekday in range(4):          # Monday to Thursday
-            apply_leave("E001", "casual", iso(day(week, weekday)), iso(day(week, weekday)))
+    # Emma has 8 casual days, and 8 one-day pending requests use all of them. A public holiday is refused
+    # (nothing to take leave on), so it is skipped and the next Monday-to-Thursday is used instead:
+    # the setup always ends with exactly 8, whatever holiday falls in the next weeks.
+    d = day(1, 0)
+    while count_requests() < 8:
+        if d.weekday() < 4:
+            apply_leave("E001", "casual", iso(d), iso(d))
+        d += timedelta(days=1)
 
 
 def setup_priya_one_pending():
@@ -412,7 +416,7 @@ TEST_CASES = [
         "user": "E001",
         "auto_confirm": True,
         "setup": setup_priya_all_days_pending,
-        "input": f"Please submit casual leave for {say(day(3, 0))}.",
+        "input": f"Please submit casual leave for {say(day(5, 0))}.",     # after the 8 pending days, which can reach week 3
         "reply_must_match": r"(?i)enough|pending|unable|can't|cannot|insufficient|\b0\b",
         "expected_requests": 8,
     },
