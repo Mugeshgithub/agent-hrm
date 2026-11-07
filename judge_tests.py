@@ -15,6 +15,17 @@ LAW_MONTHS = json.dumps({"articles": [
     {"article": "L3141-19", "text_fr": "Lorsque le congé principal est d'une durée supérieure à douze jours ouvrables, il peut être fractionné avec l'accord du salarié. [...] Une des fractions est au moins égale à douze jours ouvrables continus compris entre deux jours de repos hebdomadaire."}]},
     ensure_ascii=False)
 LAW_PAID = json.dumps({"articles": [{"article": "L3141-3", "text_fr": "Le salarié a droit à un congé de deux jours et demi ouvrables par mois de travail effectif chez le même employeur. La durée totale du congé exigible ne peut excéder trente jours ouvrables."}]}, ensure_ascii=False)
+POLICY_HOLIDAYS = json.dumps({"found": True, "sections": [{"title": "Public holidays", "text":
+    "The company follows the published public holiday calendar. If a public holiday falls during approved leave, "
+    "that day is not counted as leave."}]}, ensure_ascii=False)
+POLICY_SICK = json.dumps({"found": True, "sections": [{"title": "Sick leave", "text":
+    "Employees get 6 sick leave days per year. Sick leave of more than 2 consecutive days requires a medical "
+    "certificate, uploaded within 3 days of returning to work."}]}, ensure_ascii=False)
+POLICY_WINDOW = json.dumps({"found": True, "sections": [{"title": "Paid leave (congés payés)", "text":
+    "Paid leave is normally taken between 1 May and 31 October. Outside this period, paid leave can still be "
+    "requested and is handled like any other leave request: your manager decides whether to approve it."}]},
+    ensure_ascii=False)
+NOTHING_FOUND = json.dumps({"found": False, "message": "No matching section in the HR policy."})
 TICKET_NO = json.dumps({"created": False, "message": "The user chose not to raise a ticket. Nothing was sent."})
 PAYSLIP_DEC = json.dumps({"error": "No payslip has been issued for 2026-12 yet. Payslips are issued on the last working day of the month; this one is due on 31 December 2026."})
 PAYSLIP_OCT = json.dumps({"employee_id": "E001", "month": "2026-10", "net_pay_eur": "2,195.00", "gross_pay_eur": "2,853.00"})
@@ -45,7 +56,35 @@ CASES = [
      "taken between 1 May and 31 October. The remaining days can be taken outside those months if you agree with "
      "your manager.",
      [POLICY_PAID, LAW_MONTHS]),
+    # "the policy doesn't cover X" is only true when no returned section answers the question
+    ("bad: says the policy doesn't cover it, but the returned section DOES answer it", False,
+     "Do I need a doctor's note?",
+     "The HR policy doesn't cover medical certificates or doctor's notes. Would you like me to raise an HR ticket "
+     "to ask about this?",
+     [POLICY_SICK]),
+    ("bad: invented condition for leave outside the usual months", False,
+     "Can I take paid leave in December?",
+     "Paid leave is normally taken between 1 May and 31 October. Outside that period you also need extra approval "
+     "from HR on top of your manager's.",
+     [POLICY_WINDOW]),
+    ("bad: a true 'doesn't cover' with an invented allowance next to it", False,
+     "What is the company car policy?",
+     "The HR policy doesn't cover company cars, but employees can claim a mileage allowance for business trips.",
+     [POLICY_HOLIDAYS]),
     # ---- GOOD: the judge must pass these ----
+    ("good: 'the policy doesn't cover it', the only section found is about another topic", True,
+     "What is the company car policy?",
+     "The HR policy doesn't cover a company car policy. Would you like me to raise an HR ticket to ask about this?",
+     [POLICY_HOLIDAYS]),
+    ("good: 'the policy doesn't cover it', nothing was found", True,
+     "What is the company car policy?",
+     "The HR policy doesn't cover company cars. Would you like me to raise an HR ticket so HR can help?",
+     [NOTHING_FOUND]),
+    ("good: manager decides, said without a promise of approval", True,
+     "Can I take paid leave in December?",
+     "Paid leave is normally taken between 1 May and 31 October, but you can still request it for December. It is "
+     "handled like any other leave request, so your manager decides whether to approve it.",
+     [POLICY_WINDOW]),
     ("good: months from the policy, with an offer", True,
      "And during which months do I take them?",
      "Your company policy says paid leave is normally taken between 1 May and 31 October, and you request it through "

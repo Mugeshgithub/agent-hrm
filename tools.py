@@ -19,11 +19,11 @@ def _read_paid_policy():
     # so the policy text is the only place they are written; fails loudly if the wording changes
     path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "hr_policy.md")
     text = open(path, encoding="utf-8").read()
-    m = re.search(r"Paid leave is normally taken between (\d+) (\w+) and (\d+) (\w+)\..*?your manager approves it\.",
+    m = re.search(r"Paid leave is normally taken between (\d+) (\w+) and (\d+) (\w+)\..*?your manager decides whether to approve it\.",
                   text, re.S)
     if not m:
         raise RuntimeError("hr_policy.md: the Paid leave section no longer has the 'normally taken between ... "
-                           "your manager approves it.' sentences that tools.py reads")
+                           "your manager decides whether to approve it.' sentences that tools.py reads")
     months = list(calendar.month_name)
     window = ((months.index(m.group(2)), int(m.group(1))), (months.index(m.group(4)), int(m.group(3))))
     return window, " ".join(m.group(0).split())
