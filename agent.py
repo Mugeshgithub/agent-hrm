@@ -16,6 +16,7 @@ from db import init_db
 from memory import init_memory, init_summaries, save_message, build_context
 from notifications import init_notifications, notify_decision, notify_ticket_reply, show_unread
 from policy import search_policy
+import needs_you
 from citations import ungrounded_citations, RETRY_MESSAGE, SAFE_REPLY
 from tools import (
     get_leave_balance, apply_leave, days_for, holidays_of, balance_of, clean_days,
@@ -120,10 +121,12 @@ Never mention or offer manager or HR features like team requests, approvals or o
     "manager": """
 You can view your team's pending requests and approve or reject them.
 A rejection always needs a reason; ask for one if it was not given, politely explaining it helps the employee plan or reapply.
-If the answer to an approve-or-reject question is unclear (like "no"), ask whether to reject it or leave it pending. Never treat an unclear answer as a decision.""",
+If the answer to an approve-or-reject question is unclear (like "no"), ask whether to reject it or leave it pending. Never treat an unclear answer as a decision.
+When asked what needs your attention or what is waiting, call get_needs_attention and tell them what is waiting, the oldest first, including any paid-leave warning. Only list it: never approve or reject until they say what to do with a request.""",
     "hr": """
 You can list open tickets with get_open_tickets and answer one with reply_to_ticket. A reply closes the ticket.
-You may look up any employee's payslip by passing employee_id; every such view is logged.""",
+You may look up any employee's payslip by passing employee_id; every such view is logged.
+When asked what needs your attention or what is waiting, call get_needs_attention and tell them the open HR requests and any paid-leave warning. Only list it: never reply to a ticket until they say what to write.""",
 }
 
 # ALL tools; roles.tools_for() picks which ones each role is sent
@@ -175,6 +178,14 @@ TOOLS = [
         "name": "get_pending_requests",
         "description": "List leave requests from your team members that are waiting for your approval. "
                        "Use this when a manager asks about pending requests, approvals, or their team.",
+        "input_schema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "get_needs_attention",
+        "description": "List everything that is waiting on a decision from the logged-in manager or HR person: "
+                       "leave, paid leave and floating-holiday requests from the team, open HR requests, and a "
+                       "warning for anyone with more than 30 unused paid days. Use this when they ask what needs "
+                       "their attention, what is waiting for them, or what is new. It only lists; it decides nothing.",
         "input_schema": {"type": "object", "properties": {}},
     },
     {
@@ -488,6 +499,9 @@ def run_tool(name, tool_input):
 
     if name == "get_pending_requests":
         return get_pending_requests(LOGGED_IN_ID)
+
+    if name == "get_needs_attention":
+        return needs_you.for_assistant(LOGGED_IN_ID)     # the role check is in roles.py and in needs_you.py
 
     if name == "decide_leave":
         answer = confirmed(name, tool_input, tool_input)

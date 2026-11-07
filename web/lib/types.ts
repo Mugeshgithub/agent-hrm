@@ -46,6 +46,18 @@ export type Payslip = {
 
 export const PENDING = "pending_manager_approval";
 
+// a leave, paid leave or floating-holiday request waiting on a manager (Approvals page and Needs you inbox)
+export type Pending = {
+  request_id: number; employee_id: string; employee_name: string; leave_type: string; start: string; end: string;
+  days: number; balances: Balances; overlaps: CalendarLeave[];
+};
+
+export type NeedsYou = {
+  role: Role; waiting_on_you: number; leave_requests: Pending[];
+  hr_requests: { id: number; ticket: string; employee_id: string; employee_name: string; question: string; summary: string; created_at: string }[];
+  paid_leave_warnings: { employee_id: string; name: string; paid_days: number; message: string }[];
+};
+
 export type Adjustment = {
   leave_type: "casual" | "sick" | "paid"; days: number; kind: "manual" | "year_start" | "lapse" | "accrual";
   reason: string; changed_at: string; changed_by: string;

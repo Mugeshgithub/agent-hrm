@@ -198,12 +198,13 @@ def get_open_tickets_count():
 # ---------- NEW: tools per role ----------
 
 def fake_tools():
-    # the same 20 tool names the agent uses; payslip tools have an employee_id field
+    # the same 21 tool names the agent uses; payslip tools have an employee_id field
     names = ["get_leave_balance", "get_my_requests", "count_leave_days", "apply_leave",
              "cancel_leave", "search_policy", "create_hr_ticket", "get_my_tickets",
              "get_payslip", "compare_payslips", "get_pay_summary",
              "get_pending_requests", "get_team_member_balance", "decide_leave",
-             "get_open_tickets", "reply_to_ticket", "search_labour_code", "lookup_colleague", "get_balance_history", "get_holidays"]
+             "get_open_tickets", "reply_to_ticket", "search_labour_code", "lookup_colleague", "get_balance_history", "get_holidays",
+             "get_needs_attention"]
     tools = [{"name": n, "description": n, "input_schema": {"type": "object", "properties": {}}}
              for n in names]
     for t in tools:
@@ -221,6 +222,7 @@ def fake_tool_list_matches_the_agent():
 
 MANAGER_ONLY = {"get_pending_requests", "get_team_member_balance", "decide_leave"}
 HR_ONLY = {"get_open_tickets", "reply_to_ticket"}
+STAFF_ONLY = {"get_needs_attention"}      # the Needs you inbox: managers and HR, never employees
 
 
 def names_for(role):
@@ -231,7 +233,7 @@ def names_for(role):
 @test
 def employee_gets_no_manager_or_hr_tools():
     names = names_for("employee")
-    assert not names & (MANAGER_ONLY | HR_ONLY), names
+    assert not names & (MANAGER_ONLY | HR_ONLY | STAFF_ONLY), names
     assert "apply_leave" in names and len(names) == 15, names
 
 
@@ -239,14 +241,14 @@ def employee_gets_no_manager_or_hr_tools():
 def manager_gets_team_tools_but_not_hr_tools():
     names = names_for("manager")
     assert MANAGER_ONLY <= names and not names & HR_ONLY, names
-    assert len(names) == 18, names
+    assert len(names) == 19, names
 
 
 @test
 def hr_gets_ticket_tools_but_not_manager_tools():
     names = names_for("hr")
     assert HR_ONLY <= names and not names & MANAGER_ONLY, names
-    assert len(names) == 17, names
+    assert len(names) == 18, names
 
 
 @test
@@ -280,6 +282,14 @@ def run_tool_guard_knows_who_may_call_what():
     assert roles.allowed("manager", "decide_leave") is True
     assert roles.allowed("manager", "reply_to_ticket") is False
     assert roles.allowed("hr", "reply_to_ticket") is True
+
+
+@test
+def needs_attention_is_for_managers_and_hr_only():
+    import roles
+    for role, allowed in (("employee", False), ("manager", True), ("hr", True), ("intern", False)):
+        assert roles.allowed(role, "get_needs_attention") is allowed, role
+        assert ("get_needs_attention" in names_for(role)) is allowed, role
 
 
 

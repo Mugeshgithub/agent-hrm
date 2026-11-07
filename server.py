@@ -19,6 +19,7 @@ import hr_queries
 import leave_admin
 import payslips
 from demo_data import init_all
+import needs_you
 from notifications import notify_decision, notify_ticket_reply
 from tools import (get_employee, apply_leave, cancel_leave, days_for, holidays_of, get_pending_requests,
                    decide_leave, create_hr_ticket, get_my_tickets, reply_to_ticket, PENDING, LEAVE_TYPES)
@@ -108,6 +109,8 @@ def home(request: Request):
                            "gross_eur": latest["gross_eur"]} if latest and "error" not in latest else None,
         "holidays": [h for h in sorted(d.isoformat() for d in holidays_of(emp["id"])) if h >= today][:3],
     }
+    if emp["role"] in ("manager", "hr"):
+        data["waiting_on_you"] = needs_you.waiting_count(emp["id"])     # the menu badge
     if emp["role"] == "manager":
         data["pending_approvals"] = len(get_pending_requests(emp["id"])["pending_requests"])
         members = [m["id"] for m in hr_queries.team(emp["id"])]
@@ -191,13 +194,16 @@ class DecisionIn(BaseModel):
 @app.get("/api/approvals")
 def approvals(request: Request):
     emp = need(request, "manager")
-    pending = get_pending_requests(emp["id"])["pending_requests"]
-    for p in pending:
-        p["balances"] = hr_queries.balances(p["employee_id"])
-        # who else on the team is off at the same time: the question every manager asks
-        others = [m["id"] for m in hr_queries.team(emp["id"]) if m["id"] != p["employee_id"]]
-        p["overlaps"] = [o for o in hr_queries.leave_between(p["start"], p["end"], others)]
-    return pending
+    return needs_you.leave_decisions(emp["id"])
+
+
+@app.get("/api/needs-you")
+def needs_you_inbox(request: Request):
+    # managers and HR: everything waiting on them. Approve and reject use POST /api/approvals/{id}.
+    emp = me(request)
+    if emp["role"] not in ("manager", "hr"):
+        raise HTTPException(403, "This page isn't available for your role.")
+    return needs_you.inbox(emp["id"])
 
 
 @app.post("/api/approvals/{request_id}")

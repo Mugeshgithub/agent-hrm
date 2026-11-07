@@ -15,7 +15,7 @@ import { Assistant } from "./Assistant";
 
 type NavItem = { href: string; label: string; icon: typeof Home; badge?: number };
 
-function navFor(me: Person, pending: number, openTickets: number): { title: string; items: NavItem[] }[] {
+function navFor(me: Person, waiting: number, openTickets: number): { title: string; items: NavItem[] }[] {
   const groups: { title: string; items: NavItem[] }[] = [{
     title: "Me",
     items: [
@@ -27,10 +27,11 @@ function navFor(me: Person, pending: number, openTickets: number): { title: stri
     ],
   }];
   if (me.role === "manager") groups.push({ title: "My team", items: [
-    { href: "/approvals", label: "Approvals", icon: CheckSquare, badge: pending },
+    { href: "/needs-you", label: "Needs you", icon: CheckSquare, badge: waiting },
     { href: "/team", label: "Team", icon: Users },
   ] });
   if (me.role === "hr") groups.push({ title: "HR", items: [
+    { href: "/needs-you", label: "Needs you", icon: CheckSquare, badge: waiting },
     { href: "/inbox", label: "Request inbox", icon: Inbox, badge: openTickets },
     { href: "/access-log", label: "Payslip access", icon: ShieldCheck },
     { href: "/leave-admin", label: "Leave settings", icon: CalendarCog },
@@ -46,7 +47,7 @@ export function Shell({ children }: { children: ReactNode }) {
   const router = useRouter();
   const path = usePathname();
   const { data: me, error } = useSWR<Person>("/me", fetcher);
-  const { data: home } = useSWR<{ pending_approvals?: number; open_hr_tickets?: number }>(me ? "/home" : null, fetcher);
+  const { data: home } = useSWR<{ waiting_on_you?: number; open_hr_tickets?: number }>(me ? "/home" : null, fetcher);
   const [menuOpen, setMenuOpen] = useState(false);
   const [askOpen, setAskOpen] = useState(false);
 
@@ -59,7 +60,7 @@ export function Shell({ children }: { children: ReactNode }) {
     return <div className="min-h-screen grid place-items-center text-ink-soft">{error && !(error instanceof ApiError && error.status === 401) ? "Can't reach the server. Is the API running on port 8000?" : "Loading…"}</div>;
   }
 
-  const groups = navFor(me, home?.pending_approvals ?? 0, home?.open_hr_tickets ?? 0);
+  const groups = navFor(me, home?.waiting_on_you ?? 0, home?.open_hr_tickets ?? 0);
   const nav = (
     <nav aria-label="Main" className="space-y-6">
       {groups.map((g) => (

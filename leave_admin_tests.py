@@ -372,6 +372,109 @@ def the_monthly_job_runs_from_the_command_line():
     assert balance("E001", "paid") == 15
 
 
+# ---------- the Needs you inbox (needs_you.py) ----------
+import needs_you
+
+
+def a_floating_holiday(emp_id):
+    # the next floating holiday still to come that falls on a weekday
+    for year in (date.today().year, date.today().year + 1):
+        for h in la.my_holidays(emp_id, year)["holidays"]:
+            if h["kind"] == "floater" and not h["past"] and not h["weekend"]:
+                return h["day"]
+
+
+def set_paid(emp_id, days):
+    conn = db.get_conn()
+    with conn:
+        conn.execute("UPDATE employees SET paid_balance = ? WHERE id = ?", (days, emp_id))
+    conn.close()
+
+
+@test
+def a_manager_sees_leave_paid_leave_and_floating_holidays_of_the_team_oldest_first():
+    fresh()
+    paid = tools.apply_leave("E001", "paid", "2030-03-04", "2030-03-09")["request"]["id"]       # Emma, 6 days
+    casual = tools.apply_leave("E002", "casual", "2030-03-05", "2030-03-05")["request"]["id"]   # Hugo
+    floater = la.request_floater("E003", a_floating_holiday("E003"))["request_id"]               # Clara
+    box = needs_you.inbox("M001")
+    assert [r["request_id"] for r in box["leave_requests"]] == [paid, casual, floater]           # oldest first
+    assert [r["leave_type"] for r in box["leave_requests"]] == ["paid", "casual", "floater"]
+    assert box["waiting_on_you"] == 3 and box["hr_requests"] == [] and box["role"] == "manager"
+    first = box["leave_requests"][0]
+    assert first["days"] == 6 and first["balances"]["paid"] == {"balance": 12.5, "pending": 6, "available": 6.5}
+    assert [o["name"] for o in first["overlaps"]] == ["Hugo"]                                    # who else is off then
+
+
+@test
+def only_employer_decisions_are_in_the_inbox_and_employees_have_none():
+    fresh()
+    tools.apply_leave("E001", "casual", "2030-03-04", "2030-03-04")                              # Emma asks Lucas
+    lucas = tools.apply_leave("M001", "casual", "2030-03-11", "2030-03-11")["request"]["id"]      # Lucas asks the CEO
+    assert [r["request_id"] for r in needs_you.inbox("C001")["leave_requests"]] == [lucas]      # the CEO decides Lucas's
+    assert [r["employee_id"] for r in needs_you.inbox("M001")["leave_requests"]] == ["E001"]     # not his own request
+    assert "error" in needs_you.inbox("E001") and "error" in needs_you.inbox("nobody")          # employees: no inbox
+    assert needs_you.waiting_count("E001") == 0
+    assert needs_you.inbox("H001")["leave_requests"] == []                                       # HR does not decide leave
+
+
+@test
+def hr_sees_open_hr_requests_oldest_first_and_closed_ones_leave_the_inbox():
+    fresh()
+    first = tools.create_hr_ticket("E002", "Can I get a parking allowance?", "Parking allowance")["id"]
+    second = tools.create_hr_ticket("E001", "Laptop stand?", "Laptop stand")["id"]
+    box = needs_you.inbox("H001")
+    assert [t["id"] for t in box["hr_requests"]] == [first, second] and box["waiting_on_you"] == 2
+    assert box["hr_requests"][0]["ticket"] == "HR-0001"
+    assert tools.reply_to_ticket("H001", first, "We will look at it.")["success"]
+    assert [t["id"] for t in needs_you.inbox("H001")["hr_requests"]] == [second]
+    assert needs_you.waiting_count("H001") == 1 and needs_you.inbox("M001")["hr_requests"] == []
+
+
+@test
+def more_than_30_unused_paid_days_is_a_warning_for_the_team_manager_and_for_hr():
+    fresh()
+    set_paid("E001", 31)          # Emma: warned
+    set_paid("E002", 30)          # Hugo: exactly 30 is fine
+    set_paid("E003", 30.5)        # Clara: warned
+    lucas = needs_you.inbox("M001")["paid_leave_warnings"]
+    assert [(w["name"], w["paid_days"]) for w in lucas] == [("Emma", 31), ("Clara", 30.5)]   # most days first
+    assert lucas[0]["message"] == "Emma has 31 unused paid days, more than 30. Worth planning some leave."
+    assert needs_you.inbox("M001")["waiting_on_you"] == 0                                    # a heads-up, not a decision
+    assert needs_you.inbox("C001")["paid_leave_warnings"] == []                              # Lucas 20, Narmadha 15: his team only
+    assert [w["name"] for w in needs_you.inbox("H001")["paid_leave_warnings"]] == ["Emma", "Clara"]
+
+
+@test
+def people_who_have_left_are_not_warned_about():
+    fresh()
+    set_paid("E001", 40)
+    conn = db.get_conn()
+    with conn:
+        conn.execute("UPDATE profiles SET end_date = '2020-01-01' WHERE emp_id = 'E001'")
+    conn.close()
+    assert needs_you.inbox("M001")["paid_leave_warnings"] == []
+    assert needs_you.inbox("H001")["paid_leave_warnings"] == []
+
+
+@test
+def a_decided_request_leaves_the_inbox_and_the_assistant_view_matches():
+    fresh()
+    rid = tools.apply_leave("E001", "paid", "2030-03-04", "2030-03-09")["request"]["id"]
+    tools.create_hr_ticket("E002", "Parking?", "Parking")
+    set_paid("E003", 33)
+    seen = needs_you.for_assistant("M001")
+    assert seen["waiting_on_you"] == 1 and seen["hr_requests"] == []
+    assert seen["leave_requests"] == [{"request_id": rid, "employee_name": "Emma", "leave_type": "paid",
+                                       "start": "2030-03-04", "end": "2030-03-09", "days": 6, "also_off": []}]
+    assert seen["paid_leave_warnings"] == ["Clara has 33 unused paid days, more than 30. Worth planning some leave."]
+    assert "error" in needs_you.for_assistant("E001")
+    assert [t["summary"] for t in needs_you.for_assistant("H001")["hr_requests"]] == ["Parking"]
+    assert tools.decide_leave("M001", rid, "approve")["success"]                                 # same rule as the Approvals page
+    assert needs_you.inbox("M001")["leave_requests"] == [] and needs_you.waiting_count("M001") == 0
+    assert "error" in tools.decide_leave("C001", rid, "approve")                                 # still only the right manager
+
+
 if __name__ == "__main__":
     failed = 0
     for t in TESTS:
