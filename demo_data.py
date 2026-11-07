@@ -14,6 +14,8 @@ import hr_queries
 import employees
 import leave_admin
 import onboarding
+import outbox
+import welcome
 from memory import init_memory, init_summaries
 from notifications import init_notifications, notify_decision, notify_ticket_reply
 from tools import apply_leave, decide_leave, create_hr_ticket, reply_to_ticket
@@ -29,12 +31,17 @@ def init_all(reset=False):
     hr_queries.init_profiles()
     employees.init_records()
     onboarding.init_onboarding()
+    outbox.init_outbox()
+    welcome.init_welcome()
     leave_admin.init_leave_admin()   # public holidays and the balance history
     if reset:   # balances start again, so their history does too
         conn = db.get_conn()
         with conn:
             conn.execute("DELETE FROM leave_adjustments")
             conn.execute("DELETE FROM leave_runs")
+            conn.execute("DELETE FROM welcome_link_events")
+            conn.execute("DELETE FROM welcome_links")
+            conn.execute("DELETE FROM outbox")
             conn.execute("DELETE FROM onboarding_steps")
             conn.execute("DELETE FROM onboardings")
         conn.close()

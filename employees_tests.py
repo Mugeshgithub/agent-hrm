@@ -3,7 +3,8 @@
 import os
 import sys
 import tempfile
-from datetime import date, timedelta
+import re
+from datetime import date, datetime, timedelta
 
 import db
 db.DB_PATH = os.path.join(tempfile.mkdtemp(), "employees_test.db")   # throwaway database
@@ -12,6 +13,8 @@ import demo_data
 import employees as e
 import needs_you
 import onboarding
+import outbox
+import welcome
 
 TESTS = []
 
@@ -281,6 +284,160 @@ def people_who_have_left_are_not_waiting_on_anyone_and_their_steps_cannot_change
     conn.close()
     assert onboarding.open_steps("H001") == [] and onboarding.open_steps("M001") == []
     assert "no longer works here" in onboarding.complete_step("H001", contract)["error"]
+
+
+# ---------- the new hire's welcome link, the outbox, and the new hire's own view ----------
+
+NOW = datetime(2030, 1, 7, 9, 0, 0)
+APP = "http://app.test"
+
+
+def issue(emp_id, now=NOW):
+    r = welcome.issue_link("H001", emp_id, APP, now=now)
+    assert r.get("success"), r
+    body = outbox.messages("H001")[0]["body"]
+    return re.search(r"/welcome/([A-Za-z0-9_-]+)", body).group(1), r["code"], r
+
+
+def events(emp_id):
+    conn = db.get_conn()
+    rows = [r["event"] for r in conn.execute("SELECT event FROM welcome_link_events WHERE emp_id = ? ORDER BY id", (emp_id,))]
+    conn.close()
+    return rows
+
+
+@test
+def only_hr_issues_a_welcome_link_and_only_for_someone_with_a_checklist():
+    fresh()
+    emp_id = hire()
+    for who in ("E001", "M001", emp_id, "nobody"):
+        assert "Only HR" in welcome.issue_link(who, emp_id, APP, now=NOW)["error"], who
+    assert "no onboarding checklist" in welcome.issue_link("H001", "E001", APP, now=NOW)["error"]     # started long ago
+    assert "No current person" in welcome.issue_link("H001", "E999", APP, now=NOW)["error"]
+    r = welcome.issue_link("H001", emp_id, APP, now=NOW)
+    assert r["success"] and re.fullmatch(r"\d{6}", r["code"]) and r["to"] == "anu@cognivexai.eu"
+    assert r["expires_at"] == "2030-01-21 09:00:00"                                                  # 14 days
+
+
+@test
+def the_token_is_stored_only_as_a_hash_and_the_code_never_in_the_email():
+    fresh()
+    emp_id = hire()
+    token, code, _ = issue(emp_id)
+    assert len(token) >= 40                                                  # random, long enough to never be guessed
+    conn = db.get_conn()
+    stored = " ".join(str(v) for row in conn.execute("SELECT * FROM welcome_links").fetchall() for v in tuple(row))
+    conn.close()
+    assert token not in stored and code not in stored.split()               # only hashes are kept
+    mail = outbox.messages("H001")[0]
+    assert f"{APP}/welcome/{token}" in mail["body"] and code not in mail["body"]      # the code goes another way
+    assert mail["to_email"] == "anu@cognivexai.eu" and mail["kind"] == "welcome_link" and mail["sent_at"] is None
+    assert token != issue(emp_id)[0]                                         # every link is different
+
+
+@test
+def the_right_token_and_code_open_the_link_and_five_wrong_codes_lock_it():
+    fresh()
+    emp_id = hire()
+    token, code, _ = issue(emp_id)
+    assert welcome.link_state(token, now=NOW) == {"state": "ready"}
+    assert welcome.link_state("not-a-token", now=NOW) == {"state": "invalid"}
+    assert welcome.open_link("not-a-token", code, now=NOW)["state"] == "invalid"
+    wrong = "000000" if code != "000000" else "111111"
+    assert "The code has 6 digits" in welcome.open_link(token, "12ab", now=NOW)["error"]        # a typo is not a guess
+    assert "4 tries left" in welcome.open_link(token, wrong, now=NOW)["error"]
+    assert "3 tries left" in welcome.open_link(token, wrong, now=NOW)["error"]
+    assert welcome.open_link(token, f" {code[:3]} {code[3:]} ", now=NOW) == {"emp_id": emp_id}   # spaces are fine; resets the count
+    for tries_left in (4, 3, 2, 1):
+        assert f"{tries_left} {'try' if tries_left == 1 else 'tries'} left" in welcome.open_link(token, wrong, now=NOW)["error"]
+    locked = welcome.open_link(token, wrong, now=NOW)
+    assert locked["state"] == "locked" and "Ask HR" in locked["error"]
+    assert welcome.open_link(token, code, now=NOW)["state"] == "locked"      # even the right code, now
+    assert welcome.link_state(token, now=NOW) == {"state": "locked"}
+    assert welcome.link_status("H001", emp_id, now=NOW)["wrong_codes"] == 5
+    assert events(emp_id).count("wrong_code") == 7 and "locked" in events(emp_id) and "opened" in events(emp_id)
+
+
+@test
+def a_link_works_for_14_days_and_a_new_link_replaces_the_old_one():
+    fresh()
+    emp_id = hire()
+    token, code, _ = issue(emp_id)
+    assert welcome.open_link(token, code, now=NOW + timedelta(days=13, hours=23)) == {"emp_id": emp_id}
+    expired = welcome.open_link(token, code, now=NOW + timedelta(days=14))
+    assert expired["state"] == "expired" and "expired" in expired["error"]
+    new_token, new_code, _ = issue(emp_id, now=NOW + timedelta(days=15))
+    assert welcome.open_link(token, code, now=NOW + timedelta(days=15))["state"] == "revoked"      # replaced
+    assert welcome.open_link(new_token, new_code, now=NOW + timedelta(days=15)) == {"emp_id": emp_id}
+    assert welcome.link_status("H001", emp_id, now=NOW + timedelta(days=15))["state"] == "ready"
+
+
+@test
+def a_link_for_someone_who_left_does_not_open_and_hr_can_cancel_one_with_a_reason():
+    fresh()
+    emp_id = hire()
+    token, code, _ = issue(emp_id)
+    assert "reason" in welcome.revoke_link("H001", emp_id, " ", now=NOW)["error"]
+    assert "Only HR" in welcome.revoke_link("M001", emp_id, "x", now=NOW)["error"]
+    assert welcome.revoke_link("H001", emp_id, "Offer withdrawn", now=NOW)["success"]
+    assert welcome.open_link(token, code, now=NOW)["state"] == "revoked"
+    assert "no active link" in welcome.revoke_link("H001", emp_id, "again", now=NOW)["error"]
+    other = hire(email="bea@cognivexai.eu", name="Bea")
+    token2, code2, _ = issue(other)
+    conn = db.get_conn()
+    with conn:
+        conn.execute("UPDATE profiles SET end_date = ? WHERE emp_id = ?", (in_days(-1), other))      # the offer fell through
+    conn.close()
+    assert welcome.open_link(token2, code2, now=NOW)["state"] == "invalid"
+
+
+@test
+def the_email_waits_in_the_outbox_only_hr_sees_it_and_the_link_is_scrubbed_once_sent():
+    fresh()
+    emp_id = hire()
+    token, code, issued = issue(emp_id)
+    for who in ("E001", "M001", emp_id):
+        assert "Only HR" in outbox.messages(who)["error"] and "Only HR" in outbox.mark_sent(who, issued["outbox_id"])["error"]
+    assert "No such message" in outbox.mark_sent("H001", 9999)["error"]
+    assert outbox.mark_sent("H001", issued["outbox_id"])["success"]
+    mail = outbox.messages("H001")[0]
+    assert mail["sent_at"] and mail["sent_by_name"] == "Narmadha"
+    assert token not in mail["body"] and "[link removed after sending]" in mail["body"]       # no working link is kept
+    assert "already marked" in outbox.mark_sent("H001", issued["outbox_id"])["error"]
+    assert welcome.open_link(token, code, now=NOW) == {"emp_id": emp_id}                     # the person's link still works
+    assert outbox.messages("H001", unsent_only=True) == []
+
+
+@test
+def issuing_cancelling_and_sending_are_in_the_change_history():
+    fresh()
+    emp_id = hire()
+    _, _, issued = issue(emp_id)
+    outbox.mark_sent("H001", issued["outbox_id"])
+    welcome.revoke_link("H001", emp_id, "Wrong email address", now=NOW)
+    log = [(c["field"], c["new_value"], c["reason"], c["changed_by"]) for c in e.history("H001", emp_id)["changes"]
+           if c["field"] in ("welcome link", "outbox")]
+    assert ("welcome link", "cancelled", "Wrong email address", "Narmadha") in log
+    assert ("outbox", "marked as sent: Welcome to CognivexAI: your personal page", "Copied and sent by HR", "Narmadha") in log
+    assert any(f == "welcome link" and v.startswith("issued, valid until") for f, v, _, _ in log)
+
+
+@test
+def a_new_hire_sees_only_their_own_checklist_without_notes_or_names():
+    fresh()
+    emp_id = hire()
+    box = onboarding.my_checklist(emp_id)
+    assert box["name"] == "Anu" and box["manager"] == "Lucas" and box["total"] == 8 and box["done"] == 0
+    assert box["next_for_you"] == "Identity document"
+    assert {s["who"] for s in box["steps"]} == {"you", "HR", "your manager"}
+    assert all(set(s) == {"step", "what", "who", "due_date", "status", "overdue"} for s in box["steps"])    # no notes, no names
+    id_step = step(emp_id, "id")["id"]
+    onboarding.complete_step("H001", id_step, "Passport copy checked, number 12AB34567")
+    box = onboarding.my_checklist(emp_id)
+    assert box["next_for_you"] == "Bank details (IBAN)" and box["done"] == 1
+    assert "12AB34567" not in str(box) and "Narmadha" not in str(box)                        # HR's note and name stay with HR
+    assert "no onboarding checklist" in onboarding.my_checklist("E001")["error"]            # started long ago
+    assert "error" in onboarding.my_checklist("nobody")
 
 
 if __name__ == "__main__":

@@ -8,6 +8,7 @@ import { day } from "@/lib/format";
 import { Onboarding, OnboardingStep, StepOwner } from "@/lib/types";
 import { Dialog } from "@/components/Dialog";
 import { ErrorNote } from "@/components/PageHeader";
+import { WelcomeLinkPanel } from "@/components/WelcomeLinkPanel";
 
 export const OWNER: Record<StepOwner, string> = { new_hire: "New hire", hr: "HR", manager: "Manager" };
 
@@ -54,8 +55,9 @@ export function OnboardingChecklist({ data }: { data: Onboarding }) {
           Starts {day(data.start_date)} {data.start_date.slice(0, 4)}. Steps for the new hire can be marked done here when HR has what is needed.
         </p>
       </div>
+      <WelcomeLinkPanel empId={data.emp_id} firstName={data.name.split(" ")[0]} />
       {error && <div className="px-5 pt-3"><ErrorNote message={error} /></div>}
-      <ol className="mt-3 divide-y divide-rule border-t border-rule">
+      <ol className="mt-4 divide-y divide-rule border-t border-rule">
         {data.steps.map((s) => (
           <li key={s.id} className="flex flex-col gap-2 px-5 py-3 sm:flex-row sm:items-start sm:justify-between sm:gap-4">
             <div className="min-w-0">

@@ -9,7 +9,14 @@ EVERYONE = {
     "get_payslip", "compare_payslips", "get_pay_summary", "lookup_colleague", "get_balance_history", "get_holidays",
 }
 
+# a new hire (signed in with their welcome link, before day one) can only read their own onboarding: no leave,
+# pay, colleagues, policy or tickets. The role exists only inside the link session; in the database they are
+# an ordinary employee, so it never changes what they can do once they work here.
+NEW_HIRE = "new_hire"
+NEW_HIRE_TOOLS = {"get_my_onboarding"}
+
 ROLE_TOOLS = {
+    NEW_HIRE: NEW_HIRE_TOOLS,
     "employee": EVERYONE,
     "manager":  EVERYONE | {"get_pending_requests", "get_team_member_balance", "decide_leave", "get_needs_attention"},
     "hr":       EVERYONE | {"get_open_tickets", "reply_to_ticket", "get_needs_attention"},

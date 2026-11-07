@@ -1,6 +1,7 @@
 # server_tests.py: checks the web API's rules. No AI, no API keys, runs in CI.
 #   python server_tests.py
 import os
+import re
 import sys
 import tempfile
 from datetime import date, timedelta
@@ -331,6 +332,113 @@ def onboarding_checklist_is_for_hr_and_the_steps_follow_the_rules_in_code():
     done = next(s for s in hr.get(f"/api/hr/people/{lea}/onboarding").json()["steps"] if s["id"] == equipment)
     assert done["status"] == "done" and done["done_by_name"] == "Lucas" and done["note"] == "Laptop ordered"
     assert TestClient(server.app).post(f"/api/onboarding/steps/{equipment}/complete", json={}).status_code == 401
+
+
+def make_hire(hr, email, name="Mia Roy"):
+    r = hr.post("/api/hr/people", json={"name": name, "email": email, "role": "employee", "title": "Designer",
+                                        "department": "Engineering", "location": "Paris", "start_date": in_days(25),
+                                        "manager_id": "M001"})
+    assert r.status_code == 200, r.text
+    return r.json()["id"]
+
+
+def open_welcome(hr, emp_id):
+    # HR issues the link, the "email" waits in the outbox, the new hire opens it: returns the signed-in client
+    issued = hr.post(f"/api/hr/people/{emp_id}/welcome-link")
+    assert issued.status_code == 200, issued.text
+    body = next(m["body"] for m in hr.get("/api/hr/outbox").json() if m["id"] == issued.json()["outbox_id"])
+    token = re.search(r"/welcome/([A-Za-z0-9_-]+)", body).group(1)
+    return token, issued.json()["code"]
+
+
+@test
+def hr_issues_a_welcome_link_the_email_waits_in_the_outbox_and_only_hr_sees_it():
+    hr = as_person("H001")
+    emp_id = make_hire(hr, "mia@cognivexai.eu")
+    for who in ("E001", "M001"):
+        c = as_person(who)
+        assert c.post(f"/api/hr/people/{emp_id}/welcome-link").status_code == 403, who
+        assert c.get("/api/hr/outbox").status_code == 403, who
+        assert c.get(f"/api/hr/people/{emp_id}/welcome-link").status_code == 403, who
+    assert hr.get(f"/api/hr/people/{emp_id}/welcome-link").json() is None                 # nothing yet
+    token, code = open_welcome(hr, emp_id)
+    status = hr.get(f"/api/hr/people/{emp_id}/welcome-link").json()
+    assert status["state"] == "ready" and status["wrong_codes"] == 0 and "token" not in str(status) and code not in str(status)
+    mail = hr.get("/api/hr/outbox").json()[0]
+    assert mail["to_email"] == "mia@cognivexai.eu" and f"/welcome/{token}" in mail["body"] and code not in mail["body"]
+    assert hr.post(f"/api/hr/outbox/{mail['id']}/sent").status_code == 200
+    assert token not in hr.get("/api/hr/outbox").json()[0]["body"]                         # scrubbed once sent
+    assert as_person("E001").post(f"/api/hr/outbox/{mail['id']}/sent").status_code == 403
+    nobody = hr.post("/api/hr/people/E001/welcome-link")                                    # E001 has no checklist
+    assert nobody.status_code == 400 and "no onboarding checklist" in nobody.json()["detail"]
+
+
+@test
+def a_welcome_link_needs_the_right_code_and_the_session_can_only_read_its_own_checklist():
+    hr = as_person("H001")
+    emp_id = make_hire(hr, "noa@cognivexai.eu", "Noa Berg")
+    token, code = open_welcome(hr, emp_id)
+    anon = TestClient(server.app)
+    assert anon.get(f"/api/welcome/{token}").json() == {"state": "ready"}
+    assert anon.get("/api/welcome/nonsense").json() == {"state": "invalid"}
+    assert anon.get("/api/welcome-me").status_code == 401                                   # no session, no checklist
+    wrong = "000000" if code != "000000" else "111111"
+    bad = anon.post("/api/welcome/login", json={"token": token, "code": wrong})
+    assert bad.status_code == 400 and "4 tries left" in bad.json()["detail"]
+    assert anon.get("/api/welcome-me").status_code == 401                                   # a wrong code opens nothing
+    ok = anon.post("/api/welcome/login", json={"token": token, "code": code})
+    assert ok.status_code == 200 and ok.json()["name"] == "Noa Berg" and ok.json()["next_for_you"] == "Identity document"
+    mine = anon.get("/api/welcome-me").json()
+    assert mine["total"] == 8 and "emp_id" not in mine and "E001" not in str(mine)         # nobody else's data
+    # an ordinary signed-in person is not a new hire, and a new hire is not an ordinary signed-in person
+    assert as_person("E001").get("/api/welcome-me").status_code == 401
+    assert as_person("H001").post("/api/welcome-assistant", json={"message": "hi"}).status_code == 401
+    assert anon.delete("/api/welcome-me").status_code == 200
+    assert anon.get("/api/welcome-me").status_code == 401                                   # signed out
+
+
+@test
+def a_new_hire_session_is_refused_by_every_other_page():
+    hr = as_person("H001")
+    emp_id = make_hire(hr, "ivo@cognivexai.eu", "Ivo Lund")
+    token, code = open_welcome(hr, emp_id)
+    c = TestClient(server.app)
+    assert c.post("/api/welcome/login", json={"token": token, "code": code}).status_code == 200
+    gets = ["/api/me", "/api/home", "/api/leave", "/api/payslips", "/api/payslips/2026-10", "/api/tickets", "/api/people",
+            "/api/people/E001", "/api/people/E001/history", "/api/handbook", "/api/holidays", "/api/notifications",
+            "/api/calendar?start=2030-01-01&end=2030-01-31", "/api/needs-you", "/api/approvals", "/api/team",
+            "/api/assistant/history", "/api/leave/history", "/api/hr/outbox", "/api/hr/tickets", "/api/hr/access-log",
+            f"/api/hr/people/{emp_id}/onboarding", f"/api/hr/people/{emp_id}/welcome-link", "/api/hr/payslips/E001/2026-10"]
+    for path in gets:
+        assert c.get(path).status_code == 403, path
+    posts = {"/api/assistant": {"message": "What is Emma's salary?"}, "/api/leave": {"leave_type": "casual", "start_date": "2030-03-04", "end_date": "2030-03-04"},
+             "/api/tickets": {"subject": "x", "details": "y"}, "/api/notifications/read": {},
+             f"/api/hr/people/{emp_id}/welcome-link": {}, "/api/hr/people": {"name": "X", "email": "x@cognivexai.eu", "role": "employee", "title": "t", "department": "d",
+                                "location": "Paris", "start_date": in_days(30)}, "/api/onboarding/steps/1/complete": {}}
+    for path, body in posts.items():
+        assert c.post(path, json=body).status_code == 403, path
+    assert c.get("/api/welcome-me").status_code == 200                                      # and its own page still works
+
+
+@test
+def five_wrong_codes_lock_the_link_until_hr_issues_a_new_one():
+    hr = as_person("H001")
+    emp_id = make_hire(hr, "zed@cognivexai.eu", "Zed Kim")
+    token, code = open_welcome(hr, emp_id)
+    wrong = "000000" if code != "000000" else "111111"
+    c = TestClient(server.app)
+    for _ in range(5):
+        assert c.post("/api/welcome/login", json={"token": token, "code": wrong}).status_code == 400
+    locked = c.post("/api/welcome/login", json={"token": token, "code": code})
+    assert locked.status_code == 400 and "locked" in locked.json()["detail"]
+    assert c.get(f"/api/welcome/{token}").json() == {"state": "locked"}
+    assert hr.get(f"/api/hr/people/{emp_id}/welcome-link").json()["state"] == "locked"
+    new_token, new_code = open_welcome(hr, emp_id)                                           # a new link replaces it
+    assert c.post("/api/welcome/login", json={"token": new_token, "code": new_code}).status_code == 200
+    assert c.get(f"/api/welcome/{token}").json() == {"state": "revoked"}
+    assert hr.post(f"/api/hr/people/{emp_id}/welcome-link/cancel", json={"reason": ""}).status_code == 400
+    assert hr.post(f"/api/hr/people/{emp_id}/welcome-link/cancel", json={"reason": "Wrong person"}).status_code == 200
+    assert TestClient(server.app).post("/api/welcome/login", json={"token": new_token, "code": new_code}).status_code == 400
 
 
 if __name__ == "__main__":

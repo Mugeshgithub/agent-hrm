@@ -246,13 +246,13 @@ def get_open_tickets_count():
 # ---------- NEW: tools per role ----------
 
 def fake_tools():
-    # the same 21 tool names the agent uses; payslip tools have an employee_id field
+    # the same tool names the agent uses; payslip tools have an employee_id field
     names = ["get_leave_balance", "get_my_requests", "count_leave_days", "apply_leave",
              "cancel_leave", "search_policy", "create_hr_ticket", "get_my_tickets",
              "get_payslip", "compare_payslips", "get_pay_summary",
              "get_pending_requests", "get_team_member_balance", "decide_leave",
              "get_open_tickets", "reply_to_ticket", "search_labour_code", "lookup_colleague", "get_balance_history", "get_holidays",
-             "get_needs_attention"]
+             "get_needs_attention", "get_my_onboarding"]
     tools = [{"name": n, "description": n, "input_schema": {"type": "object", "properties": {}}}
              for n in names]
     for t in tools:
@@ -338,6 +338,18 @@ def needs_attention_is_for_managers_and_hr_only():
     for role, allowed in (("employee", False), ("manager", True), ("hr", True), ("intern", False)):
         assert roles.allowed(role, "get_needs_attention") is allowed, role
         assert ("get_needs_attention" in names_for(role)) is allowed, role
+
+
+@test
+def a_new_hire_gets_exactly_one_tool_and_nobody_else_gets_it():
+    import roles
+    assert names_for("new_hire") == {"get_my_onboarding"}
+    for role in ("employee", "manager", "hr", "intern"):
+        assert "get_my_onboarding" not in names_for(role), role
+        assert roles.allowed(role, "get_my_onboarding") is False, role
+    for tool in names_for("employee") | MANAGER_ONLY | HR_ONLY | STAFF_ONLY:      # the guard in run_tool agrees
+        assert roles.allowed("new_hire", tool) is False, tool
+    assert roles.allowed("new_hire", "get_my_onboarding") is True
 
 
 
