@@ -9,7 +9,8 @@ export function Dialog({ open, onClose, title, children, width = "max-w-lg" }:
     if (!open) return;
     const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
     document.addEventListener("keydown", onKey);
-    ref.current?.querySelector<HTMLElement>("input, select, textarea, button")?.focus();
+    // a field first, else the first button: the Close button comes first in the page, and typing a space on it closes the dialog
+    (ref.current?.querySelector<HTMLElement>("input, select, textarea") ?? ref.current?.querySelector<HTMLElement>("button"))?.focus();
     return () => document.removeEventListener("keydown", onKey);
   }, [open, onClose]);
   if (!open) return null;

@@ -3,6 +3,7 @@
 import os
 import sys
 import tempfile
+from datetime import date, timedelta
 
 os.environ["HRM_DB"] = os.path.join(tempfile.mkdtemp(), "server_test_hr.db")
 import db
@@ -20,6 +21,10 @@ TESTS = []
 def test(fn):
     TESTS.append(fn)
     return fn
+
+
+def in_days(n):
+    return (date.today() + timedelta(days=n)).isoformat()
 
 
 def as_person(emp_id):
@@ -125,13 +130,13 @@ def hr_hires_and_edits_and_history_shows_who():
     hr = as_person("H001")
     r = hr.post("/api/hr/people", json={"name": "Anu", "email": "anu@cognivexai.eu", "role": "employee",
                                         "title": "QA Engineer", "department": "Engineering",
-                                        "location": "Paris", "start_date": "2026-12-01", "manager_id": "M001"})
+                                        "location": "Paris", "start_date": in_days(30), "manager_id": "M001"})
     assert r.status_code == 200, r.json()
     new_id = r.json()["id"]
     r = hr.patch(f"/api/hr/people/{new_id}", json={"changes": {"title": "Senior QA"}, "reason": "Offer revised"})
     assert r.status_code == 200, r.json()
     log = hr.get(f"/api/people/{new_id}/history").json()["changes"]
-    assert len(log) == 2 and all(c["changed_by"] == "Narmadha" for c in log)
+    assert len(log) == 3 and all(c["changed_by"] == "Narmadha" for c in log)      # created, checklist started, title
     # a colleague sees the safe view, but not the history
     emma = as_person("E001")
     card = emma.get(f"/api/people/{new_id}").json()
@@ -255,7 +260,8 @@ def needs_you_is_for_managers_and_hr_and_approving_uses_the_same_rules_as_before
     assert as_person("E001").get("/api/needs-you").status_code == 403               # employees have no inbox
     lucas = as_person("M001")
     box = lucas.get("/api/needs-you").json()
-    assert box["role"] == "manager" and box["hr_requests"] == [] and box["waiting_on_you"] == len(box["leave_requests"])
+    assert box["role"] == "manager" and box["hr_requests"] == []
+    assert box["waiting_on_you"] == len(box["leave_requests"]) + len(box["onboarding_steps"])
     # Emma asks for paid leave (Monday to Saturday = 6 days): it shows up for Lucas, her manager
     sent = as_person("E001").post("/api/leave", json={"leave_type": "paid", "start_date": "2030-05-06", "end_date": "2030-05-11"})
     assert sent.status_code == 200, sent.text
@@ -291,6 +297,40 @@ def hr_inbox_has_open_hr_requests_and_the_over_30_paid_days_warning():
     assert message in [w["message"] for w in hr.get("/api/needs-you").json()["paid_leave_warnings"]]
     assert message in [w["message"] for w in as_person("M001").get("/api/needs-you").json()["paid_leave_warnings"]]
     assert all(w["name"] != "Hugo" for w in as_person("C001").get("/api/needs-you").json()["paid_leave_warnings"])
+
+
+@test
+def onboarding_checklist_is_for_hr_and_the_steps_follow_the_rules_in_code():
+    hr = as_person("H001")
+    made = hr.post("/api/hr/people", json={"name": "Lea", "email": "lea@cognivexai.eu", "role": "employee", "title": "Designer",
+                                           "department": "Engineering", "location": "Paris", "start_date": in_days(20),
+                                           "manager_id": "M001"})
+    assert made.status_code == 200, made.text
+    lea = made.json()["id"]
+    box = hr.get(f"/api/hr/people/{lea}/onboarding").json()
+    assert box["progress"] == {"done": 0, "skipped": 0, "total": 8, "complete": False} and box["manager_name"] == "Lucas"
+    assert hr.get("/api/hr/people/E001/onboarding").json() is None                 # started long ago: no checklist
+    for who in ("E001", "M001"):
+        assert as_person(who).get(f"/api/hr/people/{lea}/onboarding").status_code == 403, who
+    contract = next(s["id"] for s in box["steps"] if s["step_key"] == "contract")
+    equipment = next(s["id"] for s in box["steps"] if s["step_key"] == "equipment")
+    # the rules are in onboarding.py: the identity is the session's, never something the request says
+    lucas, emma = as_person("M001"), as_person("E001")
+    assert emma.post(f"/api/onboarding/steps/{equipment}/complete", json={}).status_code == 400
+    assert lucas.post(f"/api/onboarding/steps/{contract}/complete", json={}).status_code == 400          # an HR step
+    assert lucas.post(f"/api/onboarding/steps/{equipment}/skip", json={"reason": "no"}).status_code == 400
+    assert hr.post(f"/api/onboarding/steps/{contract}/skip", json={"reason": ""}).status_code == 400    # a reason is needed
+    inbox = lucas.get("/api/needs-you").json()
+    assert {s["step_title"] for s in inbox["onboarding_steps"] if s["employee_id"] == lea} == {
+        "Laptop and equipment ready", "Welcome message sent"}
+    before = lucas.get("/api/home").json()["waiting_on_you"]
+    assert lucas.post(f"/api/onboarding/steps/{equipment}/complete", json={"note": "Laptop ordered"}).status_code == 200
+    assert lucas.get("/api/home").json()["waiting_on_you"] == before - 1                                  # the menu badge
+    assert hr.post(f"/api/onboarding/steps/{contract}/complete", json={}).status_code == 200
+    assert hr.post(f"/api/onboarding/steps/{contract}/reopen", json={"reason": "Wrong file"}).status_code == 200
+    done = next(s for s in hr.get(f"/api/hr/people/{lea}/onboarding").json()["steps"] if s["id"] == equipment)
+    assert done["status"] == "done" and done["done_by_name"] == "Lucas" and done["note"] == "Laptop ordered"
+    assert TestClient(server.app).post(f"/api/onboarding/steps/{equipment}/complete", json={}).status_code == 401
 
 
 if __name__ == "__main__":

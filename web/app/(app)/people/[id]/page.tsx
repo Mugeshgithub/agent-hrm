@@ -5,8 +5,9 @@ import useSWR from "swr";
 import { ArrowLeft } from "lucide-react";
 import { fetcher } from "@/lib/api";
 import { day, daysUntil, timestamp } from "@/lib/format";
-import { BalanceHistory as History, Change, Person, Profile } from "@/lib/types";
+import { BalanceHistory as History, Change, Onboarding, Person, Profile } from "@/lib/types";
 import { BalanceHistory } from "@/components/BalanceHistory";
+import { OnboardingChecklist } from "@/components/OnboardingChecklist";
 import { Avatar } from "@/components/Shell";
 import { Empty } from "@/components/PageHeader";
 import { AdjustBalanceDialog, CONTRACT, EditPersonDialog, OffboardDialog, ROLE } from "@/components/PersonForms";
@@ -43,6 +44,7 @@ export default function ProfilePage({ params }: { params: { id: string } }) {
   const { data: history } = useSWR<{ changes: Change[] }>(canSeeHistory ? `/people/${params.id}/history` : null, fetcher);
   const { data: everyone } = useSWR<Person[]>(canSeeHistory ? "/people" : null, fetcher);   // names for "Manager: X to Y"
   const { data: leaveHistory } = useSWR<History>(isHR ? `/hr/people/${params.id}/leave-history` : null, fetcher);
+  const { data: onboarding } = useSWR<Onboarding | null>(isHR ? `/hr/people/${params.id}/onboarding` : null, fetcher);   // null: no checklist
   const [adjusting, setAdjusting] = useState(false);
   const [editing, setEditing] = useState(false);
   const [leaving, setLeaving] = useState(false);
@@ -83,6 +85,8 @@ export default function ProfilePage({ params }: { params: { id: string } }) {
 
       <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_320px]">
         <div className="space-y-6">
+          {isHR && onboarding && !leftAlready && <OnboardingChecklist data={onboarding} />}
+
           <section aria-labelledby="details" className="panel">
             <h2 id="details" className="px-5 pt-5 font-medium">Details</h2>
             <dl className="grid gap-x-6 gap-y-4 px-5 py-5 sm:grid-cols-2">
@@ -187,8 +191,14 @@ function Item({ label, children }: { label: string; children: ReactNode }) {
   );
 }
 
+const STEP_STATUS: Record<string, string> = { todo: "to do", done: "done", skipped: "skipped" };
+
 function describe(c: Change, nameOf: (id: string | null) => string) {
   if (c.field === "record") return "Record created";
+  if (c.field === "onboarding") return `Onboarding ${c.new_value}`;
+  if (c.field.startsWith("onboarding: ")) {
+    return `Onboarding step "${c.field.slice("onboarding: ".length)}": ${STEP_STATUS[c.old_value ?? ""] ?? c.old_value} to ${STEP_STATUS[c.new_value ?? ""] ?? c.new_value}`;
+  }
   if (c.field === "end_date") return `Last day set to ${c.new_value ? fullDate(c.new_value) : "none"}`;
   const show = (v: string | null) => {
     if (c.field === "manager_id") return nameOf(v);

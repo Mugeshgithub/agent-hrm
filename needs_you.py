@@ -1,11 +1,13 @@
-# needs_you.py: everything that is waiting on a decision from one person, in one place.
+# needs_you.py: everything that is waiting on one person, in one place.
 # Managers (the CEO is one) decide their team's leave: casual, sick, paid and floating holidays.
-# HR answers the open HR requests. Only employer decisions are here: an employee's own requests
-# keep their confirm card and go to their manager. No AI, so it is unit-tested in CI.
+# HR answers the open HR requests. HR and managers also see the onboarding steps they own for new hires.
+# Only the employer's side is here: an employee's own requests keep their confirm card and go to their
+# manager. No AI, so it is unit-tested in CI.
 #
 # Approving or rejecting is NOT done here: the page and the assistant call decide_leave, the same
 # rules as the Approvals page (only the right manager, only pending requests, a reason to reject).
 import hr_queries
+import onboarding
 from tools import get_employee, get_pending_requests, clean_days
 
 PAID_WARN_ABOVE = 30    # unused paid days. L3141-3 caps a year's paid leave at 30 jours ouvrables, so
@@ -46,9 +48,10 @@ def inbox(emp_id):
         return {"error": "The Needs you inbox is for managers and HR."}
     leave = leave_decisions(emp_id) if emp["role"] == "manager" else []
     tickets = sorted(hr_queries.all_tickets("open"), key=lambda t: t["id"]) if emp["role"] == "hr" else []
-    return {"role": emp["role"], "leave_requests": leave, "hr_requests": tickets,
+    steps = onboarding.open_steps(emp_id)
+    return {"role": emp["role"], "leave_requests": leave, "hr_requests": tickets, "onboarding_steps": steps,
             "paid_leave_warnings": paid_leave_warnings(emp),
-            "waiting_on_you": len(leave) + len(tickets)}     # warnings are a heads-up, not a decision
+            "waiting_on_you": len(leave) + len(tickets) + len(steps)}     # warnings are a heads-up, not a decision
 
 
 def waiting_count(emp_id):
@@ -57,9 +60,9 @@ def waiting_count(emp_id):
     if emp is None:
         return 0
     if emp["role"] == "manager":
-        return len(get_pending_requests(emp_id)["pending_requests"])
+        return len(get_pending_requests(emp_id)["pending_requests"]) + len(onboarding.open_steps(emp_id))
     if emp["role"] == "hr":
-        return len(hr_queries.all_tickets("open"))
+        return len(hr_queries.all_tickets("open")) + len(onboarding.open_steps(emp_id))
     return 0
 
 
@@ -75,5 +78,8 @@ def for_assistant(emp_id):
                             "also_off": [o["name"] for o in p["overlaps"]]} for p in box["leave_requests"]],
         "hr_requests": [{"ticket": t["ticket"], "employee_name": t["employee_name"], "summary": t["summary"]}
                         for t in box["hr_requests"]],
+        "onboarding_steps": [{"employee_name": s["employee_name"], "step": s["step_title"],
+                              "start_date": s["start_date"], "due_date": s["due_date"], "overdue": s["overdue"]}
+                             for s in box["onboarding_steps"]],
         "paid_leave_warnings": [w["message"] for w in box["paid_leave_warnings"]],
     }

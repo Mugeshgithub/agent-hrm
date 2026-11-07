@@ -13,6 +13,7 @@ import payslips
 import hr_queries
 import employees
 import leave_admin
+import onboarding
 from memory import init_memory, init_summaries
 from notifications import init_notifications, notify_decision, notify_ticket_reply
 from tools import apply_leave, decide_leave, create_hr_ticket, reply_to_ticket
@@ -27,12 +28,15 @@ def init_all(reset=False):
     payslips.seed_payslips()
     hr_queries.init_profiles()
     employees.init_records()
+    onboarding.init_onboarding()
     leave_admin.init_leave_admin()   # public holidays and the balance history
     if reset:   # balances start again, so their history does too
         conn = db.get_conn()
         with conn:
             conn.execute("DELETE FROM leave_adjustments")
             conn.execute("DELETE FROM leave_runs")
+            conn.execute("DELETE FROM onboarding_steps")
+            conn.execute("DELETE FROM onboardings")
         conn.close()
 
 
@@ -87,6 +91,25 @@ def seed_activity():
     print("Demo activity added.")
 
 
+def seed_onboarding():
+    # one new hire who starts soon, through the real hiring code, so the demo shows a checklist in progress
+    conn = db.get_conn()
+    has_any = conn.execute("SELECT COUNT(*) FROM onboardings").fetchone()[0]
+    conn.close()
+    if has_any:
+        print("An onboarding already exists; nothing added.")
+        return
+    hired = employees.create_employee("H001", {
+        "name": "Léa Martin", "email": "lea.martin@cognivexai.eu", "role": "employee", "title": "Frontend Engineer",
+        "department": "Engineering", "location": "Paris", "start_date": weekday(12), "manager_id": "M001"})
+    if "error" in hired:
+        print("  skipped:", hired["error"])
+        return
+    steps = onboarding.checklist("H001", hired["id"])["steps"]
+    onboarding.complete_step("H001", next(s["id"] for s in steps if s["step_key"] == "id"), "Passport copy received by email")
+    print(f"Onboarding added for {hired['name']}.")
+
+
 def catch_up_paid_leave():
     # a demo database starts with 0 paid days. Credit January up to last month with the REAL monthly
     # job, once, so people have what they would have earned (the job refuses to credit a month twice)
@@ -105,4 +128,5 @@ def catch_up_paid_leave():
 if __name__ == "__main__":
     init_all(reset="--reset" in sys.argv)
     seed_activity()
+    seed_onboarding()
     catch_up_paid_leave()

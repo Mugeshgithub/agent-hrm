@@ -4,9 +4,11 @@
 // answered in the Request inbox. Their own requests aren't here: those go to their manager.
 import Link from "next/link";
 import useSWR from "swr";
-import { fetcher } from "@/lib/api";
-import { relative, timestamp } from "@/lib/format";
-import { NeedsYou } from "@/lib/types";
+import { useState } from "react";
+import { mutate } from "swr";
+import { api, fetcher } from "@/lib/api";
+import { day, relative, timestamp } from "@/lib/format";
+import { NeedsYou, WaitingStep } from "@/lib/types";
 import { Avatar } from "@/components/Shell";
 import { LeaveDecision } from "@/components/LeaveDecision";
 import { Empty, ErrorNote, PageHeader } from "@/components/PageHeader";
@@ -52,6 +54,15 @@ export default function NeedsYouPage() {
         </section>
       )}
 
+      {!!data?.onboarding_steps?.length && (
+        <section aria-labelledby="onboarding" className="mb-6">
+          <h2 id="onboarding" className="mb-3 font-medium">Onboarding steps <span className="text-ink-soft font-normal">({data.onboarding_steps.length})</span></h2>
+          <ul className="panel divide-y divide-rule">
+            {data.onboarding_steps.map((s) => <OnboardingStepRow key={s.step_id} s={s} isHR={me.role === "hr"} />)}
+          </ul>
+        </section>
+      )}
+
       {!!data?.hr_requests.length && (
         <section aria-labelledby="hr" className="mb-6">
           <h2 id="hr" className="mb-3 font-medium">HR requests <span className="text-ink-soft font-normal">({data.hr_requests.length})</span></h2>
@@ -73,5 +84,40 @@ export default function NeedsYouPage() {
         </section>
       )}
     </>
+  );
+}
+
+// one onboarding step that waits on this person; the rules (who may mark it done) are in onboarding.py
+function OnboardingStepRow({ s, isHR }: { s: WaitingStep; isHR: boolean }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  async function done() {
+    setBusy(true);
+    setError("");
+    try {
+      await api(`/onboarding/steps/${s.step_id}/complete`, { body: {} });
+      mutate(() => true);
+    } catch (e) { setError((e as Error).message); setBusy(false); }
+  }
+  return (
+    <li className="flex flex-col gap-3 px-5 py-4 sm:flex-row sm:items-start sm:justify-between sm:gap-4">
+      <div className="flex items-start gap-3">
+        <Avatar name={s.employee_name} size={32} />
+        <div>
+          <p className="font-medium">{s.step_title}</p>
+          <p className="text-sm text-ink-soft">{s.detail}</p>
+          <p className="mt-0.5 text-sm text-ink-soft">
+            <Link href={`/people/${s.employee_id}`} className="text-dossier hover:underline">{s.employee_name}</Link>, {s.job_title}, starts {day(s.start_date)}
+            {" · "}
+            {s.overdue ? <span className="text-no font-medium">Overdue, was due {day(s.due_date)}</span> : <>Due {day(s.due_date)} ({relative(s.due_date)})</>}
+          </p>
+          {error && <p role="alert" className="mt-1 text-sm text-no">{error}</p>}
+        </div>
+      </div>
+      <div className="flex shrink-0 gap-2">
+        {isHR && <Link href={`/people/${s.employee_id}`} className="btn-ghost">Open profile</Link>}
+        <button className="btn-primary" disabled={busy} onClick={done}>Mark done</button>
+      </div>
+    </li>
   );
 }
