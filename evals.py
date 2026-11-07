@@ -642,6 +642,18 @@ TEST_CASES = [
         "reply_must_match": r"(?is)(?=.*(1 May|May 1|1er mai))(?=.*(31 October|October 31|31 octobre))",
         "reply_must_not_match": r"(?i)\bnotice\b|préavis",
     },
+    {
+        "name": "policy: a month outside the paid-leave window gets no invented consequence",
+        "user": "E001",
+        "auto_confirm": False,
+        "input": "Can I take paid leave in December?",
+        "must_call": ["search_policy"],
+        "reply_must_match": r"(?is)(?=.*\bMay\b)(?=.*\bOctober\b)",    # it mentions the usual window, in any wording
+        # the policy says outside the window it can still be requested and goes to the manager like any other
+        # request; the reply must not add an "exception", a special or HR approval, or a condition
+        "reply_must_not_match": r"(?i)exception|special (approval|permission|case)|HR (approval|permission)|extra approval|must be approved by HR|only if",
+        "expected_requests": 0,
+    },
 
     # ---------- French labour law (need the Postgres container) ----------
     {
@@ -695,7 +707,7 @@ TEST_CASES = [
         "needs_labour_db": True,
         "input": "Quelle est la durée légale du travail par semaine ?",
         "must_call": ["search_labour_code"],
-        "reply_must_match": r"(?is)(?=.*L\.?\s?3121-27)(?=.*35\s?heures)",
+        "reply_must_match": r"(?is)(?=.*L\.?\s?3121-27)(?=.*((?<!\d)35(?!\d)|trente[- ]cinq))",     # "35 heures" or "trente-cinq heures"
     },
     {
         "name": "law: maternity leave length cites L1225-17",

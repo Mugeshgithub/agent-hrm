@@ -83,6 +83,50 @@ def not_enough_paid_leave_is_blocked_and_pending_paid_days_count():
     assert "No days" in apply_leave("E001", "paid", d(SUN), d(SUN))["error"]
 
 
+# ---------- paid leave: the usual 1 May to 31 October window ----------
+
+@test
+def the_paid_leave_note_appears_only_when_the_dates_leave_the_usual_window():
+    note = tools.PAID_POLICY_NOTE
+    n = tools.paid_policy_note
+    assert n(date(2030, 5, 1), date(2030, 5, 4)) is None          # the first day of the window
+    assert n(date(2030, 7, 1), date(2030, 7, 6)) is None
+    assert n(date(2030, 10, 28), date(2030, 10, 31)) is None      # the last day of the window
+    assert n(date(2030, 12, 2), date(2030, 12, 7)) == note
+    assert n(date(2030, 4, 29), date(2030, 5, 3)) == note         # starts before the window
+    assert n(date(2030, 10, 30), date(2030, 11, 2)) == note       # runs past it
+    assert n(date(2030, 12, 30), date(2031, 1, 3)) == note        # across New Year
+
+
+@test
+def the_note_and_the_window_are_read_from_hr_policy_md_and_the_note_carries_the_whole_policy():
+    # hr_policy.md is the only place they are written: the note is that text, the window comes from its dates
+    text = open("hr_policy.md", encoding="utf-8").read()
+    assert tools.PAID_POLICY_NOTE in text
+    assert tools.PAID_WINDOW == ((5, 1), (10, 31))
+    # the note must not read as a blocker: it says outside the window it can still be requested and who approves
+    assert "normally taken between 1 May and 31 October" in tools.PAID_POLICY_NOTE
+    assert "can still be requested" in tools.PAID_POLICY_NOTE and "your manager approves it" in tools.PAID_POLICY_NOTE
+
+
+@test
+def paid_leave_results_carry_the_note_outside_the_window_and_other_leave_never_does():
+    december = apply_leave("E001", "paid", "2030-12-02", "2030-12-04")
+    assert december["success"] and december["policy_note"] == tools.PAID_POLICY_NOTE
+    summer = apply_leave("E001", "paid", "2030-07-01", "2030-07-03")
+    assert summer["success"] and "policy_note" not in summer
+    casual = apply_leave("E001", "casual", "2030-12-09", "2030-12-09")       # a December casual day is normal
+    assert casual["success"] and "policy_note" not in casual
+
+
+@test
+def a_balance_answer_about_paid_leave_has_the_note_and_other_balance_answers_do_not():
+    assert get_leave_balance("E001", "paid")["policy_note"] == tools.PAID_POLICY_NOTE
+    assert "policy_note" not in get_leave_balance("E001")
+    assert "policy_note" not in get_leave_balance("E001", "casual")
+    assert get_leave_balance("E001", "paid")["leave_balance"]["paid"] == 12.5     # the numbers are unchanged
+
+
 @test
 def past_dates_are_blocked():
     yesterday = date.today() - timedelta(days=1)
