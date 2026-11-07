@@ -83,9 +83,12 @@ export default function HomePage() {
         <div className="space-y-6">
           {(me.role === "manager" || me.role === "hr") && (
             <section aria-labelledby="needs" className="panel p-5">
-              <h2 id="needs" className="font-medium">Needs you</h2>
+              <div className="flex items-baseline justify-between">
+                <h2 id="needs" className="font-medium">Needs you</h2>
+                <Link href="/needs-you" className="text-sm text-dossier hover:underline">Open</Link>
+              </div>
               {me.role === "manager" && (
-                <Link href="/approvals" className="mt-3 flex items-baseline justify-between rounded border border-rule px-3 py-2.5 hover:border-dossier">
+                <Link href="/needs-you" className="mt-3 flex items-baseline justify-between rounded border border-rule px-3 py-2.5 hover:border-dossier">
                   <span>Leave requests to decide</span>
                   <span className={`text-lg font-semibold ${data.pending_approvals ? "text-dossier" : "text-ink-faint"}`}>{data.pending_approvals}</span>
                 </Link>

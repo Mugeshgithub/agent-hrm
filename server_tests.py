@@ -250,6 +250,49 @@ def hr_can_credit_paid_leave_only_for_months_that_have_ended_and_only_once():
 
 
 
+@test
+def needs_you_is_for_managers_and_hr_and_approving_uses_the_same_rules_as_before():
+    assert as_person("E001").get("/api/needs-you").status_code == 403               # employees have no inbox
+    lucas = as_person("M001")
+    box = lucas.get("/api/needs-you").json()
+    assert box["role"] == "manager" and box["hr_requests"] == [] and box["waiting_on_you"] == len(box["leave_requests"])
+    # Emma asks for paid leave (Monday to Saturday = 6 days): it shows up for Lucas, her manager
+    sent = as_person("E001").post("/api/leave", json={"leave_type": "paid", "start_date": "2030-05-06", "end_date": "2030-05-11"})
+    assert sent.status_code == 200, sent.text
+    rid = sent.json()["request"]["id"]
+    after = lucas.get("/api/needs-you").json()
+    assert after["waiting_on_you"] == box["waiting_on_you"] + 1
+    item = next(x for x in after["leave_requests"] if x["request_id"] == rid)
+    assert (item["employee_name"], item["leave_type"], item["days"]) == ("Emma", "paid", 6)
+    assert item["balances"]["paid"]["pending"] >= 6 and "overlaps" in item
+    # one-click approve and reject are the Approvals endpoint: same rules
+    assert lucas.post(f"/api/approvals/{rid}", json={"decision": "reject", "reason": ""}).status_code == 400   # a reason is needed
+    assert as_person("C001").post(f"/api/approvals/{rid}", json={"decision": "approve"}).status_code == 400    # not her manager
+    assert lucas.post(f"/api/approvals/{rid}", json={"decision": "approve"}).status_code == 200
+    assert lucas.get("/api/needs-you").json()["waiting_on_you"] == box["waiting_on_you"]
+    assert lucas.get("/api/home").json()["waiting_on_you"] == box["waiting_on_you"]            # the menu badge
+    assert all(x["request_id"] != rid for x in lucas.get("/api/approvals").json())            # the Approvals page agrees
+
+
+@test
+def hr_inbox_has_open_hr_requests_and_the_over_30_paid_days_warning():
+    hr = as_person("H001")
+    box = hr.get("/api/needs-you").json()
+    assert box["role"] == "hr" and box["leave_requests"] == []
+    sent = as_person("E002").post("/api/tickets", json={"subject": "Parking", "details": "Can I get a parking allowance?"})
+    assert sent.status_code == 200, sent.text
+    after = hr.get("/api/needs-you").json()
+    assert len(after["hr_requests"]) == len(box["hr_requests"]) + 1 and after["waiting_on_you"] == box["waiting_on_you"] + 1
+    assert after["hr_requests"][-1]["summary"] == "Parking"                                   # newest last: oldest first
+    # Hugo goes above 30 unused paid days: HR and his manager see the warning, nobody else does
+    current = hr.get("/api/hr/people/E002/leave-history").json()["balance"]["paid"]
+    assert hr.post("/api/hr/people/E002/balance", json={"leave_type": "paid", "days": 31 - current, "reason": "test"}).status_code == 200
+    message = "Hugo has 31 unused paid days, more than 30. Worth planning some leave."
+    assert message in [w["message"] for w in hr.get("/api/needs-you").json()["paid_leave_warnings"]]
+    assert message in [w["message"] for w in as_person("M001").get("/api/needs-you").json()["paid_leave_warnings"]]
+    assert all(w["name"] != "Hugo" for w in as_person("C001").get("/api/needs-you").json()["paid_leave_warnings"])
+
+
 if __name__ == "__main__":
     failed = 0
     for t in TESTS:

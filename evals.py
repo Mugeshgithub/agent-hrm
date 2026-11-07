@@ -276,6 +276,18 @@ def setup_emma_pending_paid():
     apply_leave("E001", "paid", iso(day(2, 0)), iso(day(2, 5)))
 
 
+def setup_manager_inbox():
+    # Lucas has Emma's pending paid-leave request waiting, and Hugo has 31 unused paid days
+    setup_emma_pending_paid()
+    leave_admin.adjust_balance("H001", "E002", "paid", 23.5, "Days brought over for the test")
+
+
+def setup_hr_inbox():
+    # HR has Hugo's open request waiting, and Hugo has 31 unused paid days
+    setup_karthik_ticket()
+    leave_admin.adjust_balance("H001", "E002", "paid", 23.5, "Days brought over for the test")
+
+
 def setup_paid_leave_earned():
     # the monthly job credited last month's 2.5 paid days
     year, month = leave_admin.last_finished_month()
@@ -742,6 +754,28 @@ TEST_CASES = [
         "must_call": ["get_balance_history"],
         "reply_must_match": r"2[.,]5",
         "expected_requests": 0,
+    },
+    {
+        "name": "inbox: a manager asks what needs their attention",
+        "user": "M001",
+        "auto_confirm": True,      # even if a confirm box appeared, listing must not decide anything
+        "setup": setup_manager_inbox,
+        "input": "What needs my attention?",
+        "must_call": ["get_needs_attention"],
+        "must_not_call": ["decide_leave"],
+        "reply_must_match": r"(?is)(?=.*emma)(?=.*hugo)(?=.*paid)",
+        "check": lambda: status_of(1) == "pending_manager_approval",
+    },
+    {
+        "name": "inbox: HR asks what needs their attention",
+        "user": "H001",
+        "auto_confirm": True,
+        "setup": setup_hr_inbox,
+        "input": "What needs my attention?",
+        "must_call": ["get_needs_attention"],
+        "must_not_call": ["reply_to_ticket"],
+        "reply_must_match": r"(?is)(?=.*(parking|hugo))(?=.*paid)",
+        "check": lambda: count_tickets() == 1 and ticket_status(1) == "open",
     },
 ]
 
