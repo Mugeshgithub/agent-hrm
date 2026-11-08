@@ -8,7 +8,8 @@ import { useState } from "react";
 import { mutate } from "swr";
 import { api, fetcher } from "@/lib/api";
 import { day, relative, timestamp } from "@/lib/format";
-import { NeedsYou, WaitingStep } from "@/lib/types";
+import { DocumentFlag, NeedsYou, WaitingStep } from "@/lib/types";
+import { TextDialog } from "@/components/TextDialog";
 import { Avatar } from "@/components/Shell";
 import { LeaveDecision } from "@/components/LeaveDecision";
 import { Empty, ErrorNote, PageHeader } from "@/components/PageHeader";
@@ -59,6 +60,15 @@ export default function NeedsYouPage() {
           <h2 id="onboarding" className="mb-3 font-medium">Onboarding steps <span className="text-ink-soft font-normal">({data.onboarding_steps.length})</span></h2>
           <ul className="panel divide-y divide-rule">
             {data.onboarding_steps.map((s) => <OnboardingStepRow key={s.step_id} s={s} isHR={me.role === "hr"} />)}
+          </ul>
+        </section>
+      )}
+
+      {!!data?.document_flags?.length && (
+        <section aria-labelledby="docs" className="mb-6">
+          <h2 id="docs" className="mb-3 font-medium">Documents to look at <span className="text-ink-soft font-normal">({data.document_flags.length})</span></h2>
+          <ul className="panel divide-y divide-rule">
+            {data.document_flags.map((f) => <DocumentFlagRow key={f.document_id} f={f} />)}
           </ul>
         </section>
       )}
@@ -118,6 +128,32 @@ function OnboardingStepRow({ s, isHR }: { s: WaitingStep; isHR: boolean }) {
         {isHR && <Link href={`/people/${s.employee_id}`} className="btn-ghost">Open profile</Link>}
         <button className="btn-primary" disabled={busy} onClick={done}>Mark done</button>
       </div>
+    </li>
+  );
+}
+
+// a document something looked off about: the assistant only points at it, a person at HR decides
+function DocumentFlagRow({ f }: { f: DocumentFlag }) {
+  const [reviewing, setReviewing] = useState(false);
+  return (
+    <li className="flex flex-col gap-3 px-5 py-4 sm:flex-row sm:items-start sm:justify-between sm:gap-4">
+      <div className="flex items-start gap-3">
+        <Avatar name={f.employee_name} size={32} />
+        <div>
+          <p className="font-medium">{f.employee_name}'s {f.label}</p>
+          <p className="text-sm text-wait">Something looked off: {f.reason}</p>
+          <p className="text-sm text-ink-soft">The assistant can't tell whether a document is genuine. Open the file and look.</p>
+        </div>
+      </div>
+      <div className="flex shrink-0 gap-2">
+        <Link href={`/people/${f.employee_id}`} className="btn-quiet">Open profile</Link>
+        <button className="btn-primary" onClick={() => setReviewing(true)}>Mark as looked at</button>
+      </div>
+      {reviewing && (
+        <TextDialog title="Mark as looked at" label="What you found" field="note" submit="Save" endpoint={`/hr/documents/${f.document_id}/reviewed`}
+                    intro="Only do this once a person has opened the file and looked at what seemed off."
+                    placeholder="For example: compared with the original, it is fine" onClose={() => setReviewing(false)} />
+      )}
     </li>
   );
 }

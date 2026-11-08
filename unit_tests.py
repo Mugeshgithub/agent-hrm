@@ -5,6 +5,8 @@ from datetime import date, timedelta
 import db
 db.DB_PATH = "unit_test_hr.db"   # its own database, never the real hr.db
 
+import documents
+import pdf_text
 import tools
 from eval_retry import MAX_RETRIED, retry_report, run_with_retry
 from judge_parse import verdict
@@ -453,6 +455,106 @@ def the_retry_report_lists_the_tests_and_fails_the_run_when_more_than_two_needed
     assert MAX_RETRIED == 2
     lines, too_many = retry_report([("a", True), ("b", True), ("c", True)])        # all passed, but three were unlucky
     assert too_many is True and lines[-1].startswith("FAIL: 3 tests needed a retry, more than the 2 allowed")
+
+
+# ---------- documents: what code checks before and after Claude reads (documents.py) ----------
+
+@test
+def an_iban_with_a_misread_character_fails_the_mod_97_check():
+    ok = documents.check_iban
+    for good in ("FR76 3000 6000 0112 3456 7890 189", "gb82 west 1234 5698 7654 32", "DE89-3704-0044-0532-0130-00",
+                 "PL61 1090 1014 0000 0712 1981 2874"):                     # the last one: a country with no length rule, mod 97 only
+        assert ok(good)[1] is None, good
+    assert ok("FR76 3000 6000 0112 3456 7890 189")[0] == "FR7630006000011234567890189"
+    assert "check digits" in ok("FR76 3000 6000 0112 3456 7890 188")[1]       # one digit off
+    assert "check digits" in ok("FR76 3000 6000 0112 3456 7980 189")[1]       # two digits swapped
+    assert "27 characters" in ok("FR76 3000 6000 0112 3456 7890 18")[1]        # too short for a French IBAN
+    for junk in ("", None, "12345", "not an iban", "FR76"):
+        assert ok(junk)[0] is None and ok(junk)[1], junk
+
+
+@test
+def a_social_security_number_needs_the_right_two_digit_key():
+    ok = documents.check_nir
+    assert ok("2 69 05 49 588 157 80") == ("269054958815780", None)             # the official example
+    assert ok("269.05.49.588.157.80")[1] is None
+    assert ok("1 85 05 2A 004 078 04") == ("185052A00407804", None)             # Corsica: 2A counts as 19
+    assert "key doesn't match" in ok("2 69 05 49 588 157 81")[1]
+    assert "missing its 2-digit key" in ok("2 69 05 49 588 157")[1]            # 13 characters only
+    for junk in ("", None, "abc", "9 69 05 49 588 157 80", "2 69 05 49 588 157 8"):
+        assert ok(junk)[0] is None and ok(junk)[1], junk
+
+
+@test
+def a_name_matches_when_every_part_of_it_is_on_the_document_in_any_order_and_without_accents():
+    m = documents.names_match
+    assert m("Léa Martin", "MARTIN Lea Sophie") and m("Léa Martin", "lea  martin") and m("Anu", "Anu Patel")
+    assert m("Jean-Luc Picard", "PICARD Jean Luc")
+    assert not m("Léa Martin", "Lea Durand") and not m("Léa Martin", "Léa") and not m("Léa Martin", "") and not m("", "Léa Martin")
+    assert not m("Anu", "Anuradha Rao")                                      # a different name, not a longer one
+
+
+@test
+def an_identity_document_must_expire_in_the_future():
+    today = date(2030, 6, 1)
+    assert documents.check_expiry("2030-06-02", today) is None
+    assert "expired" in documents.check_expiry("2030-06-01", today)            # the day itself is too late
+    assert "expired" in documents.check_expiry("2024-01-31", today)
+    assert "couldn't read" in documents.check_expiry("next year", today) and "couldn't read" in documents.check_expiry(None, today)
+
+
+@test
+def only_a_pdf_jpg_or_png_up_to_10_mb_is_accepted_judged_by_the_file_not_its_name():
+    check = documents.check_file
+    assert check(b"%PDF-1.4 ...")[0] == "pdf" and check(b"\xff\xd8\xff\xe0....")[0] == "jpeg" and check(b"\x89PNG\r\n\x1a\n..")[0] == "png"
+    assert check(b"")[1] == "That file is empty."
+    assert "I can only read PDF, JPG or PNG" in check(b"MZ\x90\x00 a program renamed passport.pdf")[1]
+    assert "I can only read PDF" in check(b"PK\x03\x04 a zip")[1] and "I can only read PDF" in check(b"just text")[1]
+    assert check(b"%PDF-" + b"0" * (documents.MAX_BYTES - 5))[0] == "pdf"           # exactly 10 MB
+    assert "too big" in check(b"%PDF-" + b"0" * (documents.MAX_BYTES - 4))[1]       # one byte more
+
+
+@test
+def what_claude_read_is_checked_by_code_and_a_failure_means_send_it_again():
+    today = date(2030, 6, 1)
+    passport = {"readable": True, "document_type": "passport", "holder_name": "MARTIN Léa", "expiry_date": "2032-05-01"}
+    problems, shown = documents.verify("identity", passport, "Léa Martin", today)
+    assert problems == [] and ("Valid until", "01 May 2032") in shown and ("Document", "Passport") in shown
+    assert any("doesn't match your name" in p for p in documents.verify("identity", {**passport, "holder_name": "Lea Durand"}, "Léa Martin", today)[0])
+    assert any("expired" in p for p in documents.verify("identity", {**passport, "expiry_date": "2029-01-01"}, "Léa Martin", today)[0])
+    assert any("identity document" in p for p in documents.verify("identity", {**passport, "document_type": "other"}, "Léa Martin", today)[0])
+    assert documents.verify("identity", {"readable": False}, "Léa Martin", today)[0] == [
+        "I couldn't read the document clearly enough. A sharper photo or a PDF usually helps."]
+    bank = {"readable": True, "holder_name": "Léa MARTIN", "iban": "FR76 3000 6000 0112 3456 7890 189"}
+    assert documents.verify("bank_details", bank, "Léa Martin", today) == ([], [("Name on the document", "Léa MARTIN"), ("IBAN", "FR76 3000 6000 0112 3456 7890 189")])
+    assert any("check digits" in p for p in documents.verify("bank_details", {**bank, "iban": "FR76 3000 6000 0112 3456 7890 188"}, "Léa Martin", today)[0])
+    ssn = {"readable": True, "holder_name": "Lea Martin", "ssn": "269054958815780"}
+    assert documents.verify("social_security", ssn, "Léa Martin", today)[0] == []
+    assert any("key doesn't match" in p for p in documents.verify("social_security", {**ssn, "ssn": "269054958815781"}, "Léa Martin", today)[0])
+
+
+@test
+def a_question_about_a_document_being_genuine_is_recognised_and_only_an_i_cant_tell_answer_passes():
+    ask, ok = documents.asks_if_genuine, documents.says_cannot_tell
+    for yes in ("Can you tell me whether my passport is genuine?", "So you've checked my passport and it's genuine, right?",
+                "is my ID real?", "Was my IBAN verified?", "Is it a fake?", "Is the document valid?", "did you check that my passport is authentic"):
+        assert ask(yes), yes
+    for no in ("What do I need to do first?", "When is my first day?", "What will HR take care of?", "I'll send my passport tomorrow.",
+               "[In the app, I confirmed my identity document. What is next?]", "", None):
+        assert not ask(no), no
+    assert ok("I can't tell whether a document is genuine. The app only reads the details.") and ok("I cannot verify it") and ok("I'm unable to tell")
+    assert not ok("Good news, your passport was received.") and not ok("Yes, it is genuine.") and not ok("") and not ok(None)
+    assert ok(documents.GENUINE_ANSWER) and "HR" in documents.GENUINE_ANSWER           # the fixed fallback is itself a correct answer
+
+
+@test
+def the_assistant_only_gets_shortened_numbers_and_the_pdf_writer_makes_a_real_pdf():
+    assert documents.mask("FR7630006000011234567890189") == "FR76 … 0189" and documents.mask("Anu") == "Anu"
+    data = pdf_text.make_pdf([("h1", "Contrat"), ("p", "Salaire : 3 000 € — période d'essai"), ("p", "mot " * 3000)])
+    assert data.startswith(b"%PDF-1.4") and data.rstrip().endswith(b"%%EOF")
+    start = int(data[data.rindex(b"startxref") + 10:].split()[0])
+    assert data[start:start + 4] == b"xref"                                       # the cross-reference table is where it says
+    assert data.count(b"/Type /Page ") >= 2 and b"\xe9" in data and b"\x80" in data     # two pages; é and € in Windows-1252
 
 
 if __name__ == "__main__":

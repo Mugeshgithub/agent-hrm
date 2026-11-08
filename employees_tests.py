@@ -8,11 +8,14 @@ from datetime import date, datetime, timedelta
 
 import db
 db.DB_PATH = os.path.join(tempfile.mkdtemp(), "employees_test.db")   # throwaway database
+os.environ["HRM_FILES_DIR"] = tempfile.mkdtemp()                       # and a throwaway folder for the documents
 os.environ["HRM_DB"] = db.DB_PATH          # so demo_data.py can't switch back to web_demo.db
 import demo_data
 import employees as e
+import documents
 import needs_you
 import onboarding
+import pdf_text
 import outbox
 import welcome
 
@@ -430,7 +433,9 @@ def a_new_hire_sees_only_their_own_checklist_without_notes_or_names():
     assert box["name"] == "Anu" and box["manager"] == "Lucas" and box["total"] == 8 and box["done"] == 0
     assert box["next_for_you"] == "Identity document"
     assert {s["who"] for s in box["steps"]} == {"you", "HR", "your manager"}
-    assert all(set(s) == {"step", "what", "who", "due_date", "status", "overdue"} for s in box["steps"])    # no notes, no names
+    base = {"key", "step", "what", "who", "due_date", "status", "overdue"}
+    assert all(set(s) == base | ({"document"} if s["key"] in ("id", "iban", "social_security") else set()) for s in box["steps"])   # no notes, no names
+    assert next(s for s in box["steps"] if s["key"] == "iban")["document"] == {"status": "not sent yet"}
     id_step = step(emp_id, "id")["id"]
     onboarding.complete_step("H001", id_step, "Passport copy checked, number 12AB34567")
     box = onboarding.my_checklist(emp_id)
@@ -438,6 +443,196 @@ def a_new_hire_sees_only_their_own_checklist_without_notes_or_names():
     assert "12AB34567" not in str(box) and "Narmadha" not in str(box)                        # HR's note and name stay with HR
     assert "no onboarding checklist" in onboarding.my_checklist("E001")["error"]            # started long ago
     assert "error" in onboarding.my_checklist("nobody")
+
+
+# ---------- documents: the checks around Claude, who opens a file, and cancelling a hire ----------
+
+GOOD_ID = {"readable": True, "looks_off": False, "document_type": "passport", "holder_name": "Anu Patel", "expiry_date": "2099-01-01"}
+GOOD_BANK = {"readable": True, "looks_off": False, "holder_name": "PATEL Anu", "iban": "FR76 3000 6000 0112 3456 7890 189"}
+FILE = pdf_text.make_pdf([("p", "a document")])
+
+
+def reads(fields):
+    # a stand-in for Claude: it "reads" exactly these fields, whatever the file is
+    return lambda kind, data, file_type: dict(fields)
+
+
+def stored_files():
+    return sorted(os.listdir(documents.files_dir())) if os.path.isdir(documents.files_dir()) else []
+
+
+def send(emp_id, step_key, fields, data=FILE, name="scan.pdf"):
+    documents.READER = reads(fields)
+    try:
+        return documents.submit(emp_id, step_key, data, name)
+    finally:
+        documents.READER = None
+
+
+def clear_files():
+    for f in stored_files():
+        os.remove(os.path.join(documents.files_dir(), f))
+
+
+@test
+def a_good_document_is_read_checked_kept_privately_and_waits_for_the_new_hire_to_confirm():
+    fresh(); clear_files()
+    emp_id = hire()
+    r = send(emp_id, "id", GOOD_ID, name="my passport (1).pdf")
+    assert r["accepted"] is True and r["flagged"] is False
+    assert ("Name on the document", "Anu Patel") in [(x["label"], x["value"]) for x in r["read"]]
+    files = stored_files()
+    assert len(files) == 1 and re.fullmatch(r"[0-9a-f]{32}\.pdf", files[0])                  # a random name, never the person's
+    assert os.stat(os.path.join(documents.files_dir(), files[0])).st_mode & 0o777 == 0o600   # only the owner of the process reads it
+    assert step(emp_id, "id")["status"] == "todo"                                              # not done until they confirm
+    seen = onboarding.my_checklist(emp_id)
+    assert next(s for s in seen["steps"] if s["key"] == "id")["document"]["status"] == "waiting for you to confirm"
+    assert "cannot tell whether a document is genuine" in next(s for s in seen["steps"] if s["key"] == "id")["document"]["what_was_checked"]
+    assert documents.confirm(emp_id, r["document_id"]) == {"success": True}
+    assert step(emp_id, "id")["status"] == "done"
+    box = onboarding.my_checklist(emp_id)
+    assert next(s for s in box["steps"] if s["key"] == "id")["document"]["status"] == "received" and box["next_for_you"] == "Bank details (IBAN)"
+    assert "error" in documents.confirm(emp_id, r["document_id"])                              # not twice
+    log = [(c["field"], c["new_value"]) for c in e.history("H001", emp_id)["changes"] if c["field"].startswith("document:")]
+    assert ("document: identity document", "confirmed") in log and all("FR76" not in str(v) for _, v in log)     # no numbers in the log
+
+
+@test
+def a_bad_iban_is_refused_by_code_and_nothing_is_kept():
+    fresh(); clear_files()
+    emp_id = hire()
+    r = send(emp_id, "iban", {**GOOD_BANK, "iban": "FR76 3000 6000 0112 3456 7890 188"})       # one digit off
+    assert r["accepted"] is False and any("check digits" in p for p in r["problems"])
+    assert stored_files() == []                                                                # no file
+    conn = db.get_conn()
+    row = dict(conn.execute("SELECT * FROM documents WHERE id = ?", (r["document_id"],)).fetchone())
+    conn.close()
+    assert row["status"] == "rejected" and row["file_name"] is None and row["fields_json"] is None   # and not what was read
+    assert step(emp_id, "iban")["status"] == "todo"
+    shown = next(s for s in onboarding.my_checklist(emp_id)["steps"] if s["key"] == "iban")["document"]
+    assert shown["status"] == "needs resending" and any("check digits" in p for p in shown["problems"])
+    assert send(emp_id, "iban", GOOD_BANK)["accepted"] is True                                 # sent again, it passes
+    assert next(s for s in onboarding.my_checklist(emp_id)["steps"] if s["key"] == "iban")["document"]["status"] == "waiting for you to confirm"
+
+
+@test
+def someone_elses_document_an_expired_one_and_an_unreadable_one_are_all_sent_back():
+    fresh(); clear_files()
+    emp_id = hire()
+    wrong = send(emp_id, "id", {**GOOD_ID, "holder_name": "Lea Durand"})
+    assert wrong["accepted"] is False and "doesn't match your name" in wrong["problems"][0]
+    expired = send(emp_id, "id", {**GOOD_ID, "expiry_date": "2020-01-01"})
+    assert expired["accepted"] is False and "expired" in expired["problems"][0]
+    assert send(emp_id, "id", {"readable": False, "looks_off": False})["problems"][0].startswith("I couldn't read the document")
+    documents.READER = lambda *a: (_ for _ in ()).throw(RuntimeError("the reader is down"))    # an API failure is "unreadable" too
+    try:
+        assert documents.submit(emp_id, "id", FILE, "x.pdf")["accepted"] is False
+    finally:
+        documents.READER = None
+    assert stored_files() == [] and step(emp_id, "id")["status"] == "todo"
+
+
+@test
+def the_file_type_the_size_and_the_step_are_checked_before_claude_reads_anything():
+    fresh(); clear_files()
+    emp_id = hire()
+    calls = []
+    documents.READER = lambda *a: calls.append(1) or dict(GOOD_ID)
+    try:
+        assert "PDF, JPG or PNG" in documents.submit(emp_id, "id", b"MZ a program", "passport.pdf")["error"]       # the name lies
+        assert "too big" in documents.submit(emp_id, "id", b"%PDF-" + b"0" * documents.MAX_BYTES, "big.pdf")["error"]
+        assert "empty" in documents.submit(emp_id, "id", b"", "x.pdf")["error"]
+        assert "doesn't take a document" in documents.submit(emp_id, "welcome", FILE, "x.pdf")["error"]
+        assert "doesn't take a document" in documents.submit(emp_id, "contract", FILE, "x.pdf")["error"]           # an HR step
+        assert documents.submit("E001", "id", FILE, "x.pdf")["error"] == "There is no such step in your checklist."     # started long ago
+        assert documents.submit("nobody", "id", FILE, "x.pdf")["error"] == "There is no onboarding for you."
+        assert calls == []                                                                                        # Claude was never asked
+        assert documents.submit(emp_id, "id", FILE, "ok.jpg")["accepted"] is True and calls == [1]                # the name doesn't matter, the file does
+        onboarding.complete_step("H001", step(emp_id, "iban")["id"], "HR did it")
+        assert "already done" in documents.submit(emp_id, "iban", FILE, "x.pdf")["error"]
+    finally:
+        documents.READER = None
+
+
+@test
+def a_new_file_replaces_one_that_waits_and_saying_it_is_wrong_removes_it():
+    fresh(); clear_files()
+    emp_id, other = hire(), hire(email="bea@cognivexai.eu", name="Bea Roy")
+    first = send(emp_id, "id", GOOD_ID)
+    second = send(emp_id, "id", GOOD_ID)
+    assert len(stored_files()) == 1                                                            # the first one is gone
+    assert "isn't waiting" in documents.confirm(emp_id, first["document_id"])["error"]
+    assert "No such document" in documents.confirm(other, second["document_id"])["error"]      # not someone else's
+    assert "No such document" in documents.decline(other, second["document_id"])["error"]
+    assert documents.decline(emp_id, second["document_id"]) == {"success": True}
+    assert stored_files() == [] and step(emp_id, "id")["status"] == "todo"
+    assert next(s for s in onboarding.my_checklist(emp_id)["steps"] if s["key"] == "id")["document"]["status"] == "not sent yet"
+
+
+@test
+def only_the_person_and_hr_open_a_file_and_every_opening_is_logged():
+    fresh(); clear_files()
+    emp_id, other = hire(), hire(email="bea@cognivexai.eu", name="Bea Roy")
+    doc = send(emp_id, "id", GOOD_ID)["document_id"]
+    documents.confirm(emp_id, doc)
+    for who in ("M001", "E001", "C001", other, "nobody"):                                       # the manager too
+        assert documents.open_file(who, doc) == {"error": "No such document."}, who             # and "not yours" sounds like "missing"
+    assert documents.open_file("H001", 9999) == {"error": "No such document."}
+    mine, hr = documents.open_file(emp_id, doc), documents.open_file("H001", doc)
+    assert open(hr["path"], "rb").read() == FILE and hr["media_type"] == "application/pdf" and mine["path"] == hr["path"]
+    assert hr["filename"] == "identity-document.pdf"
+    listing = documents.hr_documents("H001", emp_id)
+    assert [v["viewer_name"] for v in listing[0]["views"]] == ["Narmadha", "Anu"]                # newest first
+    assert "Only HR" in documents.hr_documents("M001", emp_id)["error"] and "Only HR" in documents.hr_documents(emp_id, emp_id)["error"]
+
+
+@test
+def a_cancelled_hire_loses_access_and_every_file_and_what_was_read_is_deleted():
+    fresh(); clear_files()
+    emp_id = hire()
+    token, code, issued = issue(emp_id)
+    done = send(emp_id, "id", GOOD_ID)["document_id"]; documents.confirm(emp_id, done)
+    send(emp_id, "iban", GOOD_BANK)                                                              # one still waiting
+    assert len(stored_files()) == 2
+    for who in ("M001", "E001", emp_id):
+        assert "Only HR" in onboarding.cancel(who, emp_id, "x")["error"]
+    assert "reason" in onboarding.cancel("H001", emp_id, " ")["error"]
+    assert "no onboarding" in onboarding.cancel("H001", "E001", "x")["error"]
+    assert onboarding.cancel("H001", emp_id, "Offer withdrawn") == {"success": True, "files_deleted": 2}
+    assert stored_files() == []                                                                   # gone from disk
+    conn = db.get_conn()
+    rows = [dict(r) for r in conn.execute("SELECT status, file_name, fields_json, problems_json FROM documents WHERE emp_id = ?", (emp_id,))]
+    conn.close()
+    assert rows and all(r["status"] == "deleted" and r["file_name"] is None and r["fields_json"] is None for r in rows)
+    assert welcome.open_link(token, code, now=NOW)["state"] == "revoked" and not e.is_active(emp_id)    # no access, no link
+    assert "[link removed after sending]" in outbox.messages("H001")[0]["body"] and token not in outbox.messages("H001")[0]["body"]
+    assert onboarding.open_steps("H001") == [] and onboarding.open_steps("M001") == []           # nobody waits on a cancelled hire
+    log = [(c["field"], c["new_value"], c["reason"]) for c in e.history("H001", emp_id)["changes"]]
+    assert ("onboarding", "cancelled", "Offer withdrawn") in log and any(f == "end_date" and "Hire cancelled" in r for f, _, r in log)
+    assert onboarding.cancel("H001", emp_id, "again")["error"] == "Anu's hire was already cancelled."
+    started = hire(0, email="old@cognivexai.eu", name="Old Hand")                                 # started today: no checklist at all
+    assert "no onboarding" in onboarding.cancel("H001", started, "x")["error"]
+
+
+@test
+def a_document_something_looked_off_about_goes_to_hr_and_stays_until_a_person_has_looked():
+    fresh(); clear_files()
+    emp_id = hire()
+    r = send(emp_id, "id", {**GOOD_ID, "looks_off": True, "looks_off_reason": "The name's font differs from the rest of the page."})
+    assert r["accepted"] is True and r["flagged"] is True
+    waiting = needs_you.waiting_count("H001")
+    flags = needs_you.inbox("H001")["document_flags"]
+    assert flags == [{"document_id": r["document_id"], "employee_id": emp_id, "employee_name": "Anu", "label": "identity document",
+                      "reason": "The name's font differs from the rest of the page."}]
+    assert needs_you.inbox("M001")["document_flags"] == [] and "error" in needs_you.inbox("E001")                # only HR
+    assert needs_you.for_assistant("H001")["document_flags"][0]["reason"].startswith("The name's font")
+    assert "font" not in str(onboarding.my_checklist(emp_id)) and "looks off" not in str(onboarding.my_checklist(emp_id))   # the person is not told
+    assert "Write what you found" in documents.mark_reviewed("H001", r["document_id"], " ")["error"]
+    assert "Only HR" in documents.mark_reviewed("M001", r["document_id"], "ok")["error"]
+    assert documents.mark_reviewed("H001", r["document_id"], "Looked at the original: fine")["success"]
+    assert needs_you.inbox("H001")["document_flags"] == [] and needs_you.waiting_count("H001") == waiting - 1
+    assert "already looked" in documents.mark_reviewed("H001", r["document_id"], "again")["error"]
+    assert documents.hr_documents("H001", emp_id)[0]["flag_reviewed_by"] == "Narmadha"
 
 
 if __name__ == "__main__":

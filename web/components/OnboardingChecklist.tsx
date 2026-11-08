@@ -2,12 +2,13 @@
 // The checklist of a new hire, on their profile (HR). The rules (who may change which step, a reason to
 // skip or reopen) are in onboarding.py; this only shows the steps and sends the click.
 import { FormEvent, useState } from "react";
-import { mutate } from "swr";
-import { api } from "@/lib/api";
-import { day } from "@/lib/format";
-import { Onboarding, OnboardingStep, StepOwner } from "@/lib/types";
+import useSWR, { mutate } from "swr";
+import { api, fetcher } from "@/lib/api";
+import { day, timestamp } from "@/lib/format";
+import { HrDocument, Onboarding, OnboardingStep, StepOwner } from "@/lib/types";
 import { Dialog } from "@/components/Dialog";
 import { ErrorNote } from "@/components/PageHeader";
+import { TextDialog } from "@/components/TextDialog";
 import { WelcomeLinkPanel } from "@/components/WelcomeLinkPanel";
 
 export const OWNER: Record<StepOwner, string> = { new_hire: "New hire", hr: "HR", manager: "Manager" };
@@ -25,6 +26,9 @@ function StepStatus({ s }: { s: OnboardingStep }) {
 
 export function OnboardingChecklist({ data }: { data: Onboarding }) {
   const [asking, setAsking] = useState<{ step: OnboardingStep; action: "skip" | "reopen" } | null>(null);
+  const [cancelling, setCancelling] = useState(false);
+  const { data: documents } = useSWR<HrDocument[]>(`/hr/people/${data.emp_id}/documents`, fetcher);
+  const docOf = (key: string) => documents?.find((d) => d.step_key === key);
   const [busy, setBusy] = useState<number | null>(null);
   const [error, setError] = useState("");
   const { done, skipped, total } = data.progress;
@@ -53,6 +57,7 @@ export function OnboardingChecklist({ data }: { data: Onboarding }) {
         </div>
         <p className="mt-2 text-sm text-ink-soft">
           Starts {day(data.start_date)} {data.start_date.slice(0, 4)}. Steps for the new hire can be marked done here when HR has what is needed.
+          {" "}<button className="text-no hover:underline" onClick={() => setCancelling(true)}>Cancel this hire</button>
         </p>
       </div>
       <WelcomeLinkPanel empId={data.emp_id} firstName={data.name.split(" ")[0]} />
@@ -70,6 +75,7 @@ export function OnboardingChecklist({ data }: { data: Onboarding }) {
                   ? <span>Due {day(s.due_date)}</span>
                   : <span>{s.status === "done" ? "Done" : "Skipped"} by {s.done_by_name ?? "someone"}{s.note ? `: ${s.note}` : ""}</span>}
               </p>
+              {docOf(s.step_key) && <HrDocumentInfo doc={docOf(s.step_key)!} />}
             </div>
             <div className="flex shrink-0 gap-2">
               {s.status === "todo" ? (
@@ -85,7 +91,40 @@ export function OnboardingChecklist({ data }: { data: Onboarding }) {
         ))}
       </ol>
       {asking && <ReasonDialog step={asking.step} action={asking.action} onClose={() => setAsking(null)} />}
+      {cancelling && (
+        <TextDialog title={`Cancel ${data.name}'s hire`} danger submit="Cancel this hire" field="reason" endpoint={`/hr/people/${data.emp_id}/cancel-hire`}
+                    intro="They lose access, the welcome link stops working, and every file they sent is deleted for good, together with what was read from it. This can't be undone."
+                    placeholder="For example: accepted another offer" onClose={() => setCancelling(false)} />
+      )}
     </section>
+  );
+}
+
+// a document the new hire sent: what the assistant read, who opened the file, and anything that looked off
+function HrDocumentInfo({ doc }: { doc: HrDocument }) {
+  const [reviewing, setReviewing] = useState(false);
+  const read = Object.entries(doc.read).map(([k, v]) => `${k}: ${v}`).join(" · ");
+  return (
+    <div className="mt-2 rounded border border-rule bg-paper px-3 py-2 text-sm">
+      <p>{doc.status === "confirmed" ? `Confirmed by the new hire, ${timestamp(doc.confirmed_at ?? doc.uploaded_at)}.` : "Waiting for the new hire to confirm."} Read by the assistant:</p>
+      <p className="break-words text-ink-soft">{read}</p>
+      {doc.flagged_reason && (doc.flag_reviewed_at ? (
+        <p className="mt-1 text-ink-soft">Something looked off ({doc.flagged_reason}). Looked at by {doc.flag_reviewed_by}.</p>
+      ) : (
+        <p className="mt-1 text-wait">Something looked off: {doc.flagged_reason} A person should look at the file.{" "}
+          <button className="text-dossier hover:underline" onClick={() => setReviewing(true)}>Mark as looked at</button></p>
+      ))}
+      <p className="mt-1 text-ink-soft">
+        <a href={`/api/hr/documents/${doc.id}/file`} target="_blank" rel="noreferrer" className="text-dossier hover:underline">Open the file</a>
+        {" · "}{doc.views.length ? `Opened ${doc.views.length === 5 ? "at least " : ""}${doc.views.length} ${doc.views.length === 1 ? "time" : "times"}, last by ${doc.views[0].viewer_name ?? "someone"} on ${timestamp(doc.views[0].viewed_at)}` : "Not opened yet"}
+        . Every opening is logged.
+      </p>
+      {reviewing && (
+        <TextDialog title="Mark as looked at" label="What you found" field="note" submit="Save" endpoint={`/hr/documents/${doc.id}/reviewed`}
+                    intro="Only do this once a person has opened the file and looked at what seemed off."
+                    placeholder="For example: compared with the original, it is fine" onClose={() => setReviewing(false)} />
+      )}
+    </div>
   );
 }
 

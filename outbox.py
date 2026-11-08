@@ -32,6 +32,13 @@ def queue(conn, emp_id, to_email, subject, body, kind, created_by):
                            VALUES (?, ?, ?, ?, ?, ?)""", (emp_id, to_email, subject, body, kind, created_by)).lastrowid
 
 
+def scrub_links(conn, emp_id):
+    # a cancelled hire: no email of theirs keeps a working link
+    for row in conn.execute("SELECT id, body FROM outbox WHERE emp_id = ?", (emp_id,)).fetchall():
+        conn.execute("UPDATE outbox SET body = ? WHERE id = ?",
+                     (re.sub(r"(/welcome/)[A-Za-z0-9_-]+", r"\1[link removed after sending]", row["body"]), row["id"]))
+
+
 def messages(hr_id, unsent_only=False, limit=100):
     if not onboarding.is_hr(hr_id):
         return {"error": "Only HR can see the outbox."}

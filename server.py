@@ -10,10 +10,13 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
+from starlette.concurrency import run_in_threadpool
 from starlette.middleware.sessions import SessionMiddleware
 
 import db
+import documents
 import employees
 import hr_queries
 import leave_admin
@@ -524,6 +527,74 @@ def welcome_ask(body: AskIn, request: Request):
         except Exception as e:
             raise HTTPException(503, f"The assistant isn't available right now ({type(e).__name__}).")
         return {"reply": reply}
+
+
+# ---------- the new hire's documents, and HR's side of them ----------
+# The rules are in documents.py: file checks first, then Claude reads, then code checks what it read. The file
+# is sent as the raw request body (not a form), the person is the one the welcome link was made for.
+class ReviewIn(BaseModel):
+    note: str
+
+
+async def read_capped(request: Request, limit: int):
+    if int(request.headers.get("content-length") or 0) > limit:
+        raise HTTPException(413, "That file is too big. The limit is 10 MB.")
+    chunks, total = [], 0
+    async for chunk in request.stream():
+        total += len(chunk)
+        if total > limit:
+            raise HTTPException(413, "That file is too big. The limit is 10 MB.")
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+def send_file(result):
+    if "error" in result:
+        raise HTTPException(404, result["error"])
+    return FileResponse(result["path"], media_type=result["media_type"], filename=result["filename"],
+                        content_disposition_type="inline")
+
+
+@app.post("/api/welcome-documents")
+async def welcome_upload(request: Request, step: str, name: str = ""):
+    emp = new_hire_me(request)
+    data = await read_capped(request, documents.MAX_BYTES)
+    return fail_on_error(await run_in_threadpool(documents.submit, emp["id"], step, data, name))
+
+
+@app.post("/api/welcome-documents/{doc_id}/confirm")
+def welcome_confirm_document(doc_id: int, request: Request):
+    return fail_on_error(documents.confirm(new_hire_me(request)["id"], doc_id))
+
+
+@app.post("/api/welcome-documents/{doc_id}/decline")
+def welcome_decline_document(doc_id: int, request: Request):
+    return fail_on_error(documents.decline(new_hire_me(request)["id"], doc_id))
+
+
+@app.get("/api/welcome-documents/{doc_id}/file")
+def welcome_document_file(doc_id: int, request: Request):
+    return send_file(documents.open_file(new_hire_me(request)["id"], doc_id))          # their own, and logged
+
+
+@app.get("/api/hr/people/{emp_id}/documents")
+def person_documents(emp_id: str, request: Request):
+    return fail_on_error(documents.hr_documents(need(request, "hr")["id"], emp_id))
+
+
+@app.get("/api/hr/documents/{doc_id}/file")
+def hr_document_file(doc_id: int, request: Request):
+    return send_file(documents.open_file(need(request, "hr")["id"], doc_id))           # logged: who opened it, when
+
+
+@app.post("/api/hr/documents/{doc_id}/reviewed")
+def document_reviewed(doc_id: int, body: ReviewIn, request: Request):
+    return fail_on_error(documents.mark_reviewed(need(request, "hr")["id"], doc_id, body.note))
+
+
+@app.post("/api/hr/people/{emp_id}/cancel-hire")
+def cancel_hire(emp_id: str, body: StepReasonIn, request: Request):
+    return fail_on_error(onboarding.cancel(need(request, "hr")["id"], emp_id, body.reason))
 
 
 # ---------- leave administration ----------

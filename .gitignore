@@ -13,3 +13,4 @@ web/node_modules/
 web/.next/
 web/tsconfig.tsbuildinfo
 web_demo.db
+private_files/

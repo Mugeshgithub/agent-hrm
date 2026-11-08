@@ -68,9 +68,22 @@ export type WaitingStep = {
 };
 
 // the new hire's welcome link: what they see, what HR sees about the link, and the outbox
+export type WelcomeDocument = {
+  status: "not sent yet" | "waiting for you to confirm" | "needs resending" | "received";
+  problems?: string[]; what_was_read?: Record<string, string>;
+};
 export type WelcomeStep = {
-  step: string; what: string; who: "you" | "HR" | "your manager"; due_date: string;
-  status: "todo" | "done" | "skipped"; overdue: boolean;
+  key: string; step: string; what: string; who: "you" | "HR" | "your manager"; due_date: string;
+  status: "todo" | "done" | "skipped"; overdue: boolean; document?: WelcomeDocument;    // document: a step that takes a file
+};
+// what the app read from an uploaded file, to show before the person confirms
+export type UploadResult =
+  | { accepted: true; document_id: number; read: { label: string; value: string }[]; flagged: boolean }
+  | { accepted: false; problems: string[]; document_id: number };
+export type HrDocument = {
+  id: number; step_key: string; label: string; status: "read" | "confirmed"; uploaded_at: string; confirmed_at: string | null;
+  read: Record<string, string>; flagged_reason: string | null; flag_reviewed_by: string | null; flag_reviewed_at: string | null;
+  views: { viewed_at: string; viewer_name: string | null }[];
 };
 export type WelcomeView = {
   name: string; job_title: string; start_date: string; manager: string | null;
@@ -87,8 +100,10 @@ export type OutboxMessage = {
   created_at: string; sent_at: string | null; sent_by_name: string | null;
 };
 
+export type DocumentFlag = { document_id: number; employee_id: string; employee_name: string; label: string; reason: string };
+
 export type NeedsYou = {
-  role: Role; waiting_on_you: number; leave_requests: Pending[]; onboarding_steps: WaitingStep[];
+  role: Role; waiting_on_you: number; leave_requests: Pending[]; onboarding_steps: WaitingStep[]; document_flags: DocumentFlag[];
   hr_requests: { id: number; ticket: string; employee_id: string; employee_name: string; question: string; summary: string; created_at: string }[];
   paid_leave_warnings: { employee_id: string; name: string; paid_days: number; message: string }[];
 };
