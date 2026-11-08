@@ -1,4 +1,5 @@
 # unit_tests.py: fast checks of the business rules. No AI, no API keys, no cost.
+import json
 import sys
 from datetime import date, timedelta
 
@@ -10,6 +11,7 @@ import contracts
 import document_answers
 import documents
 import employee_files
+import number_guard
 import pdf_text
 import policy_gaps
 import policy_store
@@ -837,6 +839,10 @@ def a_correction_opening_is_taken_off_a_reply_that_followed_a_retry_note_and_not
     for untouched in ("Your contract doesn't specify it. You're right to ask.", "Sorry, I couldn't find that in the policy.", "From the company policy: you can carry 5 days.",
                       "Let me know if you need anything else.", "", None):
         assert strip(untouched) == (untouched or ""), untouched
+    assert strip("I calculated that myself. You currently have 8 casual days.") == "You currently have 8 casual days."
+    assert strip("I calculated 25.5 by adding the three balances, but that's my own arithmetic.\nYou have 8 casual days, 5 sick days and 12.5 paid days.") == \
+        "You have 8 casual days, 5 sick days and 12.5 paid days."                                  # a decimal point is not the end of that sentence
+    assert strip("You calculated it right. I calculated nothing.") == "You calculated it right. I calculated nothing."   # only an opening
     assert strip("You're right.") == "You're right."                                              # never the whole reply
 
 
@@ -899,6 +905,146 @@ def the_search_first_note_is_hidden_from_the_person_and_lets_an_off_topic_questi
     assert "do not apologise" in note and "not from the person" in note                      # the person never sees it, so the reply must not talk about it
     assert "search_policy" in note and "search_labour_code" in note and "ticket" in note
     assert "ignore this note" in note                                                          # "can I bring my dog?" may be off topic: it is not forced into a search
+
+
+# ---------- number guard: a number of days or an amount in euros must come from a tool in this turn ----------
+
+def said(reply):
+    return [(f.kind, str(f.value)) for f in number_guard.figures_in(reply)]
+
+
+def result(**data):
+    return json.dumps(data, ensure_ascii=False)
+
+
+BALANCE = result(name="Emma", leave_balance={"casual": 8, "sick": 5, "paid": 12.5})
+PAYSLIP = result(month="2026-10", net_paid_eur="€2,195.00", gross_eur="€3,053.00", tax_cents=14000, tax_eur="€140.00")
+
+
+@test
+def the_number_guard_reads_days_and_euros_and_ignores_dates_articles_and_months():
+    assert said("Your current balance is 8 casual days.") == [("days", "8")]
+    assert said("You have **12.5 paid leave days** left, 1 day of sick leave and 2 working days pending.") == [("days", "12.5"), ("days", "1"), ("days", "2")]
+    assert said("Il vous reste 2,5 jours de congés payés.") == [("days", "2.5")]                     # a French decimal
+    assert said("From 9 to 13 November, 25 December days, on 2026-11-17, under Article L3141-3 at 18:48.") == []   # dates, articles, times: not figures
+    assert said("You have 3 weeks, 2 months and 8 casual leave requests.") == []                     # weeks, months and requests are not days
+    assert said("Net pay €2,195.00, gross 3 053,00 €, tax 140 euros, a loss of -€147.00.") == [
+        ("money", "2195.00"), ("money", "3053.00"), ("money", "140"), ("money", "147.00")]
+    assert said("") == [] and said(None) == []
+
+
+@test
+def a_figure_must_come_from_a_tool_in_this_turn_and_nothing_else_makes_it_true():
+    ng = number_guard
+    assert ng.ungrounded("You have 8 casual days and 12.5 paid days.", [BALANCE]) == []
+    assert ng.ungrounded("You have 12 casual days.", [BALANCE]) == ["12 casual days"]               # 12 is in history, not in a tool: 12.5 is not 12
+    assert ng.ungrounded("You have 8 casual days.", []) == ["8 casual days"]                         # no tool at all: nothing to stand on
+    assert ng.ungrounded("8.0 days and 12.50 days.", [BALANCE]) == []                               # 8.0 is 8, 12.50 is 12.5
+    assert ng.ungrounded("That is 3 sick days.", [BALANCE], user_text="Do I need a note for 3 sick days?") == []   # the person's own number
+    assert ng.ungrounded("That is 3 sick days.", [BALANCE], user_text="") == ["3 sick days"]
+    # an id, a year, a date or an article number in a result does not make a number of days true
+    assert ng.ungrounded("That is 12 days.", [result(request_id=12, year=2026, leave_balance={"casual": 8})]) == ["12 days"]
+    assert ng.ungrounded("That is 12 days.", [result(note="due 2026-12-01 at 18:12, article L3141-12, ticket HR-0012")]) == ["12 days"]
+    assert ng.ungrounded("That is 7 days.", [result(error="Not enough casual leave: requested 9, available 7.")]) == []   # a number inside a message is a figure
+    assert ng.ungrounded("That is 7 days.", ["not json: requested 7 days"]) == []                  # a source that is plain text still counts
+
+
+@test
+def the_number_guard_knows_number_words_in_french_articles_and_halves():
+    ng = number_guard
+    law = ["Le salarié a droit à un congé de deux jours et demi ouvrables par mois, soit trente jours ouvrables. Quatre-vingt-dix jours de préavis. Un jour férié."]
+    assert ng.ungrounded("You earn 2.5 working days a month, at most 30 working days a year, 1 day for a holiday.", law) == []
+    assert ng.ungrounded("The notice is 90 days.", law) == []                                       # quatre-vingt-dix is 90, not 4 + 20 + 10
+    assert ng.ungrounded("Twenty-one days, so 21 days.", ["vingt et un jours"]) == []
+    assert ng.ungrounded("You get 5 days.", law) == ["5 days"]                                       # a number the article never gives
+
+
+@test
+def amounts_in_euros_are_compared_by_value_in_any_format():
+    ng = number_guard
+    assert ng.ungrounded("Your net pay is €2,195.00, that is 2 195,00 € or 2195 euros.", [PAYSLIP]) == []
+    assert ng.ungrounded("Net pay 2\u202f195,00\u00a0€, or 2\u00a0195,00 €.", [PAYSLIP]) == []         # French spacing: a no-break space between the groups and before the sign
+    assert ng.ungrounded("Your net pay was €2,540.00.", [PAYSLIP]) == ["€2,540.00"]
+    assert ng.ungrounded("You paid €140 in tax.", [PAYSLIP]) == []                                  # also from a *_cents number
+    assert ng.ungrounded("You paid €1,400 in tax.", [PAYSLIP]) == ["€1,400"]
+    assert ng.ungrounded("That is 140 days.", [PAYSLIP]) == []                                       # days are checked against numbers, money against amounts: 140 is a number there
+    assert ng.ungrounded("That is €8.", [BALANCE]) == ["€8"]                                         # 8 days are not 8 euros
+    contract = [result(items=[{"type": "contract", "salary_eur": 3200.0, "person": "Lea Martin"}])]
+    assert ng.ungrounded("Lea's contract has a gross monthly salary of €3,200 (3200 EUR).", contract) == []     # a plain number under a *_eur key is an amount
+    assert ng.ungrounded("Lea's salary is €3,500.", contract) == ["€3,500"]
+
+
+@test
+def an_unconfirmed_figure_is_sent_back_once_with_the_figures_the_tools_returned():
+    ng = number_guard
+    note = ng.retry_message(["12 casual days"], [BALANCE])
+    assert "12 casual days" in note and "casual leave balance: 8 days" in note and "paid leave balance: 12.5 days" in note
+    assert "do not apologise" in note and "not from the person" in note                              # hidden from the person, like the other notes
+    assert "No tool has returned any figure" in ng.retry_message(["12 days"], [])
+    assert "12 days, €5" in ng.retry_message(["12 days", "€5"], [])
+    assert "never say that you calculated" in note and "get_leave_balance" in note and "count_leave_days" in note   # it says what to do, not what went wrong
+    assert "net paid: €2,195.00" in ng.retry_message(["€2,540.00"], [PAYSLIP])
+
+
+@test
+def a_figure_that_is_still_wrong_is_replaced_by_the_tools_figure_and_never_passes_through():
+    ng = number_guard
+    reply = "You have 12 casual days left. Would you like to apply?"
+    bad = ng.ungrounded_figures(reply, [BALANCE])
+    fixed = ng.correct(reply, bad, [BALANCE])
+    assert fixed == "The system shows: casual leave balance: 8 days. Would you like to apply?", fixed   # the casual figure, not all three
+    assert not ng.ungrounded_figures(fixed, [BALANCE])
+    nothing = ng.correct(reply, bad, [])
+    assert nothing == f"{ng.NOT_CONFIRMED} Would you like to apply?" and not ng.ungrounded_figures(nothing, [])
+    french = ng.correct("Il vous reste 12 jours.\nVoulez-vous poser un congé ?", ng.ungrounded_figures("Il vous reste 12 jours.", []), [])
+    assert french == f"{ng.NOT_CONFIRMED_FR}\nVoulez-vous poser un congé ?"
+    two = "Your balance is 12 days. You will have 9 days after approval. Anything else?"
+    both = ng.correct(two, ng.ungrounded_figures(two, [BALANCE]), [BALANCE])
+    assert both.count("The system shows") == 1 and "Anything else?" in both and not ng.ungrounded_figures(both, [BALANCE])   # the figures once, the other wrong sentence dropped
+    pay = ng.correct("Your net pay was €2,540.00.", ng.ungrounded_figures("Your net pay was €2,540.00.", [PAYSLIP]), [PAYSLIP])
+    assert pay == "The system shows: net paid: €2,195.00.", pay                                    # the net pay, not every line of the payslip
+    assert ng.correct("", [], []) == ng.NOT_CONFIRMED
+    twice = "You currently have 8 casual days. If you take 3 you will have 6 casual days left."
+    assert ng.correct(twice, ng.ungrounded_figures(twice, [BALANCE]), [BALANCE]) == "You currently have 8 casual days."   # it already says what the tool returned
+
+
+@test
+def the_answer_loop_asks_once_and_then_replaces_the_figure():
+    ng = number_guard
+    right, wrong = "You have 8 casual days left.", "You have 12 casual days left."
+    assert ng.review(right, [BALANCE], "", False) == ("ok", right)                                   # nothing to fix: the reply goes out as it is
+    action, note = ng.review(wrong, [BALANCE], "", False)
+    assert action == "retry" and "12 casual days" in note and "casual leave balance: 8 days" in note   # first time: send it back with the tool's figures
+    action, fixed = ng.review(wrong, [BALANCE], "", True)
+    assert action == "replaced" and fixed == "The system shows: casual leave balance: 8 days."          # still wrong after the retry: replaced, never passed through
+    assert ng.review(right, [BALANCE], "", True) == ("ok", right)                                     # a corrected reply after the retry goes out
+    assert ng.review("You have 12 casual days left.", [], "", True) == ("replaced", ng.NOT_CONFIRMED)   # no tool figure to show: it says it cannot confirm
+    assert ng.review("Hello! How can I help?", [], "Hi", False) == ("ok", "Hello! How can I help?")     # no figure in the reply: no check at all
+
+
+@test
+def the_leave_tools_return_the_derived_figures_so_the_reply_never_needs_arithmetic():
+    assert "pending_days" not in get_leave_balance("E001")                                           # nothing pending: the result is unchanged
+    r = apply_leave("E001", "casual", d(MON), d(MON + timedelta(days=1)))                            # 2 working days, pending
+    assert r["success"]
+    b = get_leave_balance("E001")
+    assert b["leave_balance"]["casual"] == 8 and b["pending_days"] == {"casual": 2} and b["available_after_pending"] == {"casual": 6}
+    assert not number_guard.ungrounded("8 days now, 6 once it is approved, 2 pending.", [json.dumps(b)])
+    # too much: the tool says by how many days
+    short = apply_leave("E001", "casual", d(MON + timedelta(days=7)), d(MON + timedelta(days=18)))
+    assert "Not enough casual" in short["error"] and short["short_by"] == 4                          # 10 needed, 6 available
+    # a manager sees what the balance will be once each request is approved
+    pending = tools.get_pending_requests("M001")["pending_requests"]
+    assert pending[0]["days"] == 2 and pending[0]["casual_balance"] == 8 and pending[0]["balance_after_approval"] == 6
+    # the days of given dates come with what is left after them, or how short (Emma: 8 casual, 2 of them already waiting)
+    assert tools.days_figures("E001", "casual", 4) == {"available": 6, "available_after": 2}
+    assert tools.days_figures("E001", "casual", 6) == {"available": 6, "available_after": 0}
+    assert tools.days_figures("E001", "casual", 9) == {"available": 6, "short_by": 3}
+    assert tools.days_figures("E001", "paid", 6) == {"available": 12.5, "available_after": 6.5}
+    # cancelling approved leave says the balance after the days are back
+    decide_leave("M001", r["request"]["id"], "approve")
+    cancelled = cancel_leave("E001", r["request"]["id"])
+    assert cancelled["days_returned"] == 2 and cancelled["balance_after"] == 8
 
 
 if __name__ == "__main__":

@@ -52,6 +52,24 @@ def paid_policy_note(start, end):
     return None
 
 
+def pending_days_by_type(employee_id):
+    # days already requested and waiting for approval, per leave type that has a balance
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT leave_type, SUM(days) FROM leave_requests WHERE employee_id = ? AND status = ? GROUP BY leave_type",
+        (employee_id, PENDING)).fetchall()
+    conn.close()
+    return {r[0]: clean_days(r[1]) for r in rows if r[0] in LEAVE_TYPES}
+
+
+def days_figures(employee_id, leave_type, days):
+    """The figures that go with a number of days off, so the reply never works them out: the days available (the balance minus what already
+    waits for approval), and then how many would be left, or how many short."""
+    emp = get_employee(employee_id)
+    available = clean_days(emp[f"{leave_type}_balance"] - pending_days_by_type(employee_id).get(leave_type, 0))
+    return {"available": available, ("short_by" if days > available else "available_after"): clean_days(abs(available - days))}
+
+
 def get_leave_balance(employee_id, leave_type=None):
     emp = get_employee(employee_id)
     if emp is None:
@@ -60,6 +78,10 @@ def get_leave_balance(employee_id, leave_type=None):
         "name": emp["name"],
         "leave_balance": balance_of(emp),
     }
+    # the figure a person asks for next ("how many days will I have once my request is approved?") comes from here, not from arithmetic
+    if pending := pending_days_by_type(employee_id):
+        result["pending_days"] = pending
+        result["available_after_pending"] = {kind: clean_days(emp[f"{kind}_balance"] - days) for kind, days in pending.items()}
     if leave_type == PAID:       # asked about paid leave: no dates yet, so always remind of the usual window
         result["policy_note"] = paid_policy()[1]
     return result
@@ -144,7 +166,8 @@ def apply_leave(employee_id, leave_type, start_date, end_date):
         if days > balance:
             return {"error": f"Not enough {leave_type} leave: requested {days}, available {balance}. "
                              f"Saved balance is {clean_days(emp[f'{leave_type}_balance'])}, but {pending_days} days "
-                             f"are already in pending requests waiting for approval."}
+                             f"are already in pending requests waiting for approval.",
+                    "short_by": clean_days(days - balance)}
 
         with conn:  # saves (commits) only if everything inside succeeds
             cur = conn.execute(
@@ -201,7 +224,11 @@ def get_pending_requests(manager_id):
         (manager_id, PENDING),
     ).fetchall()
     conn.close()
-    return {"pending_requests": [dict(r) for r in rows]}
+    requests = [dict(r) for r in rows]
+    for r in requests:
+        if r["leave_type"] in LEAVE_TYPES:           # floating holidays have no balance
+            r["balance_after_approval"] = clean_days(r[f"{r['leave_type']}_balance"] - r["days"])
+    return {"pending_requests": requests}
 
 
 def decide_leave(manager_id, request_id, decision, reason=""):
@@ -291,7 +318,8 @@ def cancel_leave(employee_id, request_id):
                 conn.execute("UPDATE leave_requests SET status = 'cancelled' WHERE id = ?", (request_id,))
                 conn.execute(f"UPDATE employees SET {column} = ROUND({column} + ?, 2) WHERE id = ?",
                              (req["days"], employee_id))
-            return {"cancelled": True, "days_returned": req["days"],
+            balance_after = clean_days(conn.execute(f"SELECT {column} FROM employees WHERE id = ?", (employee_id,)).fetchone()[0])
+            return {"cancelled": True, "days_returned": clean_days(req["days"]), "balance_after": balance_after,
                     "message": "Approved leave cancelled and days returned to your balance."}
 
         return {"cancelled": False, "message": f"This request is already {req['status']}."}

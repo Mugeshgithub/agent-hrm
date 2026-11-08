@@ -20,6 +20,7 @@ import collective_agreement
 import contracts
 import document_answers
 import employee_files
+import number_guard
 import search_first
 import tool_guard
 import needs_you
@@ -28,7 +29,7 @@ import policy_gaps
 from citations import ungrounded_citations, RETRY_MESSAGE, SAFE_REPLY
 from documents import asks_if_genuine, says_cannot_tell, GENUINE_ANSWER, GENUINE_RETRY
 from tools import (
-    get_leave_balance, apply_leave, days_for, holidays_of, balance_of, clean_days, paid_policy_note,
+    get_leave_balance, apply_leave, days_for, days_figures, holidays_of, balance_of, clean_days, paid_policy_note,
     get_pending_requests, decide_leave, get_my_requests, get_employee,
     get_team_member_balance, cancel_leave,
     create_hr_ticket, get_my_tickets, get_open_tickets, reply_to_ticket,
@@ -541,6 +542,7 @@ def run_tool(name, tool_input):
         if kind not in LEAVE_TYPES:
             return {"error": f"Unknown leave type '{kind}'"}
         result = {"working_days": days_for(kind, start, end, holidays_of(LOGGED_IN_ID))}
+        result.update(days_figures(LOGGED_IN_ID, kind, result["working_days"]))       # what is left after these days, or how short: the reply never works it out
         if kind == PAID:
             result["counted"] = "Monday to Saturday (jours ouvrables); Sundays and public holidays are not counted"
             if note := paid_policy_note(start, end):
@@ -565,7 +567,8 @@ def run_tool(name, tool_input):
         if balance - days < 0:
             return {"error": f"Not enough {tool_input['leave_type']} leave: needs {days} days, "
                              f"only {balance} available (pending requests included). "
-                             f"Nothing was submitted and no confirmation was shown."}
+                             f"Nothing was submitted and no confirmation was shown.",
+                    "short_by": clean_days(days - balance)}
         details = {**tool_input,
                    "working_days": days,
                    "current_balance": balance,
@@ -573,7 +576,7 @@ def run_tool(name, tool_input):
                    "balance_after_approval": clean_days(balance - days)}
         answer = confirmed(name, tool_input, details)
         if answer == AWAITING_CONFIRMATION:
-            return CARD_SHOWN
+            return {**CARD_SHOWN, "card": details}       # the figures on the card: the reply may quote them, nothing else
         if not answer:
             return {"submitted": False, "working_days": days,
                     "message": f"The employee chose not to submit this {days}-day request. No request exists."}
@@ -732,6 +735,7 @@ def answer_turn(user_text):
         document_retry_used = False
         agreement_retry_used = False
         search_retry_used = False
+        number_retry_used = False
         last_turn["tools_called"] = []
         last_turn["refused"] = []
         last_turn["policy_searches"] = []     # what search_policy was asked and whether it found a section (policy_gaps.py)
@@ -797,7 +801,21 @@ def answer_turn(user_text):
                 if bad:
                     print(f"  [guard] still ungrounded {bad}: replying safely instead")
                     reply = SAFE_REPLY
-                if document_retry_used or agreement_retry_used or search_retry_used:       # a retry note was sent: the reply must not talk about it
+
+                # guardrail in code: never show a number of days or an amount that no tool returned in this turn (number_guard.py).
+                # One retry with the tools' own figures, then the sentence is replaced by them.
+                action, shown = number_guard.review(reply, turn_sources, user_text, number_retry_used)
+                if action != "ok":
+                    print(f"  [guard] {number_guard.ungrounded(reply, turn_sources, user_text)} was not returned by any tool in this turn")
+                if action == "retry":
+                    number_retry_used = True
+                    print("  [guard] asking the agent to use the tools' figures")
+                    messages.append({"role": "user", "content": shown})
+                    continue
+                if action == "replaced":
+                    print("  [guard] still not from a tool: replacing it with the tools' figures")
+                    reply = shown
+                if document_retry_used or agreement_retry_used or search_retry_used or number_retry_used:       # a retry note was sent: the reply must not talk about it
                     reply = document_answers.strip_correction(reply)
 
                 # the policy does not answer it: keep the question, without a name, for HR (policy_gaps.py)

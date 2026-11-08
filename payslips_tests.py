@@ -66,6 +66,8 @@ def test_compare_shows_unpaid_leave_and_net_change():
     assert r["net_paid_change_cents"] == -11500, r
     labels = [c["label"] for c in r["changes"]]
     assert "Unpaid leave (1 day)" in labels, r
+    # the two figures that explain it, added up in code: gross -147.00, deductions -32.00 (contributions -22.00, tax -10.00), so net -115.00
+    assert r["gross_change_eur"] == "-€147.00" and r["deductions_change_eur"] == "-€32.00", r
 
 
 def test_compare_blocked_for_others():
