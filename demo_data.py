@@ -13,6 +13,7 @@ import payslips
 import hr_queries
 import employees
 import leave_admin
+import documents
 import onboarding
 import outbox
 import welcome
@@ -33,12 +34,15 @@ def init_all(reset=False):
     onboarding.init_onboarding()
     outbox.init_outbox()
     welcome.init_welcome()
+    documents.init_documents()
     leave_admin.init_leave_admin()   # public holidays and the balance history
     if reset:   # balances start again, so their history does too
         conn = db.get_conn()
         with conn:
             conn.execute("DELETE FROM leave_adjustments")
             conn.execute("DELETE FROM leave_runs")
+            conn.execute("DELETE FROM document_views")
+            conn.execute("DELETE FROM documents")
             conn.execute("DELETE FROM welcome_link_events")
             conn.execute("DELETE FROM welcome_links")
             conn.execute("DELETE FROM outbox")

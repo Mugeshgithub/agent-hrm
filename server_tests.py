@@ -7,11 +7,14 @@ import tempfile
 from datetime import date, timedelta
 
 os.environ["HRM_DB"] = os.path.join(tempfile.mkdtemp(), "server_test_hr.db")
+os.environ["HRM_FILES_DIR"] = tempfile.mkdtemp()                       # documents go to a throwaway folder
 import db
 db.DB_PATH = os.environ["HRM_DB"]
 
 from fastapi.testclient import TestClient
 import demo_data
+import documents
+import pdf_text
 demo_data.init_all(reset=True)
 demo_data.seed_activity()
 import server
@@ -439,6 +442,114 @@ def five_wrong_codes_lock_the_link_until_hr_issues_a_new_one():
     assert hr.post(f"/api/hr/people/{emp_id}/welcome-link/cancel", json={"reason": ""}).status_code == 400
     assert hr.post(f"/api/hr/people/{emp_id}/welcome-link/cancel", json={"reason": "Wrong person"}).status_code == 200
     assert TestClient(server.app).post("/api/welcome/login", json={"token": new_token, "code": new_code}).status_code == 400
+
+
+FILE = pdf_text.make_pdf([("p", "a document")])
+
+
+def hire_signed_in(hr, email, name):
+    emp_id = make_hire(hr, email, name)
+    token, code = open_welcome(hr, emp_id)
+    c = TestClient(server.app)
+    assert c.post("/api/welcome/login", json={"token": token, "code": code}).status_code == 200
+    return emp_id, c
+
+
+def upload(client, step, data=FILE, name="scan.pdf", reads=None):
+    documents.READER = (lambda *a: dict(reads)) if reads else None
+    try:
+        return client.post(f"/api/welcome-documents?step={step}&name={name}", content=data,
+                           headers={"content-type": "application/octet-stream"})
+    finally:
+        documents.READER = None
+
+
+@test
+def a_new_hire_sends_a_document_confirms_it_and_only_they_and_hr_can_open_the_file():
+    hr = as_person("H001")
+    emp_id, c = hire_signed_in(hr, "kai@cognivexai.eu", "Kai Voss")
+    good = {"readable": True, "looks_off": False, "document_type": "id_card", "holder_name": "VOSS Kai", "expiry_date": "2099-01-01"}
+    r = upload(c, "id", reads=good)
+    assert r.status_code == 200 and r.json()["accepted"] is True, r.text
+    doc = r.json()["document_id"]
+    assert {x["label"] for x in r.json()["read"]} >= {"Name on the document", "Valid until"}
+    assert c.get("/api/welcome-me").json()["next_for_you"] == "Identity document"               # not done until confirmed
+    mine = c.get(f"/api/welcome-documents/{doc}/file")
+    assert mine.status_code == 200 and mine.content == FILE and mine.headers["content-type"] == "application/pdf"
+    assert c.post(f"/api/welcome-documents/{doc}/confirm").json() == {"success": True}
+    assert c.get("/api/welcome-me").json()["next_for_you"] == "Bank details (IBAN)"
+    assert hr.get(f"/api/hr/people/{emp_id}/documents").json()[0]["status"] == "confirmed"
+    assert hr.get(f"/api/hr/documents/{doc}/file").content == FILE
+    views = [v["viewer_name"] for v in hr.get(f"/api/hr/people/{emp_id}/documents").json()[0]["views"]]
+    assert views == ["Narmadha", "Kai Voss"]                                                    # both openings are logged
+    for who in ("M001", "E001", "C001"):                                                        # the manager too
+        assert as_person(who).get(f"/api/hr/documents/{doc}/file").status_code == 403, who
+        assert as_person(who).get(f"/api/hr/people/{emp_id}/documents").status_code == 403, who
+    _, other = hire_signed_in(hr, "lou@cognivexai.eu", "Lou Mars")
+    assert other.get(f"/api/welcome-documents/{doc}/file").status_code == 404                   # another new hire: "no such document"
+    assert other.post(f"/api/welcome-documents/{doc}/confirm").status_code == 400
+    assert TestClient(server.app).get(f"/api/welcome-documents/{doc}/file").status_code == 401
+    assert as_person("E001").get(f"/api/welcome-documents/{doc}/file").status_code == 401       # an ordinary session is not a new hire
+
+
+@test
+def uploads_that_are_too_big_the_wrong_type_or_for_the_wrong_step_never_reach_claude():
+    hr = as_person("H001")
+    emp_id, c = hire_signed_in(hr, "rae@cognivexai.eu", "Rae Dunn")
+    calls, files_before = [], len(os.listdir(documents.files_dir()))
+    documents.READER = lambda *a: calls.append(1) or {}
+    try:
+        big = c.post("/api/welcome-documents?step=id", content=b"%PDF-" + b"0" * documents.MAX_BYTES,
+                     headers={"content-type": "application/octet-stream"})
+        assert big.status_code == 413 and "10 MB" in big.json()["detail"]
+        exe = c.post("/api/welcome-documents?step=id&name=passport.pdf", content=b"MZ a program",
+                     headers={"content-type": "application/pdf"})                               # the label lies; the bytes don't
+        assert exe.status_code == 400 and "PDF, JPG or PNG" in exe.json()["detail"]
+        for step in ("contract", "welcome", "nonsense"):
+            assert c.post(f"/api/welcome-documents?step={step}", content=FILE).status_code == 400, step
+        assert c.post("/api/welcome-documents?step=id", content=b"").status_code == 400
+    finally:
+        documents.READER = None
+    assert calls == [] and len(os.listdir(documents.files_dir())) == files_before          # nothing read, nothing stored
+    assert TestClient(server.app).post("/api/welcome-documents?step=id", content=FILE).status_code == 401
+    assert as_person("H001").post("/api/welcome-documents?step=id", content=FILE).status_code == 401
+    bad_bank = {"readable": True, "looks_off": False, "holder_name": "Rae Dunn", "iban": "FR76 3000 6000 0112 3456 7890 188"}
+    r = upload(c, "iban", reads=bad_bank)
+    assert r.status_code == 200 and r.json()["accepted"] is False and "check digits" in r.json()["problems"][0]
+
+
+@test
+def hr_cancels_a_hire_through_the_api_and_their_files_and_access_go():
+    hr = as_person("H001")
+    emp_id, c = hire_signed_in(hr, "max@cognivexai.eu", "Max Orr")
+    upload(c, "id", reads={"readable": True, "looks_off": False, "document_type": "passport", "holder_name": "Max Orr", "expiry_date": "2099-01-01"})
+    before = len(os.listdir(documents.files_dir()))
+    for who in ("E001", "M001"):
+        assert as_person(who).post(f"/api/hr/people/{emp_id}/cancel-hire", json={"reason": "x"}).status_code == 403
+    assert hr.post(f"/api/hr/people/{emp_id}/cancel-hire", json={"reason": ""}).status_code == 400
+    done = hr.post(f"/api/hr/people/{emp_id}/cancel-hire", json={"reason": "Accepted another offer"})
+    assert done.status_code == 200 and done.json()["files_deleted"] == 1
+    assert len(os.listdir(documents.files_dir())) == before - 1
+    assert c.get("/api/welcome-me").status_code == 401                                          # their session stops working too
+    assert hr.post(f"/api/hr/people/{emp_id}/cancel-hire", json={"reason": "again"}).status_code == 400
+
+
+@test
+def a_flagged_document_shows_in_hr_needs_you_and_one_person_looks_and_closes_it():
+    hr = as_person("H001")
+    emp_id, c = hire_signed_in(hr, "nia@cognivexai.eu", "Nia Fox")
+    flagged = {"readable": True, "looks_off": True, "looks_off_reason": "The expiry date seems retouched.", "document_type": "passport",
+               "holder_name": "Nia Fox", "expiry_date": "2099-01-01"}
+    doc = upload(c, "id", reads=flagged).json()["document_id"]
+    box = hr.get("/api/needs-you").json()
+    mine = [f for f in box["document_flags"] if f["document_id"] == doc]
+    assert mine and mine[0]["reason"] == "The expiry date seems retouched." and mine[0]["employee_name"] == "Nia Fox"
+    assert as_person("M001").get("/api/needs-you").json()["document_flags"] == []
+    assert c.get("/api/welcome-me").status_code == 200 and "retouched" not in c.get("/api/welcome-me").text      # the person is not told
+    assert hr.post(f"/api/hr/documents/{doc}/reviewed", json={"note": ""}).status_code == 400
+    assert as_person("M001").post(f"/api/hr/documents/{doc}/reviewed", json={"note": "ok"}).status_code == 403
+    assert hr.post(f"/api/hr/documents/{doc}/reviewed", json={"note": "Compared with the original: fine"}).status_code == 200
+    assert all(f["document_id"] != doc for f in hr.get("/api/needs-you").json()["document_flags"])
 
 
 if __name__ == "__main__":

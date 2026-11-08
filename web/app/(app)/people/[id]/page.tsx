@@ -197,6 +197,7 @@ function describe(c: Change, nameOf: (id: string | null) => string) {
   if (c.field === "record") return "Record created";
   if (c.field === "onboarding") return `Onboarding ${c.new_value}`;
   if (c.field === "welcome link") return `Welcome link ${c.new_value}`;
+  if (c.field.startsWith("document: ")) return `${c.field.slice("document: ".length).replace(/^./, (x) => x.toUpperCase())}: ${c.new_value}`;
   if (c.field === "outbox") return `Outbox: email ${c.new_value}`;
   if (c.field.startsWith("onboarding: ")) {
     return `Onboarding step "${c.field.slice("onboarding: ".length)}": ${STEP_STATUS[c.old_value ?? ""] ?? c.old_value} to ${STEP_STATUS[c.new_value ?? ""] ?? c.new_value}`;
