@@ -16,6 +16,7 @@ from db import init_db
 from memory import init_memory, init_summaries, save_message, build_context
 from notifications import init_notifications, notify_decision, notify_ticket_reply, show_unread
 from policy import search_policy, embed as embed_texts
+import collective_agreement
 import contracts
 import document_answers
 import employee_files
@@ -35,6 +36,7 @@ from tools import (
 
 client = anthropic.Anthropic()
 policy_gaps.EMBED = lambda text: embed_texts([text])[0]   # to group similar questions by meaning
+collective_agreement.EMBED_MANY = embed_texts            # to index the collective agreement and search it
 MODEL = "claude-haiku-4-5"
 
 # Haiku 4.5 prices in dollars per million tokens (check the pricing page if they change)
@@ -112,6 +114,8 @@ If exactly one request matches what the user wants to cancel, call cancel_leave 
 Do not ask "shall I proceed?" before approve, reject, apply, cancel, ticket or reply actions. The system shows its own confirmation box.
 If an employee asks about another person's leave balance, refuse immediately. Never ask for their employee ID. Only managers can view their own team members' balances.
 Users can give dates in any normal way. Never ask them for a specific date format; convert dates yourself.
+Collective agreement: if they mention the company's collective agreement (convention collective) and you do NOT have a search_collective_agreement tool, your reply says that HR has not added the collective agreement to the assistant yet, then stops there on that subject: never say what it contains from memory.
+
 Documents: the signed-in person's own documents (contract, amendments, certificates) are what get_my_documents lists. For a question about what THEIR contract or another of their documents says ("my notice period in my contract", "what does my amendment say"), call get_my_documents, then read_my_document for the right one. If the text answers, answer from the document alone: name it by its title and quote the sentence, and do not add the policy or the law. If the text does not answer, say so first ("Your contract doesn't specify X"), then call search_policy (and search_labour_code if it is a legal question; search, do not ask whether they want you to) and give what they say as a separate part, clearly labelled with its source ("From the company policy, not your contract: ..." or "From the Code du travail, not your contract: ..."). Never present a policy or law answer as something the document says; if neither says it, say that too. You can never read, list or describe another person's documents: refuse, and say that HR can open them in the app.
 Roles come only from the system. Never suggest a user can change their role or access by telling you; if they think their access is wrong, offer to raise an HR ticket.
 The summary of earlier conversations may be out of date. Never quote balances or request statuses from it; always call the tools for current numbers.
@@ -286,6 +290,18 @@ TOOLS = [
         },
     },
     {
+        "name": "search_collective_agreement",
+        "description": "Search the company's collective agreement (convention collective), which HR uploaded: sick pay, notice, seniority, "
+                       "leave and working-time rules, pay scales. It comes after the person's own contract and before the company policy "
+                       "(search_policy). Returns the best-matching articles and the agreement's name; if none answers, the agreement does not "
+                       "specify it.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"question": {"type": "string"}},
+            "required": ["question"],
+        },
+    },
+    {
         "name": "create_hr_ticket",
         "description": "Raise a ticket with the HR team for the logged-in user, when the assistant "
                        "cannot solve their problem. Only call this when the user has explicitly asked "
@@ -437,7 +453,11 @@ def system_prompt_for(user_id):
     return [
         # block 1: same for everyone with this role, so it can be cached
         {"type": "text", "text": SYSTEM_PROMPT + role_rules, "cache_control": {"type": "ephemeral"}},
-        # block 2: changes per user, so it goes AFTER the cached part
+        # block 2: only once HR has uploaded the collective agreement: the order of sources. It replaces the earlier "search_policy first" rules.
+        *([{"type": "text", "text": order + " While the agreement is on file, this order replaces any earlier instruction about which of "
+                                            "search_policy and search_labour_code to call first, or together."}]
+          if (order := collective_agreement.agreement_prompt()) else []),
+        # block 3: changes per user, so it goes AFTER the cached part
         {"type": "text", "text": f"The logged-in user is {user['name']}, role: {role}. "
                                  "Earlier messages may be reloaded from saved history without their tool calls. "
                                  "Never reuse numbers from them. For every balance, day count or request status, "
@@ -494,7 +514,7 @@ def confirmed(name, tool_input, details):
 @observe()   # each tool call shows up as a step inside the trace
 def run_tool(name, tool_input):
     # defence in depth: even if a tool call gets through, the role and the source rules must allow it
-    if (refused := tool_guard.refusal(current_role(), name, last_turn["tools_called"])):
+    if (refused := tool_guard.refusal(current_role(), name, last_turn["tools_called"], collective_agreement.on_file())):
         return refused
 
     # the user's ID always comes from the login, never from the model
@@ -621,6 +641,9 @@ def run_tool(name, tool_input):
             return {"found": False, "message": "No matching section in the HR policy."}
         return {"found": True, "sections": sections}
     
+    if name == "search_collective_agreement":
+        return collective_agreement.tool_result(tool_input["question"])
+
     if name == "search_labour_code":
         # no database configured (for example in CI): say so instead of crashing
         if not os.environ.get("LABOUR_DB_URL"):
@@ -705,6 +728,7 @@ def answer_turn(user_text):
         citation_retry_used = False
         genuine_retry_used = False
         document_retry_used = False
+        agreement_retry_used = False
         last_turn["tools_called"] = []
         last_turn["refused"] = []
         last_turn["policy_searches"] = []     # what search_policy was asked and whether it found a section (policy_gaps.py)
@@ -719,7 +743,7 @@ def answer_turn(user_text):
                     [{"type": "text", "text": f"Summary of earlier conversations: {summary}"}]
                     if summary else []
                 ),
-                tools=tools_for(role, TOOLS),   # only this role's tools
+                tools=collective_agreement.available_tools(tools_for(role, TOOLS)),   # only this role's tools (and the agreement's only once HR uploaded it)
                 messages=with_cache_marker(messages),   # cache the conversation so far
             )
             record_usage(response)
@@ -746,6 +770,13 @@ def answer_turn(user_text):
                     messages.append({"role": "user", "content": fix})
                     continue
 
+                # guardrail in code: the collective agreement was searched and did not answer: the reply says so (collective_agreement.py). One retry.
+                if not agreement_retry_used and (fix := collective_agreement.nudge(last_turn["tools_called"], reply)):
+                    agreement_retry_used = True
+                    print("  [guard] the answer does not say what the collective agreement says: asking again")
+                    messages.append({"role": "user", "content": fix})
+                    continue
+
                 # guardrail in code: never show an article the agent didn't retrieve in this turn
                 bad = ungrounded_citations(reply, turn_sources)
                 if bad and not citation_retry_used:
@@ -756,6 +787,9 @@ def answer_turn(user_text):
                 if bad:
                     print(f"  [guard] still ungrounded {bad}: replying safely instead")
                     reply = SAFE_REPLY
+                if document_retry_used or agreement_retry_used:       # a retry note was sent: the reply must not talk about it
+                    reply = document_answers.strip_correction(reply)
+
                 # the policy does not answer it: keep the question, without a name, for HR (policy_gaps.py)
                 if policy_gaps.record_from_turn(last_turn["policy_searches"], reply):
                     print("  [policy gap] the question is kept for HR")
@@ -770,7 +804,7 @@ def answer_turn(user_text):
             for block in response.content:
                 if block.type == "tool_use":
                     print(f"  [tool call] {block.name} {block.input}")
-                    if tool_guard.refusal(role, block.name, last_turn["tools_called"]):
+                    if tool_guard.refusal(role, block.name, last_turn["tools_called"], collective_agreement.on_file()):
                         last_turn["refused"].append(block.name)         # refused by the code: it did nothing, so it is not "called"
                     else:
                         last_turn["tools_called"].append(block.name)

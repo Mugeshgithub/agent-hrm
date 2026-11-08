@@ -10,20 +10,40 @@ SILENT = re.compile(
     r"(?:say|mention|specify|state|include|cover|contain|address|provide|give|define|have|speak)"
     r"|(?:isn't|is not|not)\s+(?:mentioned|specified|stated|addressed|covered)[^.\n]{0,40}(?:contract|document)"
     r"|no mention|nothing (?:about|on)[^.\n]{0,40}(?:contract|document)|(?:contract|document)[^.\n]{0,40}nothing (?:about|on))", re.I)
-SOURCES = ("search_policy", "search_labour_code")
+SOURCES = ("search_collective_agreement", "search_policy", "search_labour_code")
 
 # a nudge reaches the model as a user message, and it answers it like a person: "You're right, I apologize. Here's the corrected
 # reply". The person has not seen the first reply, so they are told that.
 HIDDEN = ("(A note from the app, not from the person. They have not seen your reply and must not hear about this note: do not "
           "apologise, do not say you corrected anything, answer their question directly.) ")
-SEARCH_NOW = HIDDEN + ("Your reply says that the document does not specify it. Before you answer, call search_policy, and search_labour_code if it is "
-              "a legal question. Then answer in two parts: first that the document does not specify it, then what the company policy or the "
-              "law says as a separate part, clearly labelled with its source (\"From the company policy, not your contract: ...\" or "
-              "\"From the Code du travail, not your contract: ...\"). If neither says it, say that too. Do not invent anything.")
-SAY_SILENT_FIRST = HIDDEN + ("Your reply gives a policy or law answer without first saying that the document does not specify it. Rewrite it. If the "
-                    "document answers the question, answer from the document alone, name it and quote it, and leave out the policy and the law. "
-                    "Otherwise start with \"Your <document> doesn't specify <what was asked>.\" and then give the policy or law as a separate "
-                    "part, clearly labelled with its source (\"From the company policy, not your contract: ...\").")
+SEARCH_NOW = HIDDEN + ("Your reply says that the document does not specify it. Before you answer, call search_collective_agreement if you have it, "
+              "then search_policy, and search_labour_code if it is a legal question. Then answer in two parts: first that the document does not "
+              "specify it, then what the collective agreement, the company policy or the law says as a separate part, clearly labelled with its "
+              "source (\"From the collective agreement: ...\", \"From the company policy, not your contract: ...\" or \"From the Code du travail, "
+              "not your contract: ...\"). If none says it, say that too. Do not invent anything.")
+SAY_SILENT_FIRST = HIDDEN + ("Your reply gives an answer from the collective agreement, the company policy or the law without first saying that the "
+                    "document does not specify it. Rewrite it. If the document answers the question, answer from the document alone, name it and "
+                    "quote it, and leave out the other sources. Otherwise start with \"Your <document> doesn't specify <what was asked>.\" and then "
+                    "give the other source as a separate part, clearly labelled with its name (\"From the company policy, not your contract: ...\").")
+
+
+# A retry note reaches the model as a user message, and it often opens its answer with "You're right. Let me correct that." even when told not to.
+# The person never saw a first reply, so after a retry such an opening is taken off in code.
+_OPENER = re.compile(
+    r"^\s*(?:you(?:'|’)re right|you are right|i apologi[sz]e(?: for [^.!:\n]*)?|apologies(?: for [^.!:\n]*)?|"
+    r"let me (?:correct|rewrite|redo|fix|give you|answer|clarify|try)[^.!:\n]*|"
+    r"here(?:'|’)s (?:the |a |my )?(?:corrected|correct|revised|updated|better|proper)[^.!:\n]*)[.,!:;]*[ \t]*\n*", re.I)
+
+
+def strip_correction(reply):
+    """The reply without a leading "You're right. Let me correct that." (only that kind of opening, and never the whole reply)."""
+    text = str(reply or "")
+    for _ in range(4):
+        rest = _OPENER.sub("", text, count=1)
+        if rest == text or not rest.strip():
+            break
+        text = rest
+    return text.lstrip()
 
 
 def says_document_silent(reply):

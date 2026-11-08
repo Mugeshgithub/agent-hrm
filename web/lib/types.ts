@@ -127,6 +127,12 @@ export type ContractApproval = {
 
 export type DocumentFlag = { document_id: number; employee_id: string; employee_name: string; label: string; reason: string };
 
+// the company's collective agreement, as the Handbook page shows it (never its text)
+export type CollectiveAgreement = {
+  id: number; name: string; original_name: string; media_type: string; size_bytes: number; sections: number;
+  uploaded_by: string | null; uploaded_at: string; assistant: "ready" | "partial";
+};
+
 // a question people asked that the policy does not answer; nobody is named, the assistant never keeps who asked
 export type PolicyGap = { id: number; topic: string; asks: number; examples: string[]; first_asked_at: string; last_asked_at: string; reopened: boolean };
 

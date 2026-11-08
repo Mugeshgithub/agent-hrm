@@ -15,6 +15,7 @@ import hr_queries
 import employees
 import leave_admin
 import checkins
+import collective_agreement
 import contracts
 import documents
 import employee_files
@@ -44,6 +45,7 @@ def init_all(reset=False):
     checkins.init_checkins()
     employee_files.init_files()
     policy_gaps.init_gaps()
+    collective_agreement.init_agreement()
     leave_admin.init_leave_admin()   # public holidays and the balance history
     if reset:   # balances start again, so their history does too
         conn = db.get_conn()
@@ -53,6 +55,8 @@ def init_all(reset=False):
             conn.execute("DELETE FROM employee_file_views")
             conn.execute("DELETE FROM employee_files")
             conn.execute("DELETE FROM policy_gaps")
+            conn.execute("DELETE FROM agreement_sections")
+            conn.execute("DELETE FROM collective_agreements")
             conn.execute("DELETE FROM onboarding_reminders")
             conn.execute("DELETE FROM contract_downloads")
             conn.execute("DELETE FROM contract_drafts")
@@ -149,6 +153,52 @@ def sample_contract(name, title, notice, extra=()):
     return pdf_text.make_pdf(blocks, title="Contrat de travail"), "\n".join(t for s, t in blocks if s != "gap")
 
 
+SAMPLE_AGREEMENT_NAME = "Convention collective de démonstration (bureaux d'études)"
+SAMPLE_AGREEMENT = """CONVENTION COLLECTIVE DE DÉMONSTRATION – BUREAUX D'ÉTUDES
+Texte fictif, écrit pour la démonstration. Ce n'est pas une vraie convention collective.
+
+Article 1 – Champ d'application
+La présente convention s'applique aux salariés des entreprises de bureaux d'études et de conseil en technologies.
+
+Article 2 – Durée du travail
+La durée hebdomadaire de travail effectif est de 35 heures.
+
+Article 3 – Période d'essai
+La période d'essai est de deux mois, renouvelable une fois.
+
+Article 4 – Préavis
+En cas de démission après la période d'essai, le préavis est de un mois pour les employés, techniciens et agents de maîtrise, et de trois mois pour les ingénieurs et cadres.
+
+Article 5 – Maladie
+Après un an d'ancienneté, en cas d'arrêt de travail pour maladie justifié par un certificat médical, l'employeur maintient 90 % de la rémunération brute pendant 60 jours, puis 66 % pendant les 30 jours suivants.
+
+Article 6 – Télétravail
+Le télétravail est possible jusqu'à trois jours par semaine, avec l'accord du manager.
+
+Article 7 – Prime d'ancienneté
+Une prime d'ancienneté de 3 % du salaire mensuel brut est versée après trois ans de présence dans l'entreprise.
+"""
+
+
+def sample_agreement():
+    """The fictional collective agreement as (name, pdf, text), for the demo and the tests."""
+    blocks = [("h1", "CONVENTION COLLECTIVE DE DÉMONSTRATION – BUREAUX D'ÉTUDES")]
+    for part in SAMPLE_AGREEMENT.split("\n\n")[1:]:
+        heading, _, body = part.partition("\n")
+        blocks += [("h2", heading), ("p", body)] if heading.startswith("Article") else [("p", part)]
+    return SAMPLE_AGREEMENT_NAME, pdf_text.make_pdf(blocks, title="Convention collective"), SAMPLE_AGREEMENT
+
+
+def seed_agreement():
+    # HR's upload of the sample agreement. It indexes the text with the embedding service, so it needs the OpenAI key: not part of init_all.
+    if collective_agreement.summary():
+        print("A collective agreement is already on file; nothing added.")
+        return
+    name, pdf, text = sample_agreement()
+    result = collective_agreement.add("H001", name, text.encode("utf-8"), "convention-collective.txt")
+    print(result.get("error") or f"Collective agreement filed ({result['sections']} articles).")
+
+
 def seed_files():
     # a contract in each demo person's documents area, filed by HR. The text is given, so no Claude call is needed.
     conn = db.get_conn()
@@ -184,4 +234,6 @@ if __name__ == "__main__":
     seed_activity()
     seed_onboarding()
     seed_files()
+    if "--agreement" in sys.argv:
+        seed_agreement()
     catch_up_paid_leave()

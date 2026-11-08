@@ -13,6 +13,7 @@ os.environ["HRM_DB"] = db.DB_PATH          # so demo_data.py can't switch back t
 import demo_data
 import employees as e
 import checkins
+import collective_agreement
 import contracts
 import documents
 import employee_files
@@ -1249,6 +1250,164 @@ def recording_a_gap_after_the_answer_can_never_break_the_answer():
         assert policy_gaps.record_from_turn(asked, "The policy doesn't say.") is None            # no exception reaches the person
     finally:
         policy_gaps.record = real
+
+
+AGREEMENT = """Article 1 – Notice
+The notice period for resignation is three months for managers and one month for the others.
+
+Article 2 – Sick pay
+After one year of service the employer pays 90 percent of the salary for 60 days of sick leave.
+
+Article 3 – Remote work
+Remote work is possible up to three days a week with the manager's agreement."""
+AGREEMENT_NAME = "Convention collective Test"
+
+
+def fake_many(texts):
+    return [fake_embedding(t) for t in texts]
+
+
+def reset_agreement():
+    fresh(); clear_files()
+    conn = db.get_conn()
+    with conn:
+        conn.execute("DELETE FROM agreement_sections")
+        conn.execute("DELETE FROM collective_agreements")
+    conn.close()
+    collective_agreement.EMBED_MANY = fake_many
+    collective_agreement.READER = None
+
+
+def agreement_files():
+    return [f for f in stored_files()]
+
+
+@test
+def only_hr_uploads_the_collective_agreement_and_it_is_read_cut_and_searched_by_meaning():
+    reset_agreement()
+    data = AGREEMENT.encode("utf-8")
+    for who in ("E001", "M001", "C001", "nobody"):
+        assert "Only HR" in collective_agreement.add(who, AGREEMENT_NAME, data)["error"], who
+    assert "name" in collective_agreement.add("H001", "  ", data)["error"] and "under 120" in collective_agreement.add("H001", "x" * 121, data)["error"]
+    assert "empty" in collective_agreement.add("H001", AGREEMENT_NAME, b"")["error"] and agreement_files() == [] and collective_agreement.summary() is None
+    done = collective_agreement.add("H001", AGREEMENT_NAME, data, "../../etc/convention.txt")
+    assert done["success"] and done["sections"] == 3 and done["assistant"] == "ready", done
+    info = collective_agreement.summary()
+    assert info["name"] == AGREEMENT_NAME and info["sections"] == 3 and info["uploaded_by"] == "Narmadha" and info["original_name"] == "convention.txt"
+    # the file is kept like the other private files: a random name, readable by its owner only
+    assert len(agreement_files()) == 1 and oct(os.stat(os.path.join(documents.files_dir(), agreement_files()[0])).st_mode & 0o777) == "0o600"
+    first = lambda q: collective_agreement.search(q)[0]["title"]
+    assert first("how long is the notice period when I resign") == "Article 1 – Notice"
+    assert first("what percent of salary is paid during sick leave") == "Article 2 – Sick pay"
+    assert first("how many days of remote work a week") == "Article 3 – Remote work"
+    assert collective_agreement.search("zebra giraffe volcano") == []                                      # nothing related: nothing returned
+
+
+@test
+def uploading_another_agreement_replaces_it_and_removing_deletes_the_file_and_the_text():
+    reset_agreement()
+    collective_agreement.add("H001", "First", AGREEMENT.encode("utf-8"))
+    old_files = agreement_files()
+    second = collective_agreement.add("H001", "Second", "Article 1 – Holidays\nTwo extra days.".encode("utf-8"))
+    assert second["sections"] == 1 and collective_agreement.summary()["name"] == "Second"
+    assert len(agreement_files()) == 1 and agreement_files() != old_files                                   # the first file is gone
+    conn = db.get_conn()
+    history = [tuple(r) for r in conn.execute("SELECT name, status, ended_by, file_name IS NULL FROM collective_agreements ORDER BY id")]
+    texts = conn.execute("SELECT COUNT(*) FROM agreement_sections").fetchone()[0]
+    conn.close()
+    assert history == [("First", "replaced", "H001", 1), ("Second", "current", None, 0)] and texts == 1      # history keeps who and when, not the text
+    assert all("Notice" not in s["title"] for s in collective_agreement.search("notice period"))
+    for who in ("E001", "M001", "nobody"):
+        assert "Only HR" in collective_agreement.remove(who)["error"], who
+    assert collective_agreement.remove("H001") == {"success": True}
+    assert collective_agreement.summary() is None and agreement_files() == [] and collective_agreement.search("holidays") == []
+    assert "no collective agreement to remove" in collective_agreement.remove("H001")["error"]
+
+
+@test
+def a_failed_upload_changes_nothing_and_a_scan_is_read_by_claude_when_there_is_no_text_layer():
+    reset_agreement()
+    collective_agreement.add("H001", "Current", AGREEMENT.encode("utf-8"))
+    def down(texts):
+        raise RuntimeError("the embedding service is down")
+    collective_agreement.EMBED_MANY = down
+    assert "Nothing was changed" in collective_agreement.add("H001", "New", b"Article 1 - A\nText.")["error"]
+    collective_agreement.EMBED_MANY = fake_many
+    assert collective_agreement.summary()["name"] == "Current" and len(agreement_files()) == 1                # the current one is still there
+    collective_agreement.READER = lambda data, kind: ("   \n  ", True)
+    assert "any text" in collective_agreement.add("H001", "Blank", b"Article 1 - A\nText.")["error"]
+    def broken(data, kind):
+        raise RuntimeError("cannot read")
+    collective_agreement.READER = broken
+    assert "couldn't read" in collective_agreement.add("H001", "Broken", b"Article 1 - A\nText.")["error"] and collective_agreement.summary()["name"] == "Current"
+    # a PDF with no text layer goes to Claude (long ones come back partial)
+    collective_agreement.READER = None
+    seen = []
+    real_pdf, real_claude = collective_agreement._pdf_text, employee_files.transcribe_with_claude
+    collective_agreement._pdf_text = lambda data: ""
+    employee_files.transcribe_with_claude = lambda data, kind: (seen.append(kind) or "Article 1 – Scanned\nTrois jours.", False)
+    try:
+        scan = collective_agreement.add("H001", "Scanned", b"%PDF-1.4 a scan")
+    finally:
+        collective_agreement._pdf_text, employee_files.transcribe_with_claude = real_pdf, real_claude
+    assert seen == ["pdf"] and scan["assistant"] == "partial" and collective_agreement.summary()["assistant"] == "partial"
+
+
+@test
+def a_pdf_with_a_text_layer_is_read_without_claude_and_cut_like_the_text():
+    try:
+        import pypdf    # noqa: F401  (CI's unit-test job has no packages: the text path above covers the rest there)
+    except ImportError:
+        return
+    reset_agreement()
+    name, pdf, text = demo_data.sample_agreement()
+    def no_claude(data, kind):
+        raise AssertionError("Claude must not be asked: the PDF has a text layer")
+    real = employee_files.transcribe_with_claude
+    employee_files.transcribe_with_claude = no_claude
+    try:
+        done = collective_agreement.add("H001", name, pdf, "convention.pdf")
+    finally:
+        employee_files.transcribe_with_claude = real
+    assert done["success"] and done["assistant"] == "ready" and done["sections"] == len(collective_agreement.split_sections(text))
+    assert collective_agreement.summary()["media_type"] == "application/pdf"
+
+
+@test
+def everyone_who_works_here_opens_the_file_and_nobody_else_does():
+    reset_agreement()
+    assert "no collective agreement" in collective_agreement.open_file("E001")["error"]
+    collective_agreement.add("H001", AGREEMENT_NAME, AGREEMENT.encode("utf-8"))
+    for who in ("E001", "M001", "C001", "H001"):
+        opened = collective_agreement.open_file(who)
+        assert opened["filename"] == "convention-collective-test.txt" and opened["media_type"] == "text/plain" and open(opened["path"], "rb").read() == AGREEMENT.encode("utf-8"), who
+    assert "no collective agreement" in collective_agreement.open_file("nobody")["error"]
+    conn = db.get_conn()
+    with conn:
+        conn.execute("UPDATE profiles SET end_date = '2020-01-01' WHERE emp_id = 'E002'")             # Hugo left
+    conn.close()
+    assert "no collective agreement" in collective_agreement.open_file("E002")["error"] and "filename" in collective_agreement.open_file("E001")
+
+
+@test
+def the_assistant_only_gets_the_agreement_tool_and_the_order_of_sources_once_hr_has_uploaded_one():
+    reset_agreement()
+    tools = [{"name": "search_policy"}, {"name": collective_agreement.TOOL}, {"name": "search_labour_code"}]
+    assert [t["name"] for t in collective_agreement.available_tools(tools)] == ["search_policy", "search_labour_code"]
+    assert collective_agreement.agreement_prompt() is None
+    assert collective_agreement.tool_result("notice") == {"error": "No collective agreement has been uploaded."}
+    collective_agreement.add("H001", AGREEMENT_NAME, AGREEMENT.encode("utf-8"))
+    assert len(collective_agreement.available_tools(tools)) == 3
+    order = collective_agreement.agreement_prompt()
+    assert AGREEMENT_NAME in order and order.index("their own contract") < order.index("the collective agreement") < order.index("the company policy") < order.index("the law")
+    assert "FIRST source that answers" in order and "does not specify" in order and "Never present" in order
+    found = collective_agreement.tool_result("how long is the notice period when I resign")
+    assert found["found"] is True and found["agreement"] == AGREEMENT_NAME and found["articles"][0]["article"] == "Article 1 – Notice"
+    assert AGREEMENT_NAME in found["rules"] and "Never present them as the person's contract" in found["rules"] and "score" not in str(found)
+    silent = collective_agreement.tool_result("zebra giraffe volcano")
+    assert silent["found"] is False and AGREEMENT_NAME in silent["message"] and "does not specify it" in silent["rules"]
+    collective_agreement.remove("H001")
+    assert [t["name"] for t in collective_agreement.available_tools(tools)] == ["search_policy", "search_labour_code"]
 
 
 if __name__ == "__main__":

@@ -758,6 +758,46 @@ def hr_closes_a_question_the_policy_does_not_answer_and_nobody_else_can():
     assert hr.get("/api/needs-you").json()["policy_gaps"] == []
 
 
+@test
+def hr_uploads_the_collective_agreement_everyone_opens_it_and_only_hr_changes_it():
+    import collective_agreement
+    collective_agreement.EMBED_MANY = lambda texts: [[float(len(t) % 7), 1.0, float(t.count("a"))] for t in texts]      # no embedding service in CI
+    collective_agreement.READER = None
+    conn = db.get_conn()
+    with conn:
+        conn.execute("DELETE FROM agreement_sections")
+        conn.execute("DELETE FROM collective_agreements")
+    conn.close()
+    text = "Article 1 – Notice\nThree months for managers.\n\nArticle 2 – Sick pay\n90 percent for 60 days.".encode("utf-8")
+    hr = as_person("H001")
+    for who in ("E001", "M001", "C001"):
+        c = as_person(who)
+        assert c.get("/api/collective-agreement").json() is None                                              # nothing yet
+        assert c.get("/api/collective-agreement/file").status_code == 404
+        assert c.post("/api/hr/collective-agreement?name=X&filename=a.txt", content=text).status_code == 403, who
+        assert c.post("/api/hr/collective-agreement/remove").status_code == 403, who
+    assert TestClient(server.app).get("/api/collective-agreement").status_code == 401                         # signed in only
+    assert hr.post("/api/hr/collective-agreement?name=%20%20", content=text).status_code == 400              # a name is needed
+    assert hr.post("/api/hr/collective-agreement?name=Convention%20Test", content=b"").status_code == 400
+    assert hr.post("/api/hr/collective-agreement?name=Convention%20Test", content=b"MZ\x90\x00 a program").status_code == 400
+    assert hr.post("/api/hr/collective-agreement?name=Convention%20Test", content=b"%PDF-" + b"0" * documents.MAX_BYTES).status_code == 413
+    done = hr.post("/api/hr/collective-agreement?name=Convention%20Test&filename=convention.txt", content=text)
+    assert done.status_code == 200 and done.json()["sections"] == 2 and done.json()["assistant"] == "ready", done.text
+    for who in ("E001", "M001", "C001", "H001"):
+        c = as_person(who)
+        info = c.get("/api/collective-agreement").json()
+        assert info["name"] == "Convention Test" and info["sections"] == 2 and info["uploaded_by"] == "Narmadha", who
+        opened = c.get("/api/collective-agreement/file")
+        assert opened.status_code == 200 and opened.content == text and "convention-test.txt" in opened.headers["content-disposition"], who
+    assert set(as_person("E001").get("/api/collective-agreement").json()) == {"id", "name", "original_name", "media_type", "size_bytes", "sections",
+                                                                           "uploaded_by", "uploaded_at", "assistant"}      # the page gets facts, never the text
+    again = hr.post("/api/hr/collective-agreement?name=Second", content=b"Article 1 - Holidays\nTwo days.")
+    assert again.status_code == 200 and as_person("E001").get("/api/collective-agreement").json()["name"] == "Second"
+    assert as_person("E001").post("/api/hr/collective-agreement/remove").status_code == 403
+    assert hr.post("/api/hr/collective-agreement/remove").status_code == 200
+    assert as_person("E001").get("/api/collective-agreement").json() is None and hr.post("/api/hr/collective-agreement/remove").status_code == 400
+
+
 if __name__ == "__main__":
     failed = 0
     for t in TESTS:
