@@ -19,6 +19,7 @@ import collective_agreement
 import contracts
 import documents
 import employee_files
+import jobs
 import onboarding
 import outbox
 import policy_gaps
@@ -49,9 +50,14 @@ def init_all(reset=False):
     policy_store.init_policy()
     collective_agreement.init_agreement()
     leave_admin.init_leave_admin()   # public holidays and the balance history
+    jobs.init_jobs()                 # recruitment: jobs, candidates and their log
     if reset:   # balances start again, so their history does too
         conn = db.get_conn()
         with conn:
+            conn.execute("DELETE FROM application_events")
+            conn.execute("DELETE FROM applications")
+            conn.execute("DELETE FROM job_events")
+            conn.execute("DELETE FROM jobs")
             conn.execute("DELETE FROM leave_adjustments")
             conn.execute("DELETE FROM leave_runs")
             conn.execute("DELETE FROM employee_file_views")
@@ -202,6 +208,35 @@ def seed_agreement():
     print(result.get("error") or f"Collective agreement filed ({result['sections']} articles).")
 
 
+def seed_recruitment():
+    # one open job with four candidates and one draft, through the real code, so the demo shows a pipeline. The candidates are made up.
+    conn = db.get_conn()
+    has_any = conn.execute("SELECT COUNT(*) FROM jobs").fetchone()[0]
+    conn.close()
+    if has_any:
+        print("Jobs already exist; nothing added.")
+        return
+    job = jobs.create_job("H001", {
+        "title": "Data Analyst", "team": "Engineering", "location": "Paris", "contract_type": "CDI", "hiring_manager_id": "M001",
+        "description": "Join the engineering team to turn product and customer data into decisions. You will build dashboards, answer questions "
+                       "from the product and support teams, and help us measure whether what we ship works.",
+        "must_have": ["2 years of experience in data analysis", "SQL", "Python or R", "Fluent English"],
+        "nice_to_have": ["Experience with dbt", "Fluent French"], "salary_min": 42000, "salary_max": 52000})
+    jobs.set_status("H001", job["id"], "open")
+    ids = {}
+    for name, email in (("Inès Garnier", "ines.garnier@example.com"), ("Karim Benali", "karim.benali@example.com"),
+                        ("Théo Marchand", "theo.marchand@example.com"), ("Camille Roux", "camille.roux@example.com")):
+        ids[name] = jobs.add_candidate("H001", job["id"], {"name": name, "email": email})["id"]
+    jobs.move("M001", ids["Karim Benali"], "screening")
+    jobs.move("M001", ids["Théo Marchand"], "screening")
+    jobs.move("M001", ids["Théo Marchand"], "interview")
+    jobs.create_job("M001", {
+        "title": "Product Designer", "team": "Engineering", "location": "Lyon", "contract_type": "CDI",
+        "description": "Design the screens people use every day, from the first sketch to the finished interface.",
+        "must_have": ["A portfolio of shipped product work", "Figma"]})
+    print("Recruitment demo added.")
+
+
 def seed_files():
     # a contract in each demo person's documents area, filed by HR. The text is given, so no Claude call is needed.
     conn = db.get_conn()
@@ -236,6 +271,7 @@ if __name__ == "__main__":
     init_all(reset="--reset" in sys.argv)
     seed_activity()
     seed_onboarding()
+    seed_recruitment()
     seed_files()
     if "--agreement" in sys.argv:
         seed_agreement()

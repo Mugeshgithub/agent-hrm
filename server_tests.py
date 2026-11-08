@@ -899,6 +899,79 @@ def hr_edits_the_policy_everyone_reads_the_edited_handbook_and_nobody_else_can_c
     assert [(g["topic"], g["asks"]) for g in listed] == [("language courses", 1)] and "employee_id" not in listed[0]       # for the editor's banner: no names
 
 
+# ---------- recruitment: jobs and the pipeline ----------
+
+@test
+def recruitment_is_for_hr_and_hiring_managers_and_a_manager_sees_only_their_own_jobs():
+    hr, lucas, mugesh, emma = as_person("H001"), as_person("M001"), as_person("C001"), as_person("E001")
+    for path in ("/api/recruitment/jobs", "/api/recruitment/jobs/1", "/api/recruitment/hiring-managers"):
+        assert emma.get(path).status_code == 403, path                                              # an employee gets nothing about recruitment
+    assert emma.post("/api/recruitment/jobs", json={"title": "x"}).status_code == 403
+    body = {"title": "Support Engineer", "team": "Engineering", "location": "Lyon", "contract_type": "CDI", "description": "Help customers use the product well.",
+            "must_have": ["2 years in customer support", "SQL"], "nice_to_have": "French\nEnglish", "hiring_manager_id": "M001"}
+    made = hr.post("/api/recruitment/jobs", json=body)
+    assert made.status_code == 200 and made.json()["status"] == "draft" and made.json()["nice_to_have"] == ["French", "English"]
+    job = made.json()["id"]
+    assert [j["id"] for j in lucas.get("/api/recruitment/jobs").json()].count(job) == 1 and job not in [j["id"] for j in mugesh.get("/api/recruitment/jobs").json()]
+    assert job in [j["id"] for j in hr.get("/api/recruitment/jobs").json()]
+    assert mugesh.get(f"/api/recruitment/jobs/{job}").status_code == 404 and hr.get("/api/recruitment/jobs/99999").status_code == 404   # no hint that a job exists
+    assert lucas.get(f"/api/recruitment/jobs/{job}").json()["job"]["title"] == "Support Engineer"
+    assert hr.get("/api/recruitment/hiring-managers").status_code == 200 and lucas.get("/api/recruitment/hiring-managers").status_code == 403
+    assert lucas.post("/api/recruitment/jobs", json={**body, "title": "Lucas's own job", "hiring_manager_id": "C001"}).json()["hiring_manager_id"] == "M001"
+    edited = lucas.patch(f"/api/recruitment/jobs/{job}", json={"location": "Paris"})
+    assert edited.status_code == 200 and edited.json()["location"] == "Paris" and edited.json()["title"] == "Support Engineer"
+    assert mugesh.patch(f"/api/recruitment/jobs/{job}", json={"location": "Nice"}).status_code == 404
+
+
+@test
+def only_hr_opens_a_job_and_a_person_moves_each_candidate_with_a_reason_when_not_selecting():
+    hr, lucas, mugesh = as_person("H001"), as_person("M001"), as_person("C001")
+    body = {"title": "Data Engineer", "team": "Engineering", "location": "Paris", "contract_type": "CDI", "description": "Build the pipelines our analysts rely on.",
+            "must_have": ["Python", "SQL"], "hiring_manager_id": "M001"}
+    job = hr.post("/api/recruitment/jobs", json=body).json()["id"]
+    cand = {"name": "Sophie Lambert", "email": "sophie.lambert@example.com"}
+    assert hr.post(f"/api/recruitment/jobs/{job}/candidates", json=cand).status_code == 400          # a draft has no candidates
+    refused = lucas.post(f"/api/recruitment/jobs/{job}/status", json={"status": "open"})
+    assert refused.status_code == 400 and "Only HR opens" in refused.json()["detail"]
+    assert hr.post(f"/api/recruitment/jobs/{job}/status", json={"status": "open"}).json()["status"] == "open"
+    assert mugesh.post(f"/api/recruitment/jobs/{job}/candidates", json=cand).status_code == 404       # not their job
+    added = lucas.post(f"/api/recruitment/jobs/{job}/candidates", json=cand)
+    assert added.status_code == 200 and added.json()["stage"] == "applied"
+    cid = added.json()["id"]
+    assert lucas.post(f"/api/recruitment/jobs/{job}/candidates", json=cand).status_code == 400
+    assert mugesh.post(f"/api/recruitment/candidates/{cid}/move", json={"stage": "screening"}).status_code == 404
+    assert mugesh.get(f"/api/recruitment/candidates/{cid}/history").status_code == 404
+    no_reason = lucas.post(f"/api/recruitment/candidates/{cid}/move", json={"stage": "not_selected"})
+    assert no_reason.status_code == 400 and "reason" in no_reason.json()["detail"]
+    assert lucas.post(f"/api/recruitment/candidates/{cid}/move", json={"stage": "screening"}).json()["stage"] == "screening"
+    assert hr.post(f"/api/recruitment/candidates/{cid}/move", json={"stage": "not_selected", "reason": "Missing the SQL experience"}).json()["stage"] == "not_selected"
+    history = lucas.get(f"/api/recruitment/candidates/{cid}/history").json()
+    assert [(h["to_stage"], h["actor_name"]) for h in history] == [("applied", "Lucas"), ("screening", "Lucas"), ("not_selected", "Narmadha")]
+    shown = lucas.get(f"/api/recruitment/jobs/{job}").json()
+    assert [c["stage"] for c in shown["candidates"]] == ["not_selected"] and shown["job"]["counts"]["not_selected"] == 1
+
+
+@test
+def a_new_application_waits_in_needs_you_for_hr_and_the_hiring_manager_and_a_job_text_that_discriminates_stays_closed():
+    hr, lucas, mugesh = as_person("H001"), as_person("M001"), as_person("C001")
+    body = {"title": "QA Analyst", "team": "Engineering", "location": "Paris", "contract_type": "CDI", "description": "Test what we ship. Young and dynamic people only.",
+            "must_have": ["Testing experience"], "hiring_manager_id": "M001"}
+    job = hr.post("/api/recruitment/jobs", json=body).json()
+    assert job["warnings"] and job["warnings"][0]["words"].lower() == "young and dynamic people"
+    refused = hr.post(f"/api/recruitment/jobs/{job['id']}/status", json={"status": "open"})
+    assert refused.status_code == 400 and "L1132-1" in refused.json()["detail"]
+    hr.patch(f"/api/recruitment/jobs/{job['id']}", json={"description": "Test what we ship, from the first idea to the release."})
+    assert hr.post(f"/api/recruitment/jobs/{job['id']}/status", json={"status": "open"}).status_code == 200
+    before = (hr.get("/api/home").json()["waiting_on_you"], lucas.get("/api/home").json()["waiting_on_you"], mugesh.get("/api/home").json()["waiting_on_you"])
+    cid = lucas.post(f"/api/recruitment/jobs/{job['id']}/candidates", json={"name": "Nora Vidal", "email": "nora.vidal@example.com"}).json()["id"]
+    after = (hr.get("/api/home").json()["waiting_on_you"], lucas.get("/api/home").json()["waiting_on_you"], mugesh.get("/api/home").json()["waiting_on_you"])
+    assert after == (before[0] + 1, before[1] + 1, before[2])                                          # HR and the hiring manager, nobody else
+    assert "Nora Vidal" in [a["name"] for a in lucas.get("/api/needs-you").json()["new_applications"]]
+    assert "Nora Vidal" not in str(mugesh.get("/api/needs-you").json())
+    lucas.post(f"/api/recruitment/candidates/{cid}/move", json={"stage": "screening"})
+    assert "Nora Vidal" not in str(lucas.get("/api/needs-you").json())
+
+
 if __name__ == "__main__":
     failed = 0
     for t in TESTS:

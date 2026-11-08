@@ -22,6 +22,7 @@ import documents
 import employee_files
 import employees
 import hr_queries
+import jobs
 import leave_admin
 import onboarding
 import outbox
@@ -853,6 +854,95 @@ def contract_preview(draft_id: int, request: Request):
 @app.post("/api/contracts/{draft_id}/decision")
 def decide_contract(draft_id: int, body: DecisionContractIn, request: Request):
     return fail_on_error(contracts.decide(me(request)["id"], draft_id, body.decision, body.reason))
+
+
+# ---------- recruitment: jobs and the pipeline ----------
+# HR sees every job, a hiring manager only their own, everyone else gets a 403 here (and a 404 for a job they may not see, the same answer as one
+# that does not exist). Only a person moves a candidate. The rules are in jobs.py.
+class JobIn(BaseModel):
+    title: str = ""
+    team: str = ""
+    location: str = ""
+    contract_type: str = ""
+    description: str = ""
+    must_have: list[str] | str = []
+    nice_to_have: list[str] | str = []
+    salary_min: int | float | str | None = None
+    salary_max: int | float | str | None = None
+    hiring_manager_id: str | None = None
+
+
+class JobStatusIn(BaseModel):
+    status: str
+
+
+class CandidateIn(BaseModel):
+    name: str = ""
+    email: str = ""
+    phone: str = ""
+
+
+class MoveIn(BaseModel):
+    stage: str
+    reason: str = ""
+
+
+def recruiter(request: Request):
+    emp = me(request)
+    if emp["role"] not in ("hr", "manager"):
+        raise HTTPException(403, "Recruitment is for HR and hiring managers.")
+    return emp
+
+
+def recruitment_result(result):
+    if isinstance(result, dict) and "error" in result:
+        raise HTTPException(404 if result["error"] in (jobs.NOT_FOUND, "No such candidate.") else 400, result["error"])
+    return result
+
+
+@app.get("/api/recruitment/jobs")
+def recruitment_jobs(request: Request):
+    return recruitment_result(jobs.list_jobs(recruiter(request)["id"]))
+
+
+@app.post("/api/recruitment/jobs")
+def recruitment_new_job(body: JobIn, request: Request):
+    return recruitment_result(jobs.create_job(recruiter(request)["id"], body.model_dump()))
+
+
+@app.get("/api/recruitment/hiring-managers")
+def recruitment_managers(request: Request):
+    return recruitment_result(jobs.hiring_managers(need(request, "hr")["id"]))
+
+
+@app.get("/api/recruitment/jobs/{job_id}")
+def recruitment_job(job_id: int, request: Request):
+    return recruitment_result(jobs.pipeline(recruiter(request)["id"], job_id))
+
+
+@app.patch("/api/recruitment/jobs/{job_id}")
+def recruitment_edit_job(job_id: int, body: JobIn, request: Request):
+    return recruitment_result(jobs.update_job(recruiter(request)["id"], job_id, body.model_dump(exclude_unset=True)))
+
+
+@app.post("/api/recruitment/jobs/{job_id}/status")
+def recruitment_job_status(job_id: int, body: JobStatusIn, request: Request):
+    return recruitment_result(jobs.set_status(recruiter(request)["id"], job_id, body.status))
+
+
+@app.post("/api/recruitment/jobs/{job_id}/candidates")
+def recruitment_add_candidate(job_id: int, body: CandidateIn, request: Request):
+    return recruitment_result(jobs.add_candidate(recruiter(request)["id"], job_id, body.model_dump()))
+
+
+@app.post("/api/recruitment/candidates/{application_id}/move")
+def recruitment_move(application_id: int, body: MoveIn, request: Request):
+    return recruitment_result(jobs.move(recruiter(request)["id"], application_id, body.stage, body.reason))
+
+
+@app.get("/api/recruitment/candidates/{application_id}/history")
+def recruitment_history(application_id: int, request: Request):
+    return recruitment_result(jobs.history(recruiter(request)["id"], application_id))
 
 
 # ---------- leave administration ----------

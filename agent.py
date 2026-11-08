@@ -20,7 +20,9 @@ import collective_agreement
 import contracts
 import document_answers
 import employee_files
+import jobs
 import number_guard
+import recruitment_guard
 import search_first
 import tool_guard
 import needs_you
@@ -241,6 +243,14 @@ TOOLS = [
                        "steps for new hires, documents flagged for HR to look at, contracts waiting for a manager's approval, for HR the questions people asked that the company policy does not answer, and a warning for anyone with more than 30 unused paid days. Use this when they ask what needs "
                        "their attention, what is waiting for them, or what is new. It only lists; it decides nothing.",
         "input_schema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "get_job_pipeline",
+        "description": "Recruitment, read-only, for HR and a hiring manager. Without arguments: the jobs they may see, with how many candidates are at each stage. "
+                       "With job (a job title or its number): that job's candidates with their stage, the date they applied and the days in that stage, in the "
+                       "order they applied. It holds no ranking and gives no opinion of anyone: never rank, score, compare or recommend candidates.",
+        "input_schema": {"type": "object", "properties": {
+            "job": {"type": "string", "description": "A job title (or part of it) or the job number, for example Data Analyst. Leave out to list the jobs."}}},
     },
     {
         "name": "get_team_member_balance",
@@ -607,6 +617,9 @@ def run_tool(name, tool_input):
     if name == "get_my_onboarding":
         return onboarding.my_checklist(LOGGED_IN_ID)     # always their own: the id is the link's, never the model's
 
+    if name == "get_job_pipeline":
+        return jobs.for_assistant(LOGGED_IN_ID, tool_input.get("job"))        # HR, or the hiring manager of the job: checked in jobs.py and roles.py
+
     if name == "get_needs_attention":
         return needs_you.for_assistant(LOGGED_IN_ID)     # the role check is in roles.py and in needs_you.py
 
@@ -726,6 +739,16 @@ def answer_turn(user_text):
                               tags=[role, *EXTRA_TAGS], metadata={"model": MODEL}):
         messages = state["messages"]
         summary = state["summary"]
+
+        # guardrail in code: nobody gets a ranking, a score or a "hire this one" from the assistant, whoever asks (recruitment_guard.py).
+        # The model is not called at all: the answer is fixed.
+        if (fixed := recruitment_guard.refusal(role, user_text, jobs.candidate_names(LOGGED_IN_ID))):
+            print("  [guard] asked to rank or choose between candidates: the fixed refusal")
+            last_turn.update(tools_called=[], refused=[], policy_searches=[], sources=[], question=user_text)
+            messages.append({"role": "assistant", "content": fixed})
+            save_message(LOGGED_IN_ID, "assistant", fixed)
+            print(f"\nAgent: {fixed}")
+            return fixed
 
         # the agent loop, limited so one question can't loop forever
         calls_this_message = 0
