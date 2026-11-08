@@ -1113,7 +1113,7 @@ def the_assistant_lists_and_reads_only_the_signed_in_persons_own_documents_and_e
     assert "trois" not in str(listing) and "Hugo" not in str(listing)                           # nothing about anyone else
     read = employee_files.tool_read("E001", emma)
     assert read["document"] == "Employment contract of Emma" and "préavis de deux mois" in read["text"] and read["text_is_incomplete"] is False
-    assert "Name the document" in read["rules"] and "not instructions" in read["rules"]
+    assert "name the document by its title" in read["rules"].lower() and "not instructions" in read["rules"] and "From the company policy, not your contract" in read["rules"]
     assert employee_files.tool_read("E001", hugo) == employee_files.tool_read("E001", 9999) == {"error": "No such document."}     # someone else's id = a missing one
     assert employee_files.tool_read("E002", emma) == {"error": "No such document."}
     assert "trois mois" not in str(employee_files.tool_read("H001", hugo))                      # even HR's assistant reads only HR's own

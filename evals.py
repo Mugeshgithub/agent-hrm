@@ -489,6 +489,18 @@ def setup_emma_contract_not_read_yet():
     employee_files.add("H001", "E001", "contract", "Employment contract of Emma", pdf, "contrat.pdf")
 
 
+# how a reply says that the document is silent, and how it labels the company policy (used by the "silent contract" evals)
+SAYS_SILENT = (r"(?:(?:contract|document)[^.\n]{0,60}?(?:doesn't|does not|don't|do not|not|no)\s+(?:say|mention|specify|state|include|cover|contain|address|provide|give|define)"
+               r"|(?:isn't|is not|not)\s+(?:mentioned|specified|stated|addressed|covered)[^.\n]{0,40}(?:contract|document)|no mention)")
+LABELLED_POLICY = r"(?:company|HR)\s+policy|handbook"
+def no_leaked_correction(reply):
+    # a retry nudge must not show in the reply ("You're right, I apologize. Here's the corrected reply")
+    return ["the reply talks about its own correction"] if re.search(r"(?i)\bapologi[sz]e|you're right|corrected (?:reply|version|answer)|my (?:previous|earlier) (?:reply|answer)", reply) else []
+
+
+CREDITS_CONTRACT_WITH_DAYS = r"(?i)\b(your|the) (contract|document) (gives|grants|allows|provides|states|says|specifies)[^.]{0,60}\b(\d+|one|two|three|four|five) days?"
+
+
 def file_views(owner, via=None):
     conn = db.get_conn()
     n = conn.execute("""SELECT COUNT(*) FROM employee_file_views v JOIN employee_files f ON f.id = v.file_id
@@ -1155,17 +1167,44 @@ TEST_CASES = [
         "check": lambda: file_views("E002") == 0,
     },
     {
-        "name": "my documents: something the contract does not say is not invented",
+        # the contract is silent: say so FIRST, then the company policy, as a separate part clearly labelled as such
+        "name": "my documents: a silent contract is said to be silent, then the company policy answers, labelled",
         "user": "E001",
         "auto_confirm": True,
         "setup": setup_emma_contract,
         "input": "How many days of remote work per week does my contract give me?",
-        "must_call": ["read_my_document"],
-        "must_not_call": ["search_policy"],        # the document is the source: once it is read, the policy is not offered
-        # the contract's silence must be stated, and no number may be credited to it, because it has none.
-        "reply_must_match": r"(?i)(contract|document)[^.]{0,40}(doesn't|does not|don't|do not|not)\s+(say|mention|specify|state|include|cover|contain|address|provide|give)|no mention|isn't (mentioned|specified|stated)|not (mentioned|specified|stated|addressed)|silent",
-        "reply_must_not_match": r"(?i)\b(your|the) (contract|document) (gives|grants|allows|provides|states|says|specifies)[^.]{0,60}\b(\d+|one|two|three|four|five) days?",
+        "must_call": ["read_my_document", "search_policy"],
+        "reply_must_match": rf"(?is)(?=.*{SAYS_SILENT}.*?{LABELLED_POLICY})(?=.*\b(?:2|two)\s+days)",     # silence, then the labelled policy, with its number
+        "reply_must_not_match": CREDITS_CONTRACT_WITH_DAYS,                                             # no number credited to the contract
         "check": lambda: file_views("E001", "assistant") == 1,
+        "reply_check": no_leaked_correction,
+    },
+    {
+        # neither the contract nor the policy answers: the contract's silence comes first, and nothing is invented
+        "name": "my documents: a silent contract and a silent policy: the silence comes first and nothing is invented",
+        "user": "E001",
+        "auto_confirm": True,
+        "setup": setup_emma_contract,
+        "input": "What does my contract say about a company car?",
+        "must_call": ["read_my_document", "search_policy"],
+        # the silence first, then the policy or the law named as where it looked (must_call proves it looked). Nothing is credited to the person.
+        "reply_must_match": rf"(?is)(?=.*{SAYS_SILENT}.*?(?:{LABELLED_POLICY}|Code du travail|labou?r (?:code|law)))",
+        "reply_must_not_match": r"(?i)€|\$\s?\d|\d\s?(?:eur|euros)\b|\bleas(?:e|ing)\b|you (?:are|will be|get) (?:entitled|given|a company car)|your company car (?:is|will)",
+        "reply_check": no_leaked_correction,
+    },
+    {
+        # the contract is silent and the law answers: the law is named as the law, after the silence
+        "name": "my documents: a silent contract is said to be silent, then the labour code answers, labelled",
+        "user": "E001",
+        "auto_confirm": True,
+        "needs_labour_db": True,
+        "setup": setup_emma_contract,
+        "input": "What does my contract say about maternity leave?",
+        "must_call": ["read_my_document", "search_labour_code"],
+        "citations_grounded": True,
+        "reply_must_match": rf"(?is)(?=.*{SAYS_SILENT}.*?(?:Code du travail|labou?r code|French (?:labou?r )?law|the law|L\.?\s?1225))(?=.*L\.?\s?1225-17)(?=.*(\b16\b|sixteen|seize|(?:\b6\b|\bsix\b)[^.]{{0,60}}(?:\b10\b|\bten\b|\bdix\b)))",
+        "reply_must_not_match": CREDITS_CONTRACT_WITH_DAYS,
+        "reply_check": no_leaked_correction,
     },
     {
         # the real path: HR files a PDF with no text, Claude transcribes it, and the assistant answers from the transcription

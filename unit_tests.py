@@ -6,6 +6,7 @@ import db
 db.DB_PATH = "unit_test_hr.db"   # its own database, never the real hr.db
 
 import contracts
+import document_answers
 import documents
 import employee_files
 import pdf_text
@@ -676,17 +677,6 @@ def the_last_day_of_a_trial_period_counts_months_for_a_cdi_and_days_for_a_cdd():
 
 
 @test
-def after_a_document_has_been_read_the_policy_and_law_searches_are_not_offered_for_that_answer():
-    tools = [{"name": n} for n in ("get_my_documents", "read_my_document", "search_policy", "search_labour_code", "get_leave_balance")]
-    names = lambda called: [t["name"] for t in employee_files.tools_after(called, tools)]
-    assert names([]) == [t["name"] for t in tools] and names(["search_policy"]) == [t["name"] for t in tools]       # not about a document yet
-    assert names(["get_my_documents"]) == [t["name"] for t in tools]                                              # listing is not reading
-    after = names(["get_my_documents", "read_my_document"])
-    assert after == ["get_my_documents", "read_my_document", "get_leave_balance"]                                  # the document is the only source
-    assert employee_files.DOCUMENT_ONLY_BLOCKS == {"search_policy", "search_labour_code"} and len(tools) == 5      # the list itself is not changed
-
-
-@test
 def a_call_the_code_refuses_is_recognised_so_it_is_not_counted_as_called():
     refusal = tool_guard.refusal
     assert refusal("employee", "get_leave_balance", []) is None and refusal("manager", "decide_leave", []) is None
@@ -694,11 +684,30 @@ def a_call_the_code_refuses_is_recognised_so_it_is_not_counted_as_called():
     assert refusal("employee", "reply_to_ticket", [])["error"].startswith("That action isn't available") and refusal("hr", "decide_leave", [])
     assert refusal("new_hire", "get_leave_balance", [])["error"].startswith("That action isn't available") and refusal("new_hire", "get_my_onboarding", []) is None
     assert refusal("intern", "decide_leave", []) is not None and refusal("intern", "apply_leave", []) is None     # an unknown role: the smallest set
-    # an answer from the person's document: the policy and law searches are refused once the document has been read, and not before
-    assert refusal("employee", "search_policy", ["get_my_documents"]) is None and refusal("employee", "search_policy", []) is None
-    for tool in ("search_policy", "search_labour_code"):
-        assert "own document" in refusal("employee", tool, ["get_my_documents", "read_my_document"])["error"], tool
-    assert refusal("employee", "get_leave_balance", ["read_my_document"]) is None                                   # other tools are fine
+    # a document that does not answer is followed by the policy or the law: nothing is refused for having read it
+    for tool in ("search_policy", "search_labour_code", "get_leave_balance"):
+        assert refusal("employee", tool, ["get_my_documents", "read_my_document"]) is None, tool
+
+
+@test
+def a_silent_document_is_recognised_in_a_reply_and_the_missing_part_is_asked_for_once():
+    silent = document_answers.says_document_silent
+    for yes in ("Your contract doesn't specify remote work days.", "Your Employment contract of Emma does not mention a company car.",
+                "The document doesn't say anything about it.", "That is not mentioned in your contract.", "There is no mention of it in the document.",
+                "Your contract says nothing about vehicles.", "Your amendment doesn't cover this."):
+        assert silent(yes), yes
+    for no in ("Your contract states a notice period of two months.", "From the company policy, not your contract: up to 2 days a week.",
+               "Your contract does specify 35 hours per week.", "", None):
+        assert not silent(no), no
+    nudge, called = document_answers.nudge, ["get_my_documents", "read_my_document"]
+    assert nudge(called, "Your contract doesn't mention a company car.") == document_answers.SEARCH_NOW                    # silent, and it stopped
+    assert nudge(called + ["search_policy"], "From the company policy, not your contract: 2 days.") == document_answers.SAY_SILENT_FIRST   # no word about the silence
+    assert nudge(called + ["search_labour_code"], "From the Code du travail, not your contract: 16 weeks.") == document_answers.SAY_SILENT_FIRST
+    assert nudge(called + ["search_policy"], "Your contract doesn't specify it. From the company policy, not your contract: 2 days.") is None   # the right shape
+    assert nudge(called, "Your contract states a notice period of two months: \"un préavis de deux mois\".") is None                          # it answers
+    assert nudge(["search_policy"], "Your contract doesn't mention it.") is None and nudge([], "x") is None                                  # no document read: not our business
+    assert "do not apologise" in document_answers.SEARCH_NOW and "do not apologise" in document_answers.SAY_SILENT_FIRST    # the nudge must not leak into the reply
+    assert "specify" in document_answers.SEARCH_NOW and "labelled" in document_answers.SAY_SILENT_FIRST.replace("labeled", "labelled")
 
 
 if __name__ == "__main__":

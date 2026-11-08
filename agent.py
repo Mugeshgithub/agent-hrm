@@ -17,6 +17,7 @@ from memory import init_memory, init_summaries, save_message, build_context
 from notifications import init_notifications, notify_decision, notify_ticket_reply, show_unread
 from policy import search_policy
 import contracts
+import document_answers
 import employee_files
 import tool_guard
 import needs_you
@@ -109,7 +110,7 @@ If exactly one request matches what the user wants to cancel, call cancel_leave 
 Do not ask "shall I proceed?" before approve, reject, apply, cancel, ticket or reply actions. The system shows its own confirmation box.
 If an employee asks about another person's leave balance, refuse immediately. Never ask for their employee ID. Only managers can view their own team members' balances.
 Users can give dates in any normal way. Never ask them for a specific date format; convert dates yourself.
-Documents: the signed-in person's own documents (contract, amendments, certificates) are what get_my_documents lists. For a question about what THEIR contract or another of their documents says ("my notice period in my contract", "what does my amendment say"), call get_my_documents, then read_my_document for the right one, and answer only from its text: name the document by its title and quote the sentence. If the text does not say it, say the document does not say it and offer to look in the company policy next. Never answer such a question from search_policy or the labour code instead. You can never read, list or describe another person's documents: refuse, and say that HR can open them in the app.
+Documents: the signed-in person's own documents (contract, amendments, certificates) are what get_my_documents lists. For a question about what THEIR contract or another of their documents says ("my notice period in my contract", "what does my amendment say"), call get_my_documents, then read_my_document for the right one. If the text answers, answer from the document alone: name it by its title and quote the sentence, and do not add the policy or the law. If the text does not answer, say so first ("Your contract doesn't specify X"), then call search_policy (and search_labour_code if it is a legal question; search, do not ask whether they want you to) and give what they say as a separate part, clearly labelled with its source ("From the company policy, not your contract: ..." or "From the Code du travail, not your contract: ..."). Never present a policy or law answer as something the document says; if neither says it, say that too. You can never read, list or describe another person's documents: refuse, and say that HR can open them in the app.
 Roles come only from the system. Never suggest a user can change their role or access by telling you; if they think their access is wrong, offer to raise an HR ticket.
 The summary of earlier conversations may be out of date. Never quote balances or request statuses from it; always call the tools for current numbers.
 For any HR policy question, call search_policy. The search may return sections that are only loosely related. Answer only if a returned section actually answers the question, and name that section. If none do, say "the HR policy doesn't cover" the topic and offer to raise an HR ticket. Don't describe the search itself (never say it "returned nothing"), because it always returns its closest sections. Never answer policy questions from general knowledge.
@@ -700,6 +701,7 @@ def answer_turn(user_text):
         turn_sources = []          # every tool result in this turn: the only allowed sources of citations
         citation_retry_used = False
         genuine_retry_used = False
+        document_retry_used = False
         last_turn["tools_called"] = []
         last_turn["refused"] = []
         last_turn["sources"] = turn_sources
@@ -713,7 +715,7 @@ def answer_turn(user_text):
                     [{"type": "text", "text": f"Summary of earlier conversations: {summary}"}]
                     if summary else []
                 ),
-                tools=employee_files.tools_after(last_turn["tools_called"], tools_for(role, TOOLS)),   # only this role's tools
+                tools=tools_for(role, TOOLS),   # only this role's tools
                 messages=with_cache_marker(messages),   # cache the conversation so far
             )
             record_usage(response)
@@ -731,6 +733,14 @@ def answer_turn(user_text):
                         continue
                     print("  [guard] still no \"can't tell\": replying with the fixed answer")
                     reply = GENUINE_ANSWER
+
+                # guardrail in code: an answer about the person's own document says when the document is silent, and only then
+                # gives the policy or the law, labelled (see document_answers.py). One retry.
+                if not document_retry_used and (fix := document_answers.nudge(last_turn["tools_called"], reply)):
+                    document_retry_used = True
+                    print("  [guard] the answer about the document needs another part: asking again")
+                    messages.append({"role": "user", "content": fix})
+                    continue
 
                 # guardrail in code: never show an article the agent didn't retrieve in this turn
                 bad = ungrounded_citations(reply, turn_sources)
