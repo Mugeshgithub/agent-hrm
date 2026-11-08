@@ -30,7 +30,7 @@ import welcome
 from tracing import observe, propagate_attributes
 from demo_data import sample_contract
 from eval_retry import run_with_retry, retry_report
-from tools import apply_leave, decide_leave, create_hr_ticket, count_working_days, count_ouvrable_days
+from tools import apply_leave, decide_leave, create_hr_ticket, count_working_days, count_ouvrable_days, days_for, holidays_of
 
 # tests use their own database, never the real hr.db
 db.DB_PATH = "test_hr.db"
@@ -229,6 +229,48 @@ def run_agent(user_text, test_name="", session_role=None):
 
 
 # ---------- setup functions ----------
+
+def any_form_of(d):
+    # a date as people (and the model) write it: "17 November", "17 Nov", "Nov 17th", "November 16-17", "16-17 November",
+    # "Tue 16 - Wed 17 November", or 2026-11-17
+    full, short = d.strftime("%B"), d.strftime("%b")
+    month = rf"(?:{full}|{short})"
+    day = rf"{d.day}(?:st|nd|rd|th)?\b"
+    dash = r"(?:\s*[-\u2013\u2014]\s*|\s+(?:to|and|until|through)\s+)"        # 16-17, 16 to 17, 16th and 17th
+    return "(?:" + "|".join([
+        rf"\b{day}[^.\n]{{0,6}}\b{month}\b",                                  # 17 November
+        rf"\b{month}\.?\s+{day}",                                              # November 17th
+        rf"\b{month}\.?\s+\d{{1,2}}{dash}{day}",                               # November 16-17 (the later day)
+        rf"\b{day}{dash}(?:[A-Za-z]+\.?\s+)?\d{{1,2}}(?:st|nd|rd|th)?\s+(?:of\s+)?{month}",   # 17-18 November, 17 - Wed 18 November (the earlier day)
+        rf"\b\d{{1,2}}(?:st|nd|rd|th)?{dash}{day}\s+(?:of\s+)?{month}",                    # 16-17 November, 16th and 17th of November (the later day)
+        d.isoformat()]) + ")"
+
+
+def setup_emma_two_working_days_request():
+    # Emma asks for two working days in a row, picked so that no public holiday falls in them: with a holiday inside, the app counts
+    # fewer days and the reply can legitimately talk about "1 day" instead of the two dates
+    for week in (1, 2, 3):
+        for weekday in range(0, 4):
+            start, end = day(week, weekday), day(week, weekday + 1)
+            if days_for("casual", start, end, holidays_of("E001")) == 2:
+                apply_leave("E001", "casual", iso(start), iso(end))
+                return
+
+
+def pending_request_facts(reply):
+    # the facts of the reply, checked against the database: Emma, and both dates of her pending request
+    conn = db.get_conn()
+    row = conn.execute("SELECT start_date, end_date FROM leave_requests WHERE employee_id = 'E001' AND status = ?",
+                       ("pending_manager_approval",)).fetchone()
+    conn.close()
+    if row is None:
+        return ["there is no pending request to check the reply against"]
+    problems = [] if re.search(r"(?i)emma", reply) else ["the reply does not name Emma"]
+    for label, iso_date in (("start", row[0]), ("end", row[1])):
+        if not re.search(any_form_of(date.fromisoformat(iso_date)), reply):
+            problems.append(f"the reply does not give the {label} date ({iso_date})")
+    return problems
+
 
 def setup_priya_pending():
     # Emma has one pending 2-day request waiting for Lucas
@@ -568,11 +610,14 @@ TEST_CASES = [
         "name": "manager gets the right tool for pending requests",
         "user": "M001",
         "auto_confirm": False,
-        "setup": setup_priya_pending,
+        "setup": setup_emma_two_working_days_request,
         "input": "Show me any pending requests.",
-        "must_call": ["get_pending_requests"],
+        # either tool lists the team's pending requests (get_needs_attention is the whole inbox): what matters is that the reply is
+        # right, so its facts are checked against the database: Emma, and both dates of her request. His OWN requests (the other
+        # tool) would be the wrong list.
+        "must_call_one_of": ["get_pending_requests", "get_needs_attention"],
         "must_not_call": ["get_my_requests"],
-        "reply_must_match": r"(?i)emma",
+        "reply_check": pending_request_facts,
         "expected_requests": 1,
     },
     {
@@ -1212,6 +1257,8 @@ def attempt(case):
     for tool in case.get("must_call", []):
         if tool not in tools_called:
             problems.append(f"did not call {tool}")
+    if case.get("must_call_one_of") and not any(t in tools_called for t in case["must_call_one_of"]):
+        problems.append(f"did not call any of {', '.join(case['must_call_one_of'])}")
     for tool in case.get("must_not_call", []):
         if tool in tools_called:
             problems.append(f"wrongly called {tool}")
@@ -1219,6 +1266,8 @@ def attempt(case):
         problems.append("reply did not match expected wording")
     if "reply_must_not_match" in case and re.search(case["reply_must_not_match"], reply):
         problems.append("reply contains something it must not")
+    if "reply_check" in case:                      # a function that checks the reply's facts against the database
+        problems += case["reply_check"](reply)
     if "expected_requests" in case:
         n = count_requests()
         if n != case["expected_requests"]:
@@ -1238,12 +1287,12 @@ def attempt(case):
     # send the result to Langfuse: passed = 1 or 0, with the reasons as a comment
     print("trace id:", trace_id)
     tracing.score_trace(trace_id, passed=not problems, comment=", ".join(problems))
-    return problems, {"reply": reply, "tools": tools_called}
+    return problems, {"reply": reply, "tools": tools_called, "refused": list(agent.last_turn["refused"])}
 
 
 def show_failure(label, name, problems, info):
     print(f"{label} {name}: {', '.join(problems)}")
-    print(f"     tools: {info['tools']}")
+    print(f"     tools: {info['tools']}" + (f"   (refused by the code, not counted: {info['refused']})" if info.get("refused") else ""))
     print(f"     reply: {info['reply']}\n")
 
 

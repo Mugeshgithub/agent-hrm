@@ -9,6 +9,7 @@ import contracts
 import documents
 import employee_files
 import pdf_text
+import tool_guard
 import tools
 from eval_retry import MAX_RETRIED, retry_report, run_with_retry
 from judge_parse import verdict
@@ -683,6 +684,21 @@ def after_a_document_has_been_read_the_policy_and_law_searches_are_not_offered_f
     after = names(["get_my_documents", "read_my_document"])
     assert after == ["get_my_documents", "read_my_document", "get_leave_balance"]                                  # the document is the only source
     assert employee_files.DOCUMENT_ONLY_BLOCKS == {"search_policy", "search_labour_code"} and len(tools) == 5      # the list itself is not changed
+
+
+@test
+def a_call_the_code_refuses_is_recognised_so_it_is_not_counted_as_called():
+    refusal = tool_guard.refusal
+    assert refusal("employee", "get_leave_balance", []) is None and refusal("manager", "decide_leave", []) is None
+    assert refusal("employee", "decide_leave", []) == {"error": "That action isn't available for your role."}      # a role may not
+    assert refusal("employee", "reply_to_ticket", [])["error"].startswith("That action isn't available") and refusal("hr", "decide_leave", [])
+    assert refusal("new_hire", "get_leave_balance", [])["error"].startswith("That action isn't available") and refusal("new_hire", "get_my_onboarding", []) is None
+    assert refusal("intern", "decide_leave", []) is not None and refusal("intern", "apply_leave", []) is None     # an unknown role: the smallest set
+    # an answer from the person's document: the policy and law searches are refused once the document has been read, and not before
+    assert refusal("employee", "search_policy", ["get_my_documents"]) is None and refusal("employee", "search_policy", []) is None
+    for tool in ("search_policy", "search_labour_code"):
+        assert "own document" in refusal("employee", tool, ["get_my_documents", "read_my_document"])["error"], tool
+    assert refusal("employee", "get_leave_balance", ["read_my_document"]) is None                                   # other tools are fine
 
 
 if __name__ == "__main__":
