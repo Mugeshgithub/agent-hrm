@@ -65,6 +65,27 @@ export default function NeedsYouPage() {
         </section>
       )}
 
+      {!!data?.new_applications?.length && (
+        <section aria-labelledby="applications" className="mb-6">
+          <h2 id="applications" className="mb-1 font-medium">New applications <span className="text-ink-soft font-normal">({data.new_applications.length})</span></h2>
+          <p className="mb-3 text-sm text-ink-soft">Someone has to look at each one and move it to the next stage. The app never rejects, ranks or scores anyone.</p>
+          <ul className="panel divide-y divide-rule">
+            {data.new_applications.map((a) => (
+              <li key={a.application_id} className="flex items-center justify-between gap-4 px-5 py-4">
+                <div className="flex items-center gap-3">
+                  <Avatar name={a.name} size={32} />
+                  <div>
+                    <p className="font-medium">{a.name}</p>
+                    <p className="text-sm text-ink-soft">Applied for {a.job_title}, {timestamp(a.applied_at)}</p>
+                  </div>
+                </div>
+                <Link href={`/recruitment/${a.job_id}`} className="btn-quiet shrink-0">Open</Link>
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
+
       {!!data?.contract_approvals?.length && (
         <section aria-labelledby="contracts" className="mb-6">
           <h2 id="contracts" className="mb-3 font-medium">Contracts to approve <span className="text-ink-soft font-normal">({data.contract_approvals.length})</span></h2>

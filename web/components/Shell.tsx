@@ -4,7 +4,7 @@ import { usePathname, useRouter } from "next/navigation";
 import { ReactNode, useEffect, useRef, useState } from "react";
 import useSWR, { mutate } from "swr";
 import {
-  Bell, BookOpen, CalendarCog, CalendarDays, CheckSquare, Contact, Home, Inbox, Mail, Menu, MessageCircleQuestion,
+  Bell, BookOpen, Briefcase, CalendarCog, CalendarDays, CheckSquare, Contact, Home, Inbox, Mail, Menu, MessageCircleQuestion,
   FileText, MessageSquare, Receipt, ShieldCheck, Sun, Users, X,
 } from "lucide-react";
 import { api, ApiError, fetcher } from "@/lib/api";
@@ -30,10 +30,12 @@ function navFor(me: Person, waiting: number, openTickets: number): { title: stri
   if (me.role === "manager") groups.push({ title: "My team", items: [
     { href: "/needs-you", label: "Needs you", icon: CheckSquare, badge: waiting },
     { href: "/team", label: "Team", icon: Users },
+    { href: "/recruitment", label: "Hiring", icon: Briefcase },
   ] });
   if (me.role === "hr") groups.push({ title: "HR", items: [
     { href: "/needs-you", label: "Needs you", icon: CheckSquare, badge: waiting },
     { href: "/inbox", label: "Request inbox", icon: Inbox, badge: openTickets },
+    { href: "/recruitment", label: "Recruitment", icon: Briefcase },
     { href: "/access-log", label: "Payslip access", icon: ShieldCheck },
     { href: "/leave-admin", label: "Leave settings", icon: CalendarCog },
     { href: "/outbox", label: "Outbox", icon: Mail },

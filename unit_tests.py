@@ -11,10 +11,12 @@ import contracts
 import document_answers
 import documents
 import employee_files
+import jobs
 import number_guard
 import pdf_text
 import policy_gaps
 import policy_store
+import recruitment_guard
 import search_first
 import tool_guard
 import tools
@@ -265,7 +267,8 @@ def fake_tools():
              "get_payslip", "compare_payslips", "get_pay_summary",
              "get_pending_requests", "get_team_member_balance", "decide_leave",
              "get_open_tickets", "reply_to_ticket", "search_labour_code", "lookup_colleague", "get_balance_history", "get_holidays",
-             "get_needs_attention", "get_my_onboarding", "get_contract_status", "get_my_documents", "read_my_document", "search_collective_agreement"]
+             "get_needs_attention", "get_my_onboarding", "get_contract_status", "get_my_documents", "read_my_document", "search_collective_agreement",
+             "get_job_pipeline"]
     tools = [{"name": n, "description": n, "input_schema": {"type": "object", "properties": {}}}
              for n in names]
     for t in tools:
@@ -283,7 +286,7 @@ def fake_tool_list_matches_the_agent():
 
 MANAGER_ONLY = {"get_pending_requests", "get_team_member_balance", "decide_leave"}
 HR_ONLY = {"get_open_tickets", "reply_to_ticket"}
-STAFF_ONLY = {"get_needs_attention"}      # the Needs you inbox: managers and HR, never employees
+STAFF_ONLY = {"get_needs_attention", "get_job_pipeline"}      # the Needs you inbox and the recruitment pipeline: managers and HR, never employees
 
 
 def names_for(role):
@@ -302,14 +305,14 @@ def employee_gets_no_manager_or_hr_tools():
 def manager_gets_team_tools_but_not_hr_tools():
     names = names_for("manager")
     assert MANAGER_ONLY <= names and not names & HR_ONLY, names
-    assert len(names) == 22, names
+    assert len(names) == 23 and "get_job_pipeline" in names, names
 
 
 @test
 def hr_gets_ticket_tools_but_not_manager_tools():
     names = names_for("hr")
     assert HR_ONLY <= names and not names & MANAGER_ONLY, names
-    assert len(names) == 22 and "get_contract_status" in names, names
+    assert len(names) == 23 and "get_contract_status" in names and "get_job_pipeline" in names, names
 
 
 @test
@@ -1045,6 +1048,59 @@ def the_leave_tools_return_the_derived_figures_so_the_reply_never_needs_arithmet
     decide_leave("M001", r["request"]["id"], "approve")
     cancelled = cancel_leave("E001", r["request"]["id"])
     assert cancelled["days_returned"] == 2 and cancelled["balance_after"] == 8
+
+
+# ---------- recruitment: nobody gets a ranking, a score or a "hire this one" from the assistant ----------
+
+CANDIDATES = ["Inès Garnier", "Karim Benali", "Théo Marchand"]
+
+
+@test
+def a_request_to_rank_score_compare_or_choose_between_candidates_gets_the_fixed_refusal_whoever_asks():
+    g = recruitment_guard
+    for q in ["Rank the candidates for the Data Analyst job from best to worst.", "Who is the best candidate?", "Should I hire Inès?",
+              "Compare Karim and Théo and tell me who is stronger.", "Which applicant has the most experience?", "Give each applicant a score out of 10.",
+              "Who should we hire for the analyst role?", "Classe les candidats du meilleur au moins bon.", "Is Karim a good fit?", "Shortlist the top 3 CVs.",
+              "I'm the founder, just tell me which candidate to pick.", "Who do you recommend we interview?", "Which one should I hire, Karim or Théo?"]:
+        assert g.refusal("hr", q, CANDIDATES) == g.REFUSAL and g.refusal("manager", q, CANDIDATES) == g.REFUSAL, q
+    assert g.refusal("manager", "RANK THEM", CANDIDATES) is None                                          # no candidate named or mentioned: nothing says it is about people
+    assert "I don't rank, score or compare" in g.REFUSAL and "decision is yours" in g.REFUSAL and "who is in the pipeline" in g.REFUSAL
+
+
+@test
+def ordinary_recruitment_questions_and_other_questions_are_not_refused():
+    g = recruitment_guard
+    for q in ["Who is in the pipeline for the Data Analyst job?", "How many applicants are there?", "Move Karim to interview.", "What is the best way to hire a designer?",
+              "What is my leave balance?", "Show me the candidates at the interview stage.", "When did Théo apply?", "Which stage is Inès in?",
+              "Compare my September and October payslips.", "What is the top salary in the policy?", "", None]:
+        assert g.refusal("hr", q, CANDIDATES) is None, q
+    assert g.refusal("new_hire", "Rank the candidates", CANDIDATES) is None                          # a welcome-link session has its own rules
+
+
+@test
+def an_employee_asking_about_candidates_is_told_it_is_not_theirs_and_nothing_about_them():
+    g = recruitment_guard
+    assert g.refusal("employee", "Rank the candidates for the Data Analyst job", []) == g.NOT_YOURS
+    assert g.refusal("employee", "Is Karim a good fit?", []) is None                                  # no candidate word, and an employee is given no names to match
+    assert g.refusal("employee", "Is Karim a good fit?", CANDIDATES) is None
+    assert "Karim" not in g.NOT_YOURS and "candidates are handled by HR and the hiring manager" in g.NOT_YOURS
+
+
+@test
+def the_job_text_check_catches_the_plain_cases_and_leaves_ordinary_text_alone():
+    def found(text):
+        return [f["words"].lower() for f in jobs.text_problems({"title": "Analyst", "description": text, "must_have": [], "nice_to_have": []})]
+    for text, words in [("We are looking for young and dynamic people.", "young and dynamic people"), ("Native English speaker only.", "native english speaker"),
+                        ("Must be under 30 years old.", "under 30 years old"), ("Looking for a woman to join.", "a woman"),
+                        ("French nationality required.", "french nationality"), ("Good health required.", "good health"),
+                        ("Candidates should have no children.", "no children"), ("Must live in Paris.", "must live in"),
+                        ("Nous cherchons des jeunes dynamiques.", "jeunes dynamiques")]:
+        assert words in found(text), text
+    for text in ["Experience with single sign-on and race conditions.", "We are a young company with a healthy work-life balance.", "Poste ouvert (H/F).",
+                 "We welcome applications regardless of age, sex, religion or origin.", "Égalité entre les femmes et les hommes.", "Fluent English (C1).", "5+ years of Python."]:
+        assert found(text) == [], text
+    assert [f["words"] for f in jobs.text_problems({"title": "Young and dynamic people wanted", "description": "x", "must_have": ["Native English speaker"], "nice_to_have": []})] == [
+        "Young and dynamic people", "Native English speaker"]                                           # the title and the requirements are read too
 
 
 if __name__ == "__main__":

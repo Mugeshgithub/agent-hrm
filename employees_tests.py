@@ -17,6 +17,7 @@ import collective_agreement
 import contracts
 import documents
 import employee_files
+import jobs
 import needs_you
 import onboarding
 import pdf_text
@@ -1584,6 +1585,214 @@ def the_paid_leave_window_the_leave_rules_use_follows_the_policy_text_hr_saves()
     assert tools.paid_policy_note(date(2030, 5, 20), date(2030, 5, 22)) == tools.paid_policy()[1]               # May is now outside the window
     assert tools.paid_policy_note(date(2030, 6, 3), date(2030, 6, 5)) is None
     assert tools.get_leave_balance("E001", "paid")["policy_note"] == tools.paid_policy()[1]
+
+
+# ---------- recruitment: jobs and the pipeline (jobs.py) ----------
+# The app informs and a person decides: only a person moves a candidate, "Not selected" always has a reason, nothing ranks anyone, and
+# only HR and the job's hiring manager see candidates.
+
+JOB = {"title": "Data Analyst", "team": "Engineering", "location": "Paris", "contract_type": "CDI", "hiring_manager_id": "M001",
+       "description": "Turn product data into decisions for the engineering team.", "must_have": ["2 years of data analysis", "SQL"],
+       "nice_to_have": ["dbt"]}
+
+
+def an_open_job(**changes):
+    fresh()
+    job = jobs.create_job("H001", {**JOB, **changes})
+    assert "error" not in job, job
+    done = jobs.set_status("H001", job["id"], "open")
+    assert done["status"] == "open", done
+    return job["id"]
+
+
+def a_candidate(job_id, name="Inès Garnier", email="ines@example.com", who="H001"):
+    c = jobs.add_candidate(who, job_id, {"name": name, "email": email})
+    assert "error" not in c, c
+    return c["id"]
+
+
+@test
+def hr_creates_any_job_a_manager_only_their_own_and_an_employee_none():
+    fresh()
+    job = jobs.create_job("H001", JOB)
+    assert job["status"] == "draft" and job["hiring_manager_id"] == "M001" and job["hiring_manager_name"] == "Lucas" and job["counts"]["applied"] == 0
+    assert job["must_have"] == ["2 years of data analysis", "SQL"] and job["can_open"] is True
+    own = jobs.create_job("M001", {**JOB, "hiring_manager_id": "C001"})                      # a manager cannot hire for someone else: they are the hiring manager
+    assert own["hiring_manager_id"] == "M001" and own["can_open"] is False
+    assert "Only HR and managers" in jobs.create_job("E001", JOB)["error"]
+    assert "hiring manager" in jobs.create_job("H001", {**JOB, "hiring_manager_id": "E001"})["error"]       # an employee is not a hiring manager
+    assert "hiring manager" in jobs.create_job("H001", {**JOB, "hiring_manager_id": None})["error"]
+
+
+@test
+def a_job_needs_its_fields_and_at_least_one_requirement():
+    fresh()
+    for change, word in [({"title": ""}, "title"), ({"team": " "}, "team"), ({"location": ""}, "location"), ({"description": ""}, "description"),
+                         ({"contract_type": "Freelance"}, "contract type"), ({"must_have": []}, "must-have"), ({"must_have": " \n "}, "must-have"),
+                         ({"must_have": ["x"] * 16}, "At most 15"), ({"title": "AB"}, "too short"), ({"title": "T" * 121}, "too long"),
+                         ({"salary_min": 40000}, "both ends"), ({"salary_min": 50000, "salary_max": 40000}, "not valid"), ({"salary_min": "a", "salary_max": "b"}, "numbers")]:
+        assert word in jobs.create_job("H001", {**JOB, **change})["error"], change
+    job = jobs.create_job("H001", {**JOB, "must_have": "- SQL\n* Python\n\n3 years", "salary_min": "42000", "salary_max": 52000.0})
+    assert job["must_have"] == ["SQL", "Python", "3 years"] and (job["salary_min"], job["salary_max"]) == (42000, 52000)       # one per line, a list marker is dropped
+
+
+@test
+def only_hr_opens_a_job_a_manager_can_close_their_own_and_closing_rejects_nobody():
+    fresh()
+    job = jobs.create_job("M001", JOB)["id"]
+    assert "Only HR opens" in jobs.set_status("M001", job, "open")["error"]                         # opening makes it public
+    assert jobs.set_status("H001", job, "open")["status"] == "open"
+    assert "already open" in jobs.set_status("H001", job, "open")["error"]
+    a_candidate(job)
+    closed = jobs.set_status("M001", job, "closed")
+    assert closed["status"] == "closed" and closed["still_waiting"] == 1                              # one person is still waiting for a human: nothing was rejected
+    assert jobs.pipeline("H001", job)["candidates"][0]["stage"] == "applied"
+    assert "Only HR opens" in jobs.set_status("M001", job, "open")["error"] and jobs.set_status("H001", job, "open")["status"] == "open"
+    assert "can be opened or closed" in jobs.set_status("H001", job, "draft")["error"]
+    assert [e["event"] for e in jobs.pipeline("H001", job)["events"]] == ["open", "closed", "open", "created"]               # the log, newest first
+
+
+@test
+def a_job_text_that_refers_to_a_protected_characteristic_cannot_be_opened():
+    fresh()
+    job = jobs.create_job("H001", {**JOB, "description": "We are looking for young and dynamic people. Native English speaker only."})
+    assert {w["about"].split(" (")[0] for w in job["warnings"]} == {"age", "the language a person speaks from birth"}      # the form shows these when it saves
+    refused = jobs.set_status("H001", job["id"], "open")["error"]
+    assert "young and dynamic people" in refused and "L1132-1" in refused and "L5321-2" in refused and jobs.pipeline("H001", job["id"])["job"]["status"] == "draft"
+    fixed = jobs.update_job("H001", job["id"], {"description": "Turn product data into decisions. English at C1 level."})
+    assert fixed["warnings"] == [] and jobs.set_status("H001", job["id"], "open")["status"] == "open"
+    assert jobs.text_problems({"title": "Dev", "description": "Single sign-on and race conditions. Poste H/F. We welcome all, regardless of age or religion.", "must_have": []}) == []
+
+
+@test
+def a_job_can_be_edited_by_hr_or_its_own_manager_and_the_change_is_logged():
+    fresh()
+    job = jobs.create_job("M001", JOB)["id"]
+    assert jobs.update_job("M001", job, {"location": "Lyon"})["location"] == "Lyon"                 # only what was sent changes
+    assert jobs.update_job("M001", job, {"location": "Lyon"})["title"] == "Data Analyst"
+    assert jobs.update_job("H001", job, {"hiring_manager_id": "C001"})["hiring_manager_id"] == "C001"
+    assert jobs.update_job("M001", job, {"title": "x"})["error"] == jobs.NOT_FOUND                    # no longer their job
+    log = jobs.pipeline("H001", job)["events"]
+    assert [(e["event"], e["actor_name"]) for e in log][:2] == [("edited", "Narmadha"), ("edited", "Lucas")] and log[0]["detail"] == "hiring manager"
+    jobs.set_status("H001", job, "open")
+    jobs.set_status("H001", job, "closed")
+    assert "closed" in jobs.update_job("C001", job, {"title": "Senior Data Analyst"})["error"]        # a manager cannot change a closed job
+    assert jobs.update_job("H001", job, {"title": "Senior Data Analyst"})["title"] == "Senior Data Analyst"
+
+
+@test
+def hr_sees_every_job_a_manager_their_own_and_an_employee_nothing():
+    fresh()
+    mine = jobs.create_job("M001", JOB)["id"]
+    other = jobs.create_job("C001", {**JOB, "title": "Product Designer"})["id"]
+    assert {j["id"] for j in jobs.list_jobs("H001")} == {mine, other} and [j["id"] for j in jobs.list_jobs("M001")] == [mine]
+    assert "for HR and hiring managers" in jobs.list_jobs("E001")["error"]
+    for who in ("M001", "E001", "E002"):
+        assert jobs.pipeline(who, other) == {"error": jobs.NOT_FOUND}                                # the same answer as a job that does not exist
+    assert jobs.pipeline("H001", 999) == {"error": jobs.NOT_FOUND} and jobs.pipeline("M001", mine)["job"]["id"] == mine
+    assert jobs.hiring_managers("M001")["error"] and {m["id"] for m in jobs.hiring_managers("H001")} == {"C001", "M001", "H001"}
+
+
+@test
+def a_candidate_is_added_to_an_open_job_once_by_hr_or_its_hiring_manager():
+    fresh()
+    job = jobs.create_job("M001", JOB)["id"]
+    assert "open" in jobs.add_candidate("H001", job, {"name": "Inès Garnier", "email": "ines@example.com"})["error"]        # a draft has no candidates
+    jobs.set_status("H001", job, "open")
+    c = jobs.add_candidate("M001", job, {"name": " Inès Garnier ", "email": "Ines@Example.com", "phone": "+33 6 12 34 56 78"})
+    assert c["name"] == "Inès Garnier" and c["email"] == "ines@example.com" and c["stage"] == "applied" and c["source"] == "added by HR"
+    assert "already in this job" in jobs.add_candidate("H001", job, {"name": "Ines G", "email": "INES@example.com"})["error"]
+    assert "valid email" in jobs.add_candidate("H001", job, {"name": "Karim Benali", "email": "karim"})["error"]
+    assert "name" in jobs.add_candidate("H001", job, {"name": "K", "email": "k@example.com"})["error"]
+    other = jobs.create_job("C001", {**JOB, "title": "Product Designer"})["id"]
+    jobs.set_status("H001", other, "open")
+    assert jobs.add_candidate("M001", other, {"name": "Théo Marchand", "email": "theo@example.com"}) == {"error": jobs.NOT_FOUND}       # not their job
+    assert jobs.add_candidate("E001", job, {"name": "Théo Marchand", "email": "theo@example.com"}) == {"error": jobs.NOT_FOUND}
+
+
+@test
+def only_a_person_moves_a_candidate_every_move_is_logged_and_the_reasons_are_required():
+    job = an_open_job()
+    c = a_candidate(job)
+    moved = jobs.move("M001", c, "screening")
+    assert moved["stage"] == "screening" and moved["days_in_stage"] == 0
+    assert "already in Screening" in jobs.move("H001", c, "screening")["error"] and "Unknown stage" in jobs.move("H001", c, "winner")["error"]
+    assert "reason" in jobs.move("H001", c, "not_selected")["error"] and "reason" in jobs.move("H001", c, "not_selected", "  ")["error"]
+    assert "Offer first" in jobs.move("H001", c, "hired")["error"]                                    # hired comes after an offer
+    jobs.move("H001", c, "interview")
+    jobs.move("H001", c, "offer")
+    assert jobs.move("H001", c, "hired")["stage"] == "hired" and "hired can't be moved" in jobs.move("H001", c, "interview")["error"]       # final
+    log = jobs.history("H001", c)
+    assert [(e["event"], e["from_stage"], e["to_stage"], e["actor_name"]) for e in log] == [
+        ("added", None, "applied", "Narmadha"), ("moved", "applied", "screening", "Lucas"), ("moved", "screening", "interview", "Narmadha"),
+        ("moved", "interview", "offer", "Narmadha"), ("moved", "offer", "hired", "Narmadha")]
+    other = a_candidate(job, "Karim Benali", "karim@example.com")
+    assert jobs.move("H001", other, "not_selected", "Does not have the SQL experience the job needs")["stage"] == "not_selected"
+    assert jobs.history("H001", other)[-1]["reason"].startswith("Does not have") and jobs.history("H001", other)[-1]["to_stage"] == "not_selected"
+    assert "reason" in jobs.move("H001", other, "screening")["error"] and jobs.move("H001", other, "screening", "New information")["stage"] == "screening"     # back needs a reason too
+
+
+@test
+def someone_who_does_not_hire_for_the_job_cannot_move_or_read_a_candidate():
+    job = an_open_job()
+    c = a_candidate(job)
+    for who in ("C001", "E001", "E002"):
+        assert jobs.move(who, c, "screening") == {"error": "No such candidate."}, who
+        assert jobs.history(who, c) == {"error": "No such candidate."}
+    assert jobs.move("H001", 999, "screening") == {"error": "No such candidate."}
+    assert jobs.pipeline("H001", job)["candidates"][0]["stage"] == "applied"
+
+
+@test
+def candidates_are_listed_in_the_order_they_applied_and_nothing_ranks_anyone():
+    job = an_open_job()
+    ids = [a_candidate(job, n, f"{n[0].lower()}@example.com") for n in ("Zoé Petit", "Alex Roy", "Maya Dubois")]
+    jobs.move("H001", ids[1], "screening")
+    jobs.move("H001", ids[2], "screening")
+    jobs.move("H001", ids[2], "interview")
+    shown = jobs.pipeline("H001", job)
+    assert [c["name"] for c in shown["candidates"]] == ["Zoé Petit", "Alex Roy", "Maya Dubois"]       # the order they applied, not by name and not by stage
+    text = str(shown).lower() + str(jobs.for_assistant("H001", "Data Analyst")).lower() + str(jobs.list_jobs("H001")).lower()
+    for word in ("score", "rank", "rating", "best", "recommend", "fit"):
+        assert word not in text.replace("ranks anyone", "").replace("does not rank or score anyone", ""), word
+
+
+@test
+def new_applications_wait_for_hr_and_the_hiring_manager_only_until_a_person_moves_them():
+    job = an_open_job()
+    other = jobs.create_job("C001", {**JOB, "title": "Product Designer"})["id"]
+    jobs.set_status("H001", other, "open")
+    a = a_candidate(job)
+    b = a_candidate(other, "Théo Marchand", "theo@example.com")
+    assert [x["name"] for x in jobs.new_applications("H001")] == ["Inès Garnier", "Théo Marchand"]
+    assert [x["name"] for x in jobs.new_applications("M001")] == ["Inès Garnier"] and [x["name"] for x in jobs.new_applications("C001")] == ["Théo Marchand"]
+    assert jobs.new_applications("E001") == []
+    assert needs_you.waiting_count("H001") == 2 and needs_you.waiting_count("M001") == 1 and needs_you.waiting_count("C001") == 1
+    box = needs_you.inbox("M001")
+    assert [x["job_title"] for x in box["new_applications"]] == ["Data Analyst"] and box["waiting_on_you"] == 1
+    jobs.move("M001", a, "screening")
+    assert jobs.new_applications("M001") == [] and needs_you.waiting_count("M001") == 0 and needs_you.waiting_count("H001") == 1
+    assert needs_you.for_assistant("H001")["new_applications"] == [{"candidate": "Théo Marchand", "job": "Product Designer", "applied_on": date.today().isoformat()}]
+    assert b
+
+
+@test
+def the_assistant_reads_names_stages_and_dates_only_and_only_for_jobs_the_person_may_see():
+    job = an_open_job()
+    a_candidate(job)
+    a_candidate(job, "Karim Benali", "karim@example.com")
+    jobs.move("H001", jobs.pipeline("H001", job)["candidates"][1]["id"], "interview")
+    many = jobs.for_assistant("H001")
+    assert many["jobs"][0]["candidates_by_stage"] == {"Applied": 1, "Interview": 1} and "does not rank" in many["note"]
+    one = jobs.for_assistant("M001", "data analyst")["jobs"][0]
+    assert [(c["name"], c["stage"]) for c in one["candidates"]] == [("Inès Garnier", "Applied"), ("Karim Benali", "Interview")]
+    assert set(one["candidates"][0]) == {"name", "stage", "applied_on", "days_in_stage"}              # no email, no phone, no notes
+    assert jobs.for_assistant("M001", str(job))["jobs"][0]["job_id"] == job
+    assert "No job of that name" in jobs.for_assistant("C001", "Data Analyst")["error"]              # not their job
+    assert "No job of that name" in jobs.for_assistant("H001", "Astronaut")["error"]
+    for who in ("E001", "E002", "E003"):
+        assert "for HR and hiring managers" in jobs.for_assistant(who)["error"] and jobs.candidate_names(who) == []
+    assert sorted(jobs.candidate_names("H001")) == ["Inès Garnier", "Karim Benali"] and jobs.candidate_names("C001") == []
 
 
 if __name__ == "__main__":

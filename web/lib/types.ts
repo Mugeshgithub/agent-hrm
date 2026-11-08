@@ -149,7 +149,7 @@ export type PolicyGap = { id: number; topic: string; asks: number; examples: str
 
 export type NeedsYou = {
   role: Role; waiting_on_you: number; leave_requests: Pending[]; onboarding_steps: WaitingStep[]; document_flags: DocumentFlag[]; contract_approvals: ContractApproval[];
-  policy_gaps: PolicyGap[];
+  policy_gaps: PolicyGap[]; new_applications: NewApplication[];
   hr_requests: { id: number; ticket: string; employee_id: string; employee_name: string; question: string; summary: string; created_at: string }[];
   paid_leave_warnings: { employee_id: string; name: string; paid_days: number; message: string }[];
 };
@@ -171,3 +171,26 @@ export type MyHolidays = {
   plan: { id: number; name: string; description: string }; year: number; years: string[]; holidays: Holiday[];
   floaters: { quota: number; used: number; left: number };
 };
+
+// recruitment (jobs.py): a job post and the people who applied. Candidates are listed in the order they applied: nothing here ranks anyone.
+export type JobStage = "applied" | "screening" | "interview" | "offer" | "hired" | "not_selected";
+export type Job = {
+  id: number; title: string; team: string; location: string; contract_type: string; description: string;
+  must_have: string[]; nice_to_have: string[]; salary_min: number | null; salary_max: number | null;
+  hiring_manager_id: string; hiring_manager_name: string | null; status: "draft" | "open" | "closed";
+  created_at: string; opened_at: string | null; closed_at: string | null;
+  can_open: boolean; can_edit: boolean; warnings: { words: string; about: string }[];   // warnings: words in the text that refer to a protected characteristic
+  counts: Record<JobStage, number>; new: number; still_waiting?: number;
+};
+export type Candidate = {
+  id: number; name: string; stage: JobStage; applied_at: string; stage_changed_at: string; days_in_stage: number; source: string;
+  email: string; phone: string;
+};
+export type Pipeline = {
+  job: Job; stages: { key: JobStage; label: string }[]; candidates: Candidate[];
+  events: { event: string; detail: string; created_at: string; actor_name: string | null }[];
+};
+export type CandidateEvent = {
+  event: "added" | "moved"; from_stage: JobStage | null; to_stage: JobStage | null; reason: string; created_at: string; actor_name: string | null;
+};
+export type NewApplication = { application_id: number; name: string; applied_at: string; job_id: number; job_title: string };
