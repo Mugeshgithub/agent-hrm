@@ -54,6 +54,8 @@ def init_all(reset=False):
     if reset:   # balances start again, so their history does too
         conn = db.get_conn()
         with conn:
+            conn.execute("DELETE FROM candidate_erasures")
+            conn.execute("DELETE FROM recruitment_settings")
             conn.execute("DELETE FROM application_events")
             conn.execute("DELETE FROM applications")
             conn.execute("DELETE FROM job_events")

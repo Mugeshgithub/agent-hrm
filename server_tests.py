@@ -12,6 +12,7 @@ import db
 db.DB_PATH = os.environ["HRM_DB"]
 
 from fastapi.testclient import TestClient
+import base64
 import demo_data
 import documents
 import employee_files
@@ -970,6 +971,124 @@ def a_new_application_waits_in_needs_you_for_hr_and_the_hiring_manager_and_a_job
     assert "Nora Vidal" not in str(mugesh.get("/api/needs-you").json())
     lucas.post(f"/api/recruitment/candidates/{cid}/move", json={"stage": "screening"})
     assert "Nora Vidal" not in str(lucas.get("/api/needs-you").json())
+
+
+# ---------- the careers page: public, no login ----------
+
+def a_cv_pdf():
+    return pdf_text.make_pdf([("h1", "Nora Vidal"), ("p", "QA analyst. Four years of testing.")])
+
+
+def apply_form(**changes):
+    return {"name": "Nora Vidal", "email": "nora.vidal@example.com", "phone": "", "cover_letter": "", "consent": True, "talent_pool": False,
+            "cv": base64.b64encode(a_cv_pdf()).decode(), **changes}
+
+
+def an_open_careers_job(hr, title):
+    body = {"title": title, "team": "Engineering", "location": "Paris", "contract_type": "CDI", "description": "Test what we ship, from the idea to the release.",
+            "must_have": ["Testing experience"], "hiring_manager_id": "M001"}
+    job = hr.post("/api/recruitment/jobs", json=body).json()["id"]
+    assert hr.post(f"/api/recruitment/jobs/{job}/status", json={"status": "open"}).status_code == 200
+    return job
+
+
+def fresh_throttles():
+    server.APPLY_BY_ADDRESS.seen.clear()
+    server.APPLY_BY_EMAIL.seen.clear()
+
+
+@test
+def anyone_can_read_an_open_job_and_nothing_else_without_logging_in():
+    fresh_throttles()
+    hr, public = as_person("H001"), TestClient(server.app)                                                  # a fresh client: no session at all
+    job = an_open_careers_job(hr, "Careers Reader")
+    draft = hr.post("/api/recruitment/jobs", json={"title": "Secret draft", "team": "Engineering", "location": "Paris", "contract_type": "CDI",
+                                                   "description": "Not public yet.", "must_have": ["x"], "hiring_manager_id": "M001"}).json()["id"]
+    listed = public.get("/api/careers/jobs")
+    assert listed.status_code == 200 and "Careers Reader" in [j["title"] for j in listed.json()] and "Secret draft" not in str(listed.json())
+    shown = public.get(f"/api/careers/jobs/{job}").json()
+    assert shown["job"]["title"] == "Careers Reader" and "hiring_manager" not in str(shown["job"]) and "M001" not in str(shown["job"])
+    assert [x["title"] for x in shown["notice"]["sections"]][3] == "How long we keep it" and "talent-pool box" in str(shown["notice"])
+    assert public.get(f"/api/careers/jobs/{draft}").status_code == 404 and public.get("/api/careers/jobs/99999").status_code == 404
+    for path in ("/api/recruitment/jobs", f"/api/recruitment/jobs/{job}", "/api/hr/recruitment/settings", "/api/recruitment/candidates/1/cv", "/api/me"):
+        assert public.get(path).status_code == 401, path                                                    # the recruiters' side stays closed
+
+
+@test
+def a_candidate_applies_with_a_cv_gets_a_private_link_and_can_follow_and_withdraw():
+    fresh_throttles()
+    hr, lucas, public = as_person("H001"), as_person("M001"), TestClient(server.app)
+    job = an_open_careers_job(hr, "Apply Here")
+    sent = public.post(f"/api/careers/jobs/{job}/apply", json=apply_form(talent_pool=True))
+    assert sent.status_code == 200 and "/careers/track/" in sent.json()["link"]
+    token = sent.json()["link"].rsplit("/", 1)[1]
+    seen = public.get(f"/api/careers/track/{token}").json()
+    assert (seen["job_title"], seen["stage_label"], seen["talent_pool"], seen["name"]) == ("Apply Here", "Received", True, "Nora Vidal")
+    cid = lucas.get(f"/api/recruitment/jobs/{job}").json()["candidates"][0]["id"]                           # the hiring manager sees it, with the CV and the source
+    candidate = lucas.get(f"/api/recruitment/jobs/{job}").json()["candidates"][0]
+    assert candidate["source"] == "careers page" and candidate["has_cv"] is True and "Nora Vidal" in [a["name"] for a in lucas.get("/api/needs-you").json()["new_applications"]]
+    cv = lucas.get(f"/api/recruitment/candidates/{cid}/cv")
+    assert cv.status_code == 200 and cv.content == a_cv_pdf() and cv.headers["content-disposition"].startswith("attachment") and cv.headers["x-content-type-options"] == "nosniff"
+    assert as_person("E001").get(f"/api/recruitment/candidates/{cid}/cv").status_code == 403 and as_person("C001").get(f"/api/recruitment/candidates/{cid}/cv").status_code == 404
+    lucas.post(f"/api/recruitment/candidates/{cid}/move", json={"stage": "screening"})
+    assert public.get(f"/api/careers/track/{token}").json()["stage_label"] == "Being reviewed"
+    assert public.post(f"/api/careers/track/{token}/leave-talent-pool").json()["talent_pool"] is False
+    assert public.post(f"/api/careers/track/{token}/withdraw").json() == {"erased": True}
+    assert public.get(f"/api/careers/track/{token}").status_code == 404 and lucas.get(f"/api/recruitment/jobs/{job}").json()["candidates"] == []
+    assert public.get("/api/careers/track/not-a-link").status_code == 404 and public.post("/api/careers/track/not-a-link/withdraw").status_code == 404
+
+
+@test
+def an_application_that_is_wrong_is_refused_with_the_reason_and_saves_nothing():
+    fresh_throttles()
+    hr, public = as_person("H001"), TestClient(server.app)
+    job = an_open_careers_job(hr, "Strict Job")
+    before = len(os.listdir(documents.files_dir()))
+    for change, status, word in [({"consent": False}, 400, "Tick the box"), ({"email": "nobody"}, 400, "valid email"), ({"name": ""}, 400, "Give your name"),
+                                 ({"cv": ""}, 400, "Attach your CV"), ({"cv": "!!not base64!!"}, 400, "Attach your CV"),
+                                 ({"cv": base64.b64encode(b"MZ a renamed program").decode()}, 400, "must be a PDF"),
+                                 ({"cv": base64.b64encode(a_cv_pdf() + b"/JavaScript").decode()}, 400, "script")]:
+        fresh_throttles()
+        sent = public.post(f"/api/careers/jobs/{job}/apply", json=apply_form(**change))
+        assert sent.status_code == status and word in sent.json()["detail"], (change, sent.text)
+    fresh_throttles()
+    assert public.post(f"/api/careers/jobs/{job}/apply", content=b"not json").status_code == 400
+    assert public.post("/api/careers/jobs/99999/apply", json=apply_form()).status_code == 404
+    assert public.post(f"/api/careers/jobs/{job}/apply", json=apply_form(), headers={"content-length": str(server.APPLY_LIMIT + 1)}).status_code == 413
+    assert hr.get(f"/api/recruitment/jobs/{job}").json()["candidates"] == [] and len(os.listdir(documents.files_dir())) == before
+
+
+@test
+def applying_is_rate_limited_per_address_and_per_email():
+    fresh_throttles()
+    hr, public = as_person("H001"), TestClient(server.app)
+    job = an_open_careers_job(hr, "Busy Job")
+    for i in range(3):
+        assert public.post(f"/api/careers/jobs/{job}/apply", json=apply_form()).status_code == 200            # the same person, three times an hour
+    assert public.post(f"/api/careers/jobs/{job}/apply", json=apply_form()).status_code == 429
+    for i in range(6):                                                                                        # the refused try above counted too: 3 + 1 + 6 = 10 from this address
+        assert public.post(f"/api/careers/jobs/{job}/apply", json=apply_form(email=f"someone{i}@example.com")).status_code == 200
+    again = public.post(f"/api/careers/jobs/{job}/apply", json=apply_form(email="another@example.com"))
+    assert again.status_code == 429 and "Too many" in again.json()["detail"]                                  # ten from one address in an hour
+    server.APPLY_BY_ADDRESS.seen.clear()
+    assert public.post(f"/api/careers/jobs/{job}/apply", json=apply_form(email="another@example.com"), headers={"x-forwarded-for": "203.0.113.9, 10.0.0.1"}).status_code == 200
+
+
+@test
+def only_hr_changes_the_retention_runs_it_and_gives_a_new_link_and_it_never_goes_past_the_cnil_limit():
+    fresh_throttles()
+    hr, lucas, public = as_person("H001"), as_person("M001"), TestClient(server.app)
+    assert hr.get("/api/hr/recruitment/settings").json()["max_months"] == 24 and lucas.get("/api/hr/recruitment/settings").status_code == 403
+    assert hr.post("/api/hr/recruitment/settings", json={"retention_months": 36}).status_code == 400 and lucas.post("/api/hr/recruitment/settings", json={"retention_months": 6}).status_code == 403
+    assert hr.post("/api/hr/recruitment/settings", json={"retention_months": 12}).json()["retention_months"] == 12
+    assert hr.post("/api/hr/recruitment/settings", json={"retention_months": 24}).json()["retention_months"] == 24
+    assert lucas.post("/api/hr/recruitment/retention-run").status_code == 403 and hr.post("/api/hr/recruitment/retention-run").json()["on"] == date.today().isoformat()
+    job = an_open_careers_job(hr, "Link Job")
+    token = public.post(f"/api/careers/jobs/{job}/apply", json=apply_form(email="link.person@example.com")).json()["link"].rsplit("/", 1)[1]
+    cid = hr.get(f"/api/recruitment/jobs/{job}").json()["candidates"][0]["id"]
+    assert lucas.post(f"/api/recruitment/candidates/{cid}/tracking-link").status_code == 403
+    new = hr.post(f"/api/recruitment/candidates/{cid}/tracking-link").json()["link"].rsplit("/", 1)[1]
+    assert public.get(f"/api/careers/track/{token}").status_code == 404 and public.get(f"/api/careers/track/{new}").status_code == 200
 
 
 if __name__ == "__main__":
