@@ -1,6 +1,7 @@
 # employees.py: employee records. New hire, edit, offboard, and a change log.
 # Only HR can change records, and every rule is checked here.
 import re
+import sqlite3
 from datetime import date
 
 import db
@@ -9,8 +10,11 @@ from tools import PENDING, get_employee, balance_of
 
 ROLES = ("employee", "manager", "hr")
 CONTRACTS = ("CDI", "CDD", "Apprenticeship", "Internship")
+# the person's category (statut) in French labour law: what notice and trial periods, and many collective-agreement articles, depend on.
+# HR sets it (nothing is guessed from the job title); empty means HR has not set it.
+CATEGORIES = ("Non-cadre", "Agent de maîtrise", "Cadre")
 EMPLOYEE_FIELDS = {"name", "email", "role", "manager_id"}
-PROFILE_FIELDS = {"title", "department", "location", "contract_type"}
+PROFILE_FIELDS = {"title", "department", "location", "contract_type", "category"}
 EDITABLE = EMPLOYEE_FIELDS | PROFILE_FIELDS
 PREFIX = {"employee": "E", "manager": "M", "hr": "H"}
 DEFAULT_CASUAL, DEFAULT_SICK = 12, 6
@@ -23,6 +27,8 @@ def init_records():
             conn.execute("ALTER TABLE profiles ADD COLUMN contract_type TEXT NOT NULL DEFAULT 'CDI'")
         if "end_date" not in cols:
             conn.execute("ALTER TABLE profiles ADD COLUMN end_date TEXT")
+        if "category" not in cols:
+            conn.execute("ALTER TABLE profiles ADD COLUMN category TEXT")        # NULL: HR has not set it
         conn.execute("""
             CREATE TABLE IF NOT EXISTS employee_changes (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -41,6 +47,26 @@ def _profile(emp_id):
     row = conn.execute("SELECT * FROM profiles WHERE emp_id = ?", (emp_id,)).fetchone()
     conn.close()
     return dict(row) if row else {}
+
+
+def category_of(emp_id):
+    """The category HR recorded for this person, or None when HR has not set it."""
+    return _profile(emp_id).get("category") or None
+
+
+def category_prompt(emp_id):
+    """What the assistant is told about the signed-in person's category, in every conversation. It never raises: a database made
+    before the category existed just reads as "not set"."""
+    try:
+        category = category_of(emp_id)
+    except sqlite3.Error:
+        category = None
+    if category:
+        return (f"HR's record of their category (statut) is {category}. Some rules depend on it (for example a trial or notice period, in the "
+                "Code du travail or the collective agreement): when one does, use this category for them, and say it is the category HR has on file.")
+    return ("HR hasn't set their category (statut). When a rule depends on it (for example a trial or notice period, in the Code du travail or the "
+            "collective agreement), say \"HR hasn't set your category\", give the rule for each category (non-cadre, agent de maîtrise, cadre) as the "
+            "sources state it, and say HR can confirm which one applies to them. Never decide it from their job title, their contract or what they say.")
 
 
 def is_active(emp_id, on=None):
@@ -135,6 +161,9 @@ def create_employee(hr_id, data):
         return {"error": f"Contract must be one of: {', '.join(CONTRACTS)}."}
     if (problem := _manager_problem(d.get("manager_id"))):
         return {"error": problem}
+    category = d.get("category") or None
+    if category is not None and category not in CATEGORIES:
+        return {"error": f"Category must be one of: {', '.join(CATEGORIES)}, or left empty."}
     casual = int(d.get("casual_balance", DEFAULT_CASUAL))
     sick = int(d.get("sick_balance", DEFAULT_SICK))
     if casual < 0 or sick < 0:
@@ -149,10 +178,12 @@ def create_employee(hr_id, data):
             conn.execute("""INSERT INTO employees (id, name, role, manager_id, email, casual_balance, sick_balance)
                             VALUES (?, ?, ?, ?, ?, ?, ?)""",
                          (emp_id, d["name"], d["role"], d.get("manager_id") or None, d["email"], casual, sick))
-            conn.execute("""INSERT INTO profiles (emp_id, title, department, location, start_date, contract_type)
-                            VALUES (?, ?, ?, ?, ?, ?)""",
-                         (emp_id, d["title"], d["department"], d["location"], d["start_date"], contract))
+            conn.execute("""INSERT INTO profiles (emp_id, title, department, location, start_date, contract_type, category)
+                            VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                         (emp_id, d["title"], d["department"], d["location"], d["start_date"], contract, category))
             _log(conn, emp_id, hr_id, "record", None, "created", d.get("reason") or "New hire")
+            if category:
+                _log(conn, emp_id, hr_id, "category", None, category, d.get("reason") or "New hire")
             onboarding.start(conn, emp_id, d["start_date"], hr_id)    # only if they start in the future
     finally:
         conn.close()
@@ -177,6 +208,8 @@ def update_employee(hr_id, emp_id, changes, reason):
     new = {k: (v.strip() if isinstance(v, str) else v) for k, v in changes.items()}
     if "manager_id" in new and new["manager_id"] == "":
         new["manager_id"] = None
+    if "category" in new and new["category"] == "":
+        new["category"] = None                              # HR takes the category back to "not set"
     diff = {k: v for k, v in new.items() if current.get(k) != v}
     if not diff:
         return {"error": "Nothing changed."}
@@ -199,6 +232,8 @@ def update_employee(hr_id, emp_id, changes, reason):
             return {"error": "Someone already uses that email address."}
     if "contract_type" in diff and diff["contract_type"] not in CONTRACTS:
         return {"error": f"Contract must be one of: {', '.join(CONTRACTS)}."}
+    if "category" in diff and diff["category"] is not None and diff["category"] not in CATEGORIES:
+        return {"error": f"Category must be one of: {', '.join(CATEGORIES)}, or left empty."}
     if "manager_id" in diff and (problem := _manager_problem(diff["manager_id"], emp_id)):
         return {"error": problem}
     for f in ("title", "department", "location"):
@@ -308,4 +343,5 @@ def my_record(emp_id):
     if entry is None:
         return {"error": "No such person."}
     entry["reports"] = [r["name"] for r in _reports(emp_id)]
+    entry["category"] = category_of(emp_id)                 # their own record only: a colleague's category is not in directory_entry
     return {"found": 1, "people": [entry], "this_is_the_user": True}

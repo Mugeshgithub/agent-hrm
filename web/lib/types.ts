@@ -12,6 +12,7 @@ export type Profile = Person & {
   reports: { id: string; name: string; title: string }[];
   balances?: Balances;                               // HR only
   holiday_plan?: { id: number; name: string } | null;  // HR only
+  category?: string | null;                          // HR, and the person themself: the category HR recorded; null when HR has not set it
 };
 
 export type Change = {
@@ -142,6 +143,8 @@ export type CollectiveAgreement = {
 };
 
 // a question people asked that the policy does not answer; nobody is named, the assistant never keeps who asked
+export type DismissedGap = { id: number; topic: string; asks: number; examples: string[]; last_asked_at: string; dismissed_by: string | null; dismissed_at: string | null; note: string };
+
 export type PolicyGap = { id: number; topic: string; asks: number; examples: string[]; first_asked_at: string; last_asked_at: string; reopened: boolean };
 
 export type NeedsYou = {

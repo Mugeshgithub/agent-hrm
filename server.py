@@ -425,12 +425,13 @@ def person_profile(emp_id: str, request: Request):
     reports = [{"id": r["id"], "name": r["name"], "title": r["title"]} for r in hr_queries.team(emp_id)]
     plan = next((p for p in leave_admin.list_plans() if p["id"] == leave_admin.plan_id_of(emp_id)), None)
     if is_hr:
-        return {**person, "reports": reports, "balances": hr_queries.balances(emp_id),
+        return {**person, "reports": reports, "balances": hr_queries.balances(emp_id), "category": employees.category_of(emp_id),
                 "holiday_plan": {"id": plan["id"], "name": plan["name"]} if plan else None}
-    # the colleague view: no contract, no balances, no pay
+    # the colleague view: no contract, no balances, no pay, no category
     public = ("id", "name", "role", "email", "title", "department", "location", "start_date",
               "manager_id", "manager_name", "active")
-    return {**{k: person[k] for k in public}, "reports": reports}
+    own = {"category": employees.category_of(emp_id)} if viewer["id"] == emp_id else {}      # a person sees the category HR has on file for them
+    return {**{k: person[k] for k in public}, **own, "reports": reports}
 
 
 @app.get("/api/people/{emp_id}/history")
@@ -449,6 +450,7 @@ class NewHireIn(BaseModel):
     start_date: str
     manager_id: str | None = None
     contract_type: str = "CDI"
+    category: str | None = None
 
 
 class EditIn(BaseModel):
@@ -681,6 +683,16 @@ def policy_gap_dismiss(gap_id: int, body: GapCloseIn, request: Request):
 @app.post("/api/hr/policy-gaps/{gap_id}/fixed")
 def policy_gap_fixed(gap_id: int, body: GapCloseIn, request: Request):
     return fail_on_error(policy_gaps.close(need(request, "hr")["id"], gap_id, "fixed", body.note))
+
+
+@app.get("/api/hr/policy-gaps/dismissed")
+def policy_gaps_dismissed(request: Request):
+    return fail_on_error(policy_gaps.dismissed_gaps(need(request, "hr")["id"]))
+
+
+@app.post("/api/hr/policy-gaps/{gap_id}/restore")
+def policy_gap_restore(gap_id: int, request: Request):
+    return fail_on_error(policy_gaps.restore(need(request, "hr")["id"], gap_id))
 
 
 @app.post("/api/hr/people/{emp_id}/cancel-hire")

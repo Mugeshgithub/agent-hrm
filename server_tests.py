@@ -166,6 +166,30 @@ def colleagues_see_the_safe_profile_hr_sees_more():
 
 
 @test
+def hr_sets_a_category_and_only_hr_and_the_person_see_it_and_nobody_else_can_set_it():
+    hr, emma = as_person("H001"), as_person("E001")
+    assert hr.get("/api/people/E001").json()["category"] is None and emma.get("/api/people/E001").json()["category"] is None       # HR has not set it
+    for who in ("E001", "M001", "C001"):
+        r = as_person(who).patch("/api/hr/people/E001", json={"changes": {"category": "Cadre"}, "reason": "x"})
+        assert r.status_code == 403, who
+    assert hr.patch("/api/hr/people/E001", json={"changes": {"category": "Executive"}, "reason": "x"}).status_code == 400
+    assert hr.patch("/api/hr/people/E001", json={"changes": {"category": "Cadre"}, "reason": ""}).status_code == 400                # a reason is needed
+    r = hr.patch("/api/hr/people/E001", json={"changes": {"category": "Cadre"}, "reason": "Classification in her contract"})
+    assert r.status_code == 200, r.json()
+    assert hr.get("/api/people/E001").json()["category"] == "Cadre"
+    assert emma.get("/api/people/E001").json()["category"] == "Cadre"                    # her own profile shows what HR has on file for her
+    for who in ("E002", "M001", "C001"):
+        assert "category" not in as_person(who).get("/api/people/E001").json(), who      # a colleague, even her manager, does not
+    for who in ("E001", "E002", "H001"):
+        assert all("category" not in person for person in as_person(who).get("/api/people").json()), who    # and the directory never has it
+    log = [c for c in hr.get("/api/people/E001/history").json()["changes"] if c["field"] == "category"]
+    assert [(c["old_value"], c["new_value"], c["reason"], c["changed_by"]) for c in log] == [(None, "Cadre", "Classification in her contract", "Narmadha")]
+    assert emma.get("/api/people/E001/history").status_code == 200                       # she can read her own history, the category line included
+    assert hr.patch("/api/hr/people/E001", json={"changes": {"category": ""}, "reason": "Under review"}).status_code == 200
+    assert hr.get("/api/people/E001").json()["category"] is None
+
+
+@test
 def people_who_have_left_lose_access_and_leave_their_team():
     hr = as_person("H001")
     r = hr.post("/api/hr/people", json={"name": "Temp", "email": "temp@cognivexai.eu", "role": "employee",
@@ -756,6 +780,32 @@ def hr_closes_a_question_the_policy_does_not_answer_and_nobody_else_can():
     assert hr.post(f"/api/hr/policy-gaps/{gaps[0]['id']}/fixed", json={}).status_code == 400            # already closed
     assert hr.post(f"/api/hr/policy-gaps/{gaps[1]['id']}/dismiss", json={}).status_code == 200
     assert hr.get("/api/needs-you").json()["policy_gaps"] == []
+
+
+@test
+def hr_sees_the_dismissed_questions_restores_one_and_nobody_else_can():
+    import policy_gaps
+    policy_gaps.EMBED = None
+    conn = db.get_conn()
+    with conn:
+        conn.execute("DELETE FROM policy_gaps")
+    conn.close()
+    policy_gaps.record("company car")
+    policy_gaps.record("gym membership")
+    hr = as_person("H001")
+    assert hr.get("/api/hr/policy-gaps/dismissed").json() == []
+    first = hr.get("/api/needs-you").json()["policy_gaps"][0]["id"]
+    assert hr.post(f"/api/hr/policy-gaps/{first}/dismiss", json={"note": "not for us"}).status_code == 200
+    listed = hr.get("/api/hr/policy-gaps/dismissed").json()
+    assert [(g["id"], g["note"], g["dismissed_by"]) for g in listed] == [(first, "not for us", "Narmadha")] and "emp_id" not in listed[0]
+    for who in ("E001", "M001", "C001"):
+        assert as_person(who).get("/api/hr/policy-gaps/dismissed").status_code == 403, who
+        assert as_person(who).post(f"/api/hr/policy-gaps/{first}/restore").status_code == 403, who
+    assert hr.post("/api/hr/policy-gaps/999/restore").status_code == 400
+    assert hr.post(f"/api/hr/policy-gaps/{first}/restore").status_code == 200
+    assert hr.post(f"/api/hr/policy-gaps/{first}/restore").status_code == 400            # already open
+    assert hr.get("/api/hr/policy-gaps/dismissed").json() == []
+    assert first in [g["id"] for g in hr.get("/api/needs-you").json()["policy_gaps"]]
 
 
 @test

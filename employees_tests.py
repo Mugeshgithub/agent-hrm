@@ -1222,6 +1222,86 @@ def a_dismissed_gap_only_absorbs_close_paraphrases_so_it_never_swallows_a_neighb
 
 
 @test
+def hr_sees_the_dismissed_questions_and_can_restore_one_and_only_a_dismissed_one():
+    reset_gaps()
+    for question in ("company car", "company car policy", "gym membership"):
+        policy_gaps.record(question)
+    assert policy_gaps.dismissed_gaps("H001") == []
+    policy_gaps.close("H001", 2, "dismissed", "not something we offer")
+    policy_gaps.close("H001", 1, "fixed", "added a section")
+    shown = policy_gaps.dismissed_gaps("H001")
+    assert [(g["id"], g["topic"], g["asks"], g["note"], g["dismissed_by"]) for g in shown] == [(2, "gym membership", 1, "not something we offer", "Narmadha")]
+    assert shown[0]["dismissed_at"] and set(shown[0]) == {"id", "topic", "asks", "examples", "last_asked_at", "dismissed_by", "dismissed_at", "note"}   # nobody who asked
+    for who in ("E001", "M001", "C001", "nobody"):
+        assert "Only HR" in policy_gaps.dismissed_gaps(who)["error"] and "Only HR" in policy_gaps.restore(who, 2)["error"], who
+    assert "No question" in policy_gaps.restore("H001", 99)["error"]
+    assert "isn't dismissed" in policy_gaps.restore("H001", 1)["error"]                  # marked fixed, not dismissed
+    assert policy_gaps.record("gym membership")["dismissed"] is True                     # quiet while dismissed
+    assert policy_gaps.restore("H001", 2) == {"success": True, "status": "open"}
+    assert "isn't dismissed" in policy_gaps.restore("H001", 2)["error"]                  # it is open now
+    assert policy_gaps.dismissed_gaps("H001") == []
+    back = {g["id"]: g for g in policy_gaps.open_gaps()}[2]
+    assert back["asks"] == 1 and back["reopened"] is False                               # the count it had, and not the "marked fixed, asked again" line
+    assert policy_gaps.record("gym membership")["gap_id"] == 2                           # questions like it are counted again
+    assert {g["id"]: g for g in policy_gaps.open_gaps()}[2]["asks"] == 2
+
+
+@test
+def hr_sets_changes_and_clears_a_category_each_edit_is_logged_and_only_the_listed_categories_are_kept():
+    fresh()
+    assert e.category_of("E001") is None
+    assert e.update_employee("H001", "E001", {"category": "Cadre"}, "Classification confirmed in the contract") == {"success": True, "id": "E001", "changed": ["category"]}
+    assert e.category_of("E001") == "Cadre"
+    assert "Nothing changed" in e.update_employee("H001", "E001", {"category": "Cadre"}, "again")["error"]
+    assert e.update_employee("H001", "E001", {"category": "Agent de maîtrise"}, "Reclassified")["success"]
+    for wrong in ("Executive", "cadre", "Non cadre"):
+        assert "Category must be one of" in e.update_employee("H001", "E001", {"category": wrong}, "x")["error"], wrong      # exactly as listed
+    assert "reason" in e.update_employee("H001", "E001", {"category": "Cadre"}, "  ")["error"]
+    for who in ("E001", "M001", "C001", "nobody"):
+        assert "Only HR" in e.update_employee(who, "E001", {"category": "Cadre"}, "x")["error"], who
+    assert e.category_of("E001") == "Agent de maîtrise"                                    # every refused edit changed nothing
+    assert e.update_employee("H001", "E001", {"category": ""}, "Taken out until the contract is checked")["success"]
+    assert e.category_of("E001") is None                                                    # empty means "not set", it is never a category
+    log = [(c["old_value"], c["new_value"], c["reason"], c["changed_by"]) for c in e.history("H001", "E001")["changes"] if c["field"] == "category"]
+    assert log == [("Agent de maîtrise", None, "Taken out until the contract is checked", "Narmadha"),
+                   ("Cadre", "Agent de maîtrise", "Reclassified", "Narmadha"),
+                   (None, "Cadre", "Classification confirmed in the contract", "Narmadha")]          # newest first: who, what, why
+
+
+@test
+def a_new_hire_can_be_given_a_category_which_is_logged_and_a_wrong_one_is_refused_and_none_is_never_guessed():
+    fresh()
+    assert "Category must be one of" in e.create_employee("H001", {**NEW_HIRE, "category": "Boss"})["error"]
+    made = e.create_employee("H001", {**NEW_HIRE, "category": "Cadre"})
+    assert made["success"] and e.category_of(made["id"]) == "Cadre"
+    assert (None, "Cadre") in [(c["old_value"], c["new_value"]) for c in e.history("H001", made["id"])["changes"] if c["field"] == "category"]
+    other = e.create_employee("H001", {**NEW_HIRE, "email": "bo@cognivexai.eu", "name": "Bo", "title": "Chief Engineer"})
+    assert other["success"] and e.category_of(other["id"]) is None                          # not given: not set, whatever the job title says
+
+
+@test
+def only_the_person_has_their_category_in_their_record_and_the_assistant_is_told_it_or_told_it_is_not_set():
+    import sqlite3
+    fresh()
+    e.update_employee("H001", "E001", {"category": "Cadre"}, "contract")
+    assert e.my_record("E001")["people"][0]["category"] == "Cadre" and e.my_record("E002")["people"][0]["category"] is None
+    for entry in (e.directory_entry("E001"), *e.find_colleagues("Emma")["people"]):
+        assert "category" not in entry                                                       # the colleague view never has it
+    set_text, unset_text = e.category_prompt("E001"), e.category_prompt("E002")
+    assert "is Cadre" in set_text and "on file" in set_text and "HR hasn't set" not in set_text
+    assert "HR hasn't set your category" in unset_text and "HR's record" not in unset_text
+    assert "non-cadre, agent de maîtrise, cadre" in unset_text and "Never decide it from their job title" in unset_text
+    real = e.category_of
+    def broken(emp_id):
+        raise sqlite3.OperationalError("no such table: profiles")
+    e.category_of = broken                                                                   # a database made before categories existed
+    try:
+        assert "HR hasn't set your category" in e.category_prompt("E001")                    # never breaks a conversation
+    finally:
+        e.category_of = real
+
+
+@test
 def hr_sees_the_gaps_in_needs_you_with_the_count_and_nobody_else_does():
     reset_gaps()
     hr_before = needs_you.waiting_count("H001")

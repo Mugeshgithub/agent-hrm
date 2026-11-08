@@ -10,7 +10,8 @@
 #     times counts three. (Counting people would need a marker tied to the person, which is what "anonymised" rules out.)
 # Similar questions fall in the same gap, by meaning (embeddings, injected: EMBED), or by shared words when there is no embedding.
 #   - A gap HR marked fixed opens again if someone asks again: the policy still does not answer.
-#   - A gap HR dismissed stays quiet: further questions like it are not shown.
+#   - A gap HR dismissed stays quiet: further questions like it are not shown. HR sees the dismissed ones in a list and can restore one
+#     (it opens again with the count it had, and questions like it are counted again).
 # No AI call and no third-party import here (agent.py puts the embedding function in EMBED), so it is unit-tested in CI.
 import json
 import math
@@ -199,6 +200,37 @@ def count_open():
     n = conn.execute("SELECT COUNT(*) FROM policy_gaps WHERE status = 'open'").fetchone()[0]
     conn.close()
     return n
+
+
+def dismissed_gaps(hr_id):
+    """For HR: the questions HR said the policy need not cover, the latest dismissed first, so a dismissal can be undone."""
+    if not onboarding.is_hr(hr_id):
+        return {"error": "Only HR can see the dismissed questions."}
+    conn = db.get_conn()
+    rows = conn.execute("""SELECT g.*, e.name AS closed_by_name FROM policy_gaps g LEFT JOIN employees e ON e.id = g.closed_by
+                           WHERE g.status = 'dismissed' ORDER BY g.closed_at DESC, g.id DESC""").fetchall()
+    conn.close()
+    return [{"id": r["id"], "topic": r["topic"], "asks": r["asks"], "examples": json.loads(r["examples_json"]),
+             "last_asked_at": r["last_asked_at"], "dismissed_by": r["closed_by_name"] or r["closed_by"],
+             "dismissed_at": r["closed_at"], "note": r["closed_note"] or ""} for r in rows]
+
+
+def restore(hr_id, gap_id):
+    """HR takes a dismissed question back: it is open again, with the count it had. Only a dismissed one can be restored."""
+    if not onboarding.is_hr(hr_id):
+        return {"error": "Only HR can restore a dismissed question."}
+    conn = db.get_conn()
+    try:
+        with conn:
+            row = conn.execute("SELECT status FROM policy_gaps WHERE id = ?", (gap_id,)).fetchone()
+            if row is None:
+                return {"error": "No question with that ID."}
+            if row["status"] != "dismissed":
+                return {"error": "That question isn't dismissed."}
+            conn.execute("UPDATE policy_gaps SET status = 'open', closed_by = NULL, closed_at = NULL, closed_note = NULL WHERE id = ?", (gap_id,))
+    finally:
+        conn.close()
+    return {"success": True, "status": "open"}
 
 
 def close(hr_id, gap_id, status, note=""):

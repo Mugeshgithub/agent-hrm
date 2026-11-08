@@ -8,7 +8,7 @@ import { useState } from "react";
 import { mutate } from "swr";
 import { api, fetcher } from "@/lib/api";
 import { day, relative, timestamp } from "@/lib/format";
-import { ContractApproval, DocumentFlag, NeedsYou, PolicyGap, WaitingStep } from "@/lib/types";
+import { ContractApproval, DismissedGap, DocumentFlag, NeedsYou, PolicyGap, WaitingStep } from "@/lib/types";
 import { PreviewText } from "@/components/ContractPanel";
 import { TextDialog } from "@/components/TextDialog";
 import { Avatar } from "@/components/Shell";
@@ -114,7 +114,56 @@ export default function NeedsYouPage() {
           </ul>
         </section>
       )}
+
+      {me.role === "hr" && <DismissedGaps />}
     </>
+  );
+}
+
+// the questions HR dismissed ("the policy need not cover it"), kept so a dismissal can be undone. Nothing is shown when there are none.
+function DismissedGaps() {
+  const { data } = useSWR<DismissedGap[]>("/hr/policy-gaps/dismissed", fetcher);
+  if (!data?.length) return null;
+  return (
+    <section aria-labelledby="dismissed" className="mb-6">
+      <details>
+        <summary id="dismissed" className="cursor-pointer font-medium">Dismissed questions <span className="font-normal text-ink-soft">({data.length})</span></summary>
+        <p className="mb-3 mt-1 text-sm text-ink-soft">
+          Questions you decided the policy doesn't need to cover, so they stopped showing up. Restore one to see it again above.
+        </p>
+        <ul className="panel divide-y divide-rule">
+          {data.map((g) => <DismissedGapRow key={g.id} g={g} />)}
+        </ul>
+      </details>
+    </section>
+  );
+}
+
+function DismissedGapRow({ g }: { g: DismissedGap }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  async function restore() {
+    setBusy(true);
+    setError("");
+    try {
+      await api(`/hr/policy-gaps/${g.id}/restore`, { body: {} });
+      mutate(() => true);
+    } catch (e) { setError((e as Error).message); setBusy(false); }
+  }
+  return (
+    <li className="flex flex-col gap-3 px-5 py-4 sm:flex-row sm:items-start sm:justify-between sm:gap-4">
+      <div className="min-w-0">
+        <p className="font-medium break-words">{g.topic}</p>
+        <p className="text-sm">{g.asks === 1 ? "Asked once" : `Asked ${g.asks} times`} before you dismissed it.</p>
+        <p className="text-sm text-ink-soft">
+          Dismissed by {g.dismissed_by ?? "HR"}{g.dismissed_at && `, ${timestamp(g.dismissed_at)}`}.{g.note && <> &ldquo;{g.note}&rdquo;</>}
+        </p>
+        {error && <p role="alert" className="mt-1 text-sm text-no">{error}</p>}
+      </div>
+      <div className="flex shrink-0 gap-2">
+        <button className="btn-quiet" disabled={busy} onClick={restore}>Restore</button>
+      </div>
+    </li>
   );
 }
 

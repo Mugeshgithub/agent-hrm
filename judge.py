@@ -22,6 +22,13 @@ or what the system did (e.g. whether a ticket was created, and why). For each cl
    article (or the reverse) is UNSUPPORTED. Anything written inside a company policy section counts as
    company policy, even if that section also mentions a law article.
 
+One kind of claim is supported without being written word for word: the other side of a threshold the rule states.
+When the text says something applies above a limit ("sick leave of more than 2 consecutive days requires a medical
+certificate"), then "for 1 or 2 days no certificate is required" (also worded "not required by the policy") is
+SUPPORTED. That does not make a new condition, exception, deadline, number or person who decides ("but tell your
+manager first", "unless you were off sick before", "HR may still ask"), or an invented reason for what the system
+did ("this sometimes happens if..."), supported: those stay UNSUPPORTED, even next to a supported statement.
+
 Do NOT flag: greetings, questions to the user, offers to help (e.g. offering to raise an HR ticket),
 advice to contact HR or a manager, or simple restatements of what the user asked.
 Translations and paraphrases of the sources are fine if the meaning is the same.
