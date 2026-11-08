@@ -19,6 +19,7 @@ import checkins
 import contracts
 import db
 import documents
+import employee_files
 import employees
 import hr_queries
 import leave_admin
@@ -620,6 +621,39 @@ def welcome_reminders(request: Request):
 def welcome_reminders_read(request: Request):
     checkins.mark_read(new_hire_me(request)["id"])
     return {"ok": True}
+
+
+# ---------- everyone's private documents: contract, amendments, certificates ----------
+# HR files a document for anyone; a person sees only their own; every opening is logged. The rules are in employee_files.py.
+class FileDeleteIn(BaseModel):
+    reason: str
+
+
+@app.get("/api/files")
+def my_files(request: Request):
+    return fail_on_error(employee_files.own_list(me(request)["id"]))                   # their own, and who opened each
+
+
+@app.get("/api/files/{file_id}/file")
+def open_my_file(file_id: int, request: Request):
+    return send_file(employee_files.open_file(me(request)["id"], file_id))             # the owner or HR; logged
+
+
+@app.get("/api/hr/people/{emp_id}/files")
+def person_files(emp_id: str, request: Request):
+    return fail_on_error(employee_files.hr_list(need(request, "hr")["id"], emp_id))
+
+
+@app.post("/api/hr/people/{emp_id}/files")
+async def file_for_person(emp_id: str, request: Request, kind: str, title: str, name: str = ""):
+    hr = need(request, "hr")
+    data = await read_capped(request, documents.MAX_BYTES)
+    return fail_on_error(await run_in_threadpool(employee_files.add, hr["id"], emp_id, kind, title, data, name))
+
+
+@app.post("/api/hr/files/{file_id}/delete")
+def delete_person_file(file_id: int, body: FileDeleteIn, request: Request):
+    return fail_on_error(employee_files.delete(need(request, "hr")["id"], file_id, body.reason))
 
 
 # ---------- the employment contract of a new hire ----------

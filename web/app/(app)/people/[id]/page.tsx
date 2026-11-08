@@ -8,6 +8,7 @@ import { day, daysUntil, timestamp } from "@/lib/format";
 import { BalanceHistory as History, Change, Onboarding, Person, Profile } from "@/lib/types";
 import { BalanceHistory } from "@/components/BalanceHistory";
 import { OnboardingChecklist } from "@/components/OnboardingChecklist";
+import { PersonFiles } from "@/components/PersonFiles";
 import { Avatar } from "@/components/Shell";
 import { Empty } from "@/components/PageHeader";
 import { AdjustBalanceDialog, CONTRACT, EditPersonDialog, OffboardDialog, ROLE } from "@/components/PersonForms";
@@ -103,6 +104,8 @@ export default function ProfilePage({ params }: { params: { id: string } }) {
               {isHR && p.holiday_plan && <Item label="Holiday plan"><PlanPicker person={p} /></Item>}
             </dl>
           </section>
+
+          {isHR && <PersonFiles empId={p.id} firstName={p.name.split(" ")[0]} />}
 
           {canSeeHistory && (
             <section aria-labelledby="history" className="panel">
@@ -200,6 +203,7 @@ function describe(c: Change, nameOf: (id: string | null) => string) {
   if (c.field === "record") return "Record created";
   if (c.field === "onboarding") return `Onboarding ${c.new_value}`;
   if (c.field === "welcome link") return `Welcome link ${c.new_value}`;
+  if (c.field.startsWith("file: ")) return `Document "${c.field.slice("file: ".length)}" ${c.new_value}`;
   if (c.field.startsWith("document: ")) return `${c.field.slice("document: ".length).replace(/^./, (x) => x.toUpperCase())}: ${c.new_value}`;
   if (c.field === "outbox") return `Outbox: email ${c.new_value}`;
   if (c.field === "reminder") return `Daily check: ${({ chase: "reminder for missing items", before_day_one: "first-day information", first_week: "first-week check-in", trial_end: "trial period reminder to the manager" } as Record<string, string>)[c.new_value ?? ""] ?? c.new_value} prepared`;
