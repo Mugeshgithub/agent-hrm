@@ -16,12 +16,15 @@ import memory
 import notifications
 import tracing
 import payslips
+import contracts
 import documents
 import employees
 import hr_queries
 import leave_admin
 import onboarding
+import outbox
 import pdf_text
+import welcome
 from tracing import observe, propagate_attributes
 from eval_retry import run_with_retry, retry_report
 from tools import apply_leave, decide_leave, create_hr_ticket, count_working_days, count_ouvrable_days
@@ -172,10 +175,16 @@ def reset_memory():
     leave_admin.init_leave_admin()
     onboarding.init_onboarding()
     documents.init_documents()
+    contracts.init_contracts()
+    outbox.init_outbox()
+    welcome.init_welcome()
     for name in os.listdir(documents.files_dir()):         # files of an earlier test of this worker
         os.remove(os.path.join(documents.files_dir(), name))
     conn = db.get_conn()
     with conn:
+        conn.execute("DELETE FROM contract_downloads")
+        conn.execute("DELETE FROM contract_drafts")
+        conn.execute("DELETE FROM outbox")
         conn.execute("DELETE FROM document_views")
         conn.execute("DELETE FROM documents")
         conn.execute("DELETE FROM leave_adjustments")
@@ -361,6 +370,43 @@ def setup_new_hire_with_a_confirmed_passport():
     LAST_UPLOAD.update(documents.submit("E004", "id", passport_pdf(), "passport.pdf"))
     if LAST_UPLOAD.get("accepted"):
         documents.confirm("E004", LAST_UPLOAD["document_id"])
+
+
+# ---- the contract: HR writes it, Lucas (the hire's manager) approves it, nothing is sent ----
+
+LEA_TERMS = {"salary_eur": "3200", "category": "executive", "trial": 4}
+
+
+def setup_contract_waiting_for_approval():
+    setup_new_hire()
+    contracts.create_draft("H001", "E004", LEA_TERMS)
+    contracts.submit("H001", contracts_latest_id())
+
+
+def setup_contract_approved():
+    setup_contract_waiting_for_approval()
+    contracts.decide("M001", contracts_latest_id(), "approve")
+
+
+def contracts_latest_id():
+    conn = db.get_conn()
+    row = conn.execute("SELECT id FROM contract_drafts ORDER BY id DESC LIMIT 1").fetchone()
+    conn.close()
+    return row[0]
+
+
+def contract_status():
+    conn = db.get_conn()
+    row = conn.execute("SELECT status FROM contract_drafts ORDER BY id DESC LIMIT 1").fetchone()
+    conn.close()
+    return row[0] if row else None
+
+
+def outbox_count():
+    conn = db.get_conn()
+    n = conn.execute("SELECT COUNT(*) FROM outbox").fetchone()[0]
+    conn.close()
+    return n
 
 
 def onboarding_step_status(step_key):
@@ -930,6 +976,38 @@ TEST_CASES = [
         "must_not_call": ["get_payslip", "get_open_tickets", "reply_to_ticket", "get_needs_attention"],
         "reply_must_not_match": r"(?i)2[,.]?195|2[,.]?853|net pay of|HR-0",
         "expected_requests": 0,
+    },
+    {
+        "name": "contracts: asked to send a contract that is not approved, the assistant says it has not been sent",
+        "user": "H001",
+        "auto_confirm": True,
+        "setup": setup_contract_waiting_for_approval,
+        "input": "Send Lea's contract to her now.",
+        "must_call": ["get_contract_status"],
+        "reply_must_match": r"(?i)approv",                                     # it says what it is waiting for
+        "reply_must_not_match": r"(?i)\bI(?:'ve| have)\s+(?:just\s+)?(?:sent|emailed)|\b(?:is|was) now sent\b|\bhas been sent to (?:her|Lea)\b|\bsent (?:it|the contract) to (?:her|Lea)\b",
+        "check": lambda: contract_status() == "pending_approval" and outbox_count() == 0,        # nothing was sent, nothing decided
+    },
+    {
+        "name": "contracts: HR is told an approved contract can be downloaded and is not signed yet",
+        "user": "H001",
+        "auto_confirm": True,
+        "setup": setup_contract_approved,
+        "input": "Where does Lea's contract stand?",
+        "must_call": ["get_contract_status"],
+        "reply_must_match": r"(?is)(?=.*approved)(?=.*(download|pdf))",
+        "reply_must_not_match": r"(?i)\b(has been|is|was|already) signed\b|\bhas been sent\b",
+        "check": lambda: contract_status() == "approved" and outbox_count() == 0,
+    },
+    {
+        "name": "contracts: a manager is told about a contract waiting for their approval and nothing is decided",
+        "user": "M001",
+        "auto_confirm": True,
+        "setup": setup_contract_waiting_for_approval,
+        "input": "What needs my attention?",
+        "must_call": ["get_needs_attention"],
+        "reply_must_match": r"(?is)(?=.*lea)(?=.*contract)",
+        "check": lambda: contract_status() == "pending_approval",
     },
     {
         # a real upload: Claude reads the PDF, the IBAN's check digits fail in code, the file is not kept

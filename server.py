@@ -10,11 +10,12 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel
 from starlette.concurrency import run_in_threadpool
 from starlette.middleware.sessions import SessionMiddleware
 
+import contracts
 import db
 import documents
 import employees
@@ -595,6 +596,85 @@ def document_reviewed(doc_id: int, body: ReviewIn, request: Request):
 @app.post("/api/hr/people/{emp_id}/cancel-hire")
 def cancel_hire(emp_id: str, body: StepReasonIn, request: Request):
     return fail_on_error(onboarding.cancel(need(request, "hr")["id"], emp_id, body.reason))
+
+
+# ---------- the employment contract of a new hire ----------
+# HR drafts it, the new hire's manager approves it in Needs you, then HR downloads the PDF and has it signed outside
+# the app. The app never sends a contract. The rules (the trial period against the law, who approves) are in contracts.py.
+class ContractIn(BaseModel):
+    salary_eur: str | float | None = None
+    weekly_hours: str | float | int | None = 35
+    category: str | None = None
+    trial: str | int | None = 0
+    end_date: str | None = None
+    cdd_reason: str | None = None
+
+
+class DecisionContractIn(BaseModel):
+    decision: str
+    reason: str = ""
+
+
+class SignedIn(BaseModel):
+    signed_on: str
+    note: str = ""
+
+
+@app.get("/api/hr/people/{emp_id}/contract")
+def person_contract(emp_id: str, request: Request):
+    return fail_on_error(contracts.hr_view(need(request, "hr")["id"], emp_id))           # null when there is none
+
+
+@app.get("/api/hr/people/{emp_id}/contract-limits")
+def contract_limits(emp_id: str, request: Request, category: str | None = None, end_date: str | None = None):
+    return contracts.limit_for(need(request, "hr")["id"], emp_id, category, end_date)     # {"error": ...} is shown as is
+
+
+@app.post("/api/hr/people/{emp_id}/contract")
+def draft_contract(emp_id: str, body: ContractIn, request: Request):
+    return fail_on_error(contracts.create_draft(need(request, "hr")["id"], emp_id, body.model_dump()))
+
+
+@app.patch("/api/hr/contracts/{draft_id}")
+def change_contract(draft_id: int, body: ContractIn, request: Request):
+    return fail_on_error(contracts.update_draft(need(request, "hr")["id"], draft_id, body.model_dump()))
+
+
+@app.post("/api/hr/contracts/{draft_id}/submit")
+def submit_contract(draft_id: int, request: Request):
+    return fail_on_error(contracts.submit(need(request, "hr")["id"], draft_id))
+
+
+@app.post("/api/hr/contracts/{draft_id}/cancel")
+def cancel_contract(draft_id: int, body: StepReasonIn, request: Request):
+    return fail_on_error(contracts.cancel_draft(need(request, "hr")["id"], draft_id, body.reason))
+
+
+@app.post("/api/hr/contracts/{draft_id}/signed")
+def contract_signed(draft_id: int, body: SignedIn, request: Request):
+    return fail_on_error(contracts.mark_signed(need(request, "hr")["id"], draft_id, body.signed_on, body.note))
+
+
+@app.get("/api/hr/contracts/{draft_id}/pdf")
+def contract_pdf(draft_id: int, request: Request):
+    result = contracts.pdf_for(need(request, "hr")["id"], draft_id)                       # only once approved; logged
+    if "error" in result:
+        raise HTTPException(400, result["error"])
+    return Response(result["pdf"], media_type="application/pdf",
+                    headers={"Content-Disposition": f'attachment; filename="{result["filename"]}"'})
+
+
+@app.get("/api/contracts/{draft_id}/preview")
+def contract_preview(draft_id: int, request: Request):
+    result = contracts.preview(me(request)["id"], draft_id)                               # HR, or the approving manager
+    if "error" in result:
+        raise HTTPException(404, result["error"])
+    return result
+
+
+@app.post("/api/contracts/{draft_id}/decision")
+def decide_contract(draft_id: int, body: DecisionContractIn, request: Request):
+    return fail_on_error(contracts.decide(me(request)["id"], draft_id, body.decision, body.reason))
 
 
 # ---------- leave administration ----------

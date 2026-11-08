@@ -6,6 +6,7 @@
 #
 # Approving or rejecting is NOT done here: the page and the assistant call decide_leave, the same
 # rules as the Approvals page (only the right manager, only pending requests, a reason to reject).
+import contracts
 import documents
 import hr_queries
 import onboarding
@@ -51,9 +52,10 @@ def inbox(emp_id):
     tickets = sorted(hr_queries.all_tickets("open"), key=lambda t: t["id"]) if emp["role"] == "hr" else []
     steps = onboarding.open_steps(emp_id)
     flags = documents.flagged_for_review(emp_id)         # HR only: a document something looked off about
+    approvals = contracts.pending_for(emp_id)            # managers only: a contract of someone on their team
     return {"role": emp["role"], "leave_requests": leave, "hr_requests": tickets, "onboarding_steps": steps,
-            "document_flags": flags, "paid_leave_warnings": paid_leave_warnings(emp),
-            "waiting_on_you": len(leave) + len(tickets) + len(steps) + len(flags)}     # warnings are a heads-up, not a decision
+            "document_flags": flags, "contract_approvals": approvals, "paid_leave_warnings": paid_leave_warnings(emp),
+            "waiting_on_you": len(leave) + len(tickets) + len(steps) + len(flags) + len(approvals)}     # warnings are a heads-up, not a decision
 
 
 def waiting_count(emp_id):
@@ -62,7 +64,7 @@ def waiting_count(emp_id):
     if emp is None:
         return 0
     if emp["role"] == "manager":
-        return len(get_pending_requests(emp_id)["pending_requests"]) + len(onboarding.open_steps(emp_id))
+        return len(get_pending_requests(emp_id)["pending_requests"]) + len(onboarding.open_steps(emp_id)) + len(contracts.pending_for(emp_id))
     if emp["role"] == "hr":
         return len(hr_queries.all_tickets("open")) + len(onboarding.open_steps(emp_id)) + len(documents.flagged_for_review(emp_id))
     return 0
@@ -85,5 +87,8 @@ def for_assistant(emp_id):
                              for s in box["onboarding_steps"]],
         "document_flags": [{"employee_name": f["employee_name"], "document": f["label"], "reason": f["reason"]}
                            for f in box["document_flags"]],
+        "contracts_to_approve": [{"employee_name": c["employee_name"], "contract_type": c["contract_type"], "start_date": c["start_date"],
+                                  "salary_eur": c["salary_eur"], "trial": c["trial_text"], "sent_by": c["submitted_by"]}
+                                 for c in box["contract_approvals"]],
         "paid_leave_warnings": [w["message"] for w in box["paid_leave_warnings"]],
     }

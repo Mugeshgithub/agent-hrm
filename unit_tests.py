@@ -5,6 +5,7 @@ from datetime import date, timedelta
 import db
 db.DB_PATH = "unit_test_hr.db"   # its own database, never the real hr.db
 
+import contracts
 import documents
 import pdf_text
 import tools
@@ -254,7 +255,7 @@ def fake_tools():
              "get_payslip", "compare_payslips", "get_pay_summary",
              "get_pending_requests", "get_team_member_balance", "decide_leave",
              "get_open_tickets", "reply_to_ticket", "search_labour_code", "lookup_colleague", "get_balance_history", "get_holidays",
-             "get_needs_attention", "get_my_onboarding"]
+             "get_needs_attention", "get_my_onboarding", "get_contract_status"]
     tools = [{"name": n, "description": n, "input_schema": {"type": "object", "properties": {}}}
              for n in names]
     for t in tools:
@@ -298,7 +299,7 @@ def manager_gets_team_tools_but_not_hr_tools():
 def hr_gets_ticket_tools_but_not_manager_tools():
     names = names_for("hr")
     assert HR_ONLY <= names and not names & MANAGER_ONLY, names
-    assert len(names) == 18, names
+    assert len(names) == 19 and "get_contract_status" in names, names
 
 
 @test
@@ -555,6 +556,111 @@ def the_assistant_only_gets_shortened_numbers_and_the_pdf_writer_makes_a_real_pd
     start = int(data[data.rindex(b"startxref") + 10:].split()[0])
     assert data[start:start + 4] == b"xref"                                       # the cross-reference table is where it says
     assert data.count(b"/Type /Page ") >= 2 and b"\xe9" in data and b"\x80" in data     # two pages; é and € in Windows-1252
+
+
+# ---------- the contract draft: the law as code, and the text (contracts.py) ----------
+
+def a_person(contract_type="CDI", start="2030-03-04"):
+    return {"name": "Léa Martin", "title": "Frontend Engineer", "contract_type": contract_type, "start_date": start, "manager_name": "Lucas"}
+
+
+GOOD_CDI = {"salary_eur": "3 000,50", "category": "executive", "trial": "4"}
+GOOD_CDD = {"salary_eur": 2500, "trial": 3, "end_date": "2030-06-03", "cdd_reason": "Accroissement temporaire d'activité"}
+
+
+@test
+def a_cdi_trial_period_is_at_most_2_3_or_4_months_by_category_and_a_shorter_one_is_fine():
+    limit = contracts.trial_limit
+    assert [limit("CDI", c)["max"] for c in ("employee", "technician", "executive")] == [2, 3, 4]
+    assert "L1221-19" in limit("CDI", "executive")["cite"] and "L1221-22" in limit("CDI", "executive")["explain"]
+    assert "category" in limit("CDI", None)["error"] and "category" in limit("CDI", "boss")["error"]
+    person = a_person()
+    for category, ok, too_long in (("employee", 2, 3), ("technician", 3, 4), ("executive", 4, 5)):
+        fields, problems = contracts.validate(person, {**GOOD_CDI, "category": category, "trial": ok})
+        assert problems == [] and fields["trial"] == ok and fields["category"] == category
+        problems = contracts.validate(person, {**GOOD_CDI, "category": category, "trial": too_long})[1]
+        assert len(problems) == 1 and "L1221-19" in problems[0] and f"most the law allows here is {ok} months" in problems[0], problems
+    assert contracts.validate(person, {**GOOD_CDI, "trial": 0})[0]["trial"] == 0 and contracts.validate(person, {**GOOD_CDI, "trial": 1})[1] == []
+    assert contracts.validate(person, {**GOOD_CDI, "trial": -1})[1] and contracts.validate(person, {**GOOD_CDI, "trial": "2.5"})[1]
+
+
+@test
+def a_cdd_trial_period_is_one_day_per_week_capped_at_two_weeks_up_to_six_months_and_one_month_after():
+    def max_for(start, end):
+        return contracts.trial_limit("CDD", None, date.fromisoformat(start), date.fromisoformat(end))["max"]
+    assert max_for("2030-01-07", "2030-01-13") == 1 and max_for("2030-01-07", "2030-01-12") == 0       # 7 days: 1 week; 6 days: none
+    assert max_for("2030-01-07", "2030-01-27") == 3                                                    # 3 weeks
+    assert max_for("2030-01-07", "2030-04-05") == 12                                                   # 12 full weeks
+    assert max_for("2030-01-07", "2030-05-31") == 14                                                   # 20 weeks, capped at 2 weeks
+    assert max_for("2030-01-07", "2030-07-06") == 14                                                   # exactly 6 months: still the short rule
+    assert max_for("2030-01-07", "2030-07-07") == 26                                                   # a day more: now the 1-month cap applies, 26 weeks is under it
+    assert max_for("2030-01-07", "2031-01-06") == 30
+    assert "L1242-10" in contracts.trial_limit("CDD", None, date(2030, 1, 7), date(2030, 4, 5))["cite"]
+    assert "end date" in contracts.trial_limit("CDD", None, date(2030, 1, 7), None)["error"]
+    fields, problems = contracts.validate(a_person("CDD"), GOOD_CDD)                                    # 3 months: 12 days allowed
+    assert problems == [] and fields["end_date"] == "2030-06-03"
+    too_long = contracts.validate(a_person("CDD"), {**GOOD_CDD, "trial": 20})[1]
+    assert len(too_long) == 1 and "L1242-10" in too_long[0] and "days" in too_long[0]
+
+
+@test
+def only_a_cdi_or_a_cdd_is_drafted_and_the_rest_of_the_fields_are_checked():
+    for kind in ("Apprenticeship", "Internship"):
+        fields, problems = contracts.validate(a_person(kind), GOOD_CDI)
+        assert fields is None and "isn't drafted here" in problems[0], kind
+    person = a_person()
+    for salary in (None, "", "abc", 0, -5):
+        assert any("salary" in p for p in contracts.validate(person, {**GOOD_CDI, "salary_eur": salary})[1]), salary
+    assert contracts.validate(person, {**GOOD_CDI, "salary_eur": "3 000,50"})[0]["salary_eur"] == 3000.5
+    assert contracts.validate(person, GOOD_CDI)[0]["weekly_hours"] == 35                                 # the legal duration by default
+    assert any("L3121-20" in p for p in contracts.validate(person, {**GOOD_CDI, "weekly_hours": 49})[1])
+    assert contracts.validate(person, {**GOOD_CDI, "weekly_hours": 48})[1] == []
+    assert any("category" in p for p in contracts.validate(person, {"salary_eur": 3000})[1])
+    cdd = a_person("CDD")
+    assert any("L1242-12" in p for p in contracts.validate(cdd, {**GOOD_CDD, "cdd_reason": " "})[1])     # the reason must be stated
+    assert any("end date" in p for p in contracts.validate(cdd, {**GOOD_CDD, "end_date": None})[1])
+    assert any("after the start" in p for p in contracts.validate(cdd, {**GOOD_CDD, "end_date": "2030-03-04"})[1])
+
+
+@test
+def the_contract_text_is_in_french_states_the_trial_period_and_marks_what_is_missing():
+    cdi_fields = contracts.validate(a_person(), GOOD_CDI)[0]
+    text = " ".join(t for _, t in contracts.contract_blocks(a_person(), cdi_fields))
+    assert "CONTRAT DE TRAVAIL À DURÉE INDÉTERMINÉE (CDI)" in text and "Article 3 – Période d'essai" in text
+    assert "période d'essai de 4 mois" in text and "3 000,50 €" in text and "35 heures par semaine" in text
+    assert "Le contrat prend effet le 4 mars 2030" in text
+    assert "(cadre)" in text and "sous l'autorité de Lucas" in text and "L3141-3" in text
+    for placeholder in contracts.PLACEHOLDERS:
+        assert placeholder in text, placeholder                                       # nothing the template can't know is invented
+    assert "PROJET" in text and "juriste" in text
+    none = " ".join(t for _, t in contracts.contract_blocks(a_person(), {**cdi_fields, "trial": 0}))
+    assert "ne comporte pas de période d'essai" in none and "période d'essai de" not in none        # L1221-23: stated either way
+    cdd_fields = contracts.validate(a_person("CDD"), GOOD_CDD)[0]
+    cdd = " ".join(t for _, t in contracts.contract_blocks(a_person("CDD"), cdd_fields))
+    assert "DÉTERMINÉE (CDD)" in cdd and "du 4 mars 2030 au 3 juin 2030 inclus" in cdd and "Accroissement temporaire d'activité" in cdd
+    assert "période d'essai de 3 jours" in cdd and contracts.fr_date("2030-03-01") == "1er mars 2030" and contracts.fr_money(1234567.5) == "1 234 567,50 €"
+    assert pdf_text.make_pdf(contracts.contract_blocks(a_person(), cdi_fields)).startswith(b"%PDF-1.4")
+
+
+@test
+def the_legal_numbers_in_the_code_match_the_labour_code_when_that_file_is_available():
+    # labour_code/articles.jsonl is not in git (CI has none), so this checks the constants wherever the file exists
+    import json, os
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "labour_code", "articles.jsonl")
+    if not os.path.exists(path):
+        return
+    texts = {}
+    for line in open(path, encoding="utf-8"):
+        a = json.loads(line)
+        if a["num"] in ("L1221-19", "L1242-10", "L3121-27", "L3121-20"):
+            texts[a["num"]] = a["texte"]
+    assert contracts.CDI_MAX_MONTHS == {"employee": 2, "technician": 3, "executive": 4}
+    l1221 = texts["L1221-19"]
+    assert l1221.index("deux mois") < l1221.index("trois mois") < l1221.index("quatre mois")        # in the order employees, technicians, cadres
+    assert "ouvriers et les employés, de deux mois" in l1221 and "cadres, de quatre mois" in l1221
+    assert "un jour par semaine" in texts["L1242-10"] and "deux semaines" in texts["L1242-10"] and "d'un mois" in texts["L1242-10"]
+    assert "trente-cinq" in texts["L3121-27"] and "quarante-huit" in texts["L3121-20"]
+    assert (contracts.LEGAL_HOURS, contracts.MAX_HOURS, contracts.CDD_CAP_SHORT_DAYS) == (35, 48, 14)
 
 
 if __name__ == "__main__":

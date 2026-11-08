@@ -552,6 +552,74 @@ def a_flagged_document_shows_in_hr_needs_you_and_one_person_looks_and_closes_it(
     assert all(f["document_id"] != doc for f in hr.get("/api/needs-you").json()["document_flags"])
 
 
+TERMS = {"salary_eur": "3200", "category": "executive", "trial": 4}
+
+
+@test
+def hr_drafts_a_contract_the_hires_manager_approves_and_only_then_can_it_be_downloaded():
+    hr, lucas = as_person("H001"), as_person("M001")
+    emp_id = make_hire(hr, "ada@cognivexai.eu", "Ada Wren")
+    for who in ("E001", "M001"):
+        assert as_person(who).post(f"/api/hr/people/{emp_id}/contract", json=TERMS).status_code == 403, who
+    assert hr.get(f"/api/hr/people/{emp_id}/contract").json() is None
+    limits = hr.get(f"/api/hr/people/{emp_id}/contract-limits?category=executive").json()
+    assert limits["max"] == 4 and limits["unit"] == "months" and "L1221-19" in limits["cite"]
+    assert as_person("E001").get(f"/api/hr/people/{emp_id}/contract-limits?category=executive").status_code == 403
+    too_long = hr.post(f"/api/hr/people/{emp_id}/contract", json={**TERMS, "trial": 5})
+    assert too_long.status_code == 400 and "L1221-19" in too_long.json()["detail"] and "4 months" in too_long.json()["detail"]
+    made = hr.post(f"/api/hr/people/{emp_id}/contract", json=TERMS)
+    assert made.status_code == 200, made.text
+    draft = made.json()["draft_id"]
+    assert hr.get(f"/api/hr/contracts/{draft}/pdf").status_code == 400                           # a draft has no PDF
+    assert hr.post(f"/api/hr/contracts/{draft}/submit").status_code == 200
+    assert hr.get(f"/api/hr/contracts/{draft}/pdf").status_code == 400                           # nor does one waiting for approval
+    box = lucas.get("/api/needs-you").json()
+    assert [(c["employee_name"], c["salary_eur"]) for c in box["contract_approvals"] if c["draft_id"] == draft] == [("Ada Wren", 3200.0)]
+    assert lucas.get("/api/home").json()["waiting_on_you"] == box["waiting_on_you"]            # the menu badge counts it
+    assert lucas.get(f"/api/contracts/{draft}/preview").json()["title"].startswith("CONTRAT DE TRAVAIL")
+    for who in ("C001", "E001"):
+        assert as_person(who).get(f"/api/contracts/{draft}/preview").status_code == 404, who
+        assert as_person(who).post(f"/api/contracts/{draft}/decision", json={"decision": "approve"}).status_code == 400, who
+    assert hr.post(f"/api/contracts/{draft}/decision", json={"decision": "approve"}).status_code == 400    # HR can't approve either
+    assert lucas.post(f"/api/contracts/{draft}/decision", json={"decision": "reject", "reason": ""}).status_code == 400
+    assert lucas.post(f"/api/contracts/{draft}/decision", json={"decision": "approve"}).status_code == 200
+    pdf = hr.get(f"/api/hr/contracts/{draft}/pdf")
+    assert pdf.status_code == 200 and pdf.headers["content-type"] == "application/pdf" and pdf.content.startswith(b"%PDF-1.4")
+    assert "attachment" in pdf.headers["content-disposition"] and "contrat-ada-wren" in pdf.headers["content-disposition"]
+    for who in ("M001", "E001"):
+        assert as_person(who).get(f"/api/hr/contracts/{draft}/pdf").status_code == 403, who     # the manager can't download it
+    assert len(hr.get(f"/api/hr/people/{emp_id}/contract").json()["downloads"]) == 1
+    assert hr.post(f"/api/hr/contracts/{draft}/signed", json={"signed_on": in_days(3)}).status_code == 400
+    assert hr.post(f"/api/hr/contracts/{draft}/signed", json={"signed_on": in_days(0), "note": "Both copies"}).status_code == 200
+    steps = hr.get(f"/api/hr/people/{emp_id}/onboarding").json()["steps"]
+    assert next(s for s in steps if s["step_key"] == "contract")["status"] == "done"
+    assert hr.get(f"/api/hr/people/{emp_id}/contract").json()["status"] == "signed"
+
+
+@test
+def a_rejected_contract_goes_back_to_hr_and_a_cancelled_one_has_no_pdf():
+    hr, lucas = as_person("H001"), as_person("M001")
+    emp_id = make_hire(hr, "eli@cognivexai.eu", "Eli Park")
+    draft = hr.post(f"/api/hr/people/{emp_id}/contract", json=TERMS).json()["draft_id"]
+    hr.post(f"/api/hr/contracts/{draft}/submit")
+    assert lucas.post(f"/api/contracts/{draft}/decision", json={"decision": "reject", "reason": "Salary too low"}).status_code == 200
+    view = hr.get(f"/api/hr/people/{emp_id}/contract").json()
+    assert view["status"] == "rejected" and view["decision_note"] == "Salary too low"
+    assert hr.patch(f"/api/hr/contracts/{draft}", json={**TERMS, "salary_eur": "3500"}).status_code == 200
+    assert hr.get(f"/api/hr/people/{emp_id}/contract").json()["fields"]["salary_eur"] == 3500.0
+    assert as_person("M001").patch(f"/api/hr/contracts/{draft}", json=TERMS).status_code == 403
+    assert hr.post(f"/api/hr/contracts/{draft}/cancel", json={"reason": ""}).status_code == 400
+    assert hr.post(f"/api/hr/contracts/{draft}/cancel", json={"reason": "Offer changed"}).status_code == 200
+    assert hr.get(f"/api/hr/contracts/{draft}/pdf").status_code == 400
+    assert lucas.post(f"/api/contracts/{draft}/decision", json={"decision": "approve"}).status_code == 400
+    assert TestClient(server.app).get(f"/api/contracts/{draft}/preview").status_code == 401        # nothing without a session
+    link, code = open_welcome(hr, emp_id)                                                           # and a new hire's link session sees none of it
+    c = TestClient(server.app)
+    assert c.post("/api/welcome/login", json={"token": link, "code": code}).status_code == 200
+    for path in (f"/api/contracts/{draft}/preview", f"/api/hr/people/{emp_id}/contract", f"/api/hr/contracts/{draft}/pdf"):
+        assert c.get(path).status_code == 403, path
+
+
 if __name__ == "__main__":
     failed = 0
     for t in TESTS:
