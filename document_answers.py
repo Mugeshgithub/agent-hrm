@@ -32,6 +32,7 @@ SAY_SILENT_FIRST = HIDDEN + ("Your reply gives an answer from the collective agr
 _OPENER = re.compile(
     r"^\s*(?:you(?:'|’)re right|you are right|i apologi[sz]e(?: for [^.!:\n]*)?|apologies(?: for [^.!:\n]*)?|"
     r"let me (?:correct|rewrite|redo|fix|give you|answer|clarify|try)[^.!:\n]*|"
+    r"i (?:calculated|worked out|computed|added|did the (?:maths?|arithmetic)|shouldn(?:'|’)t have (?:calculated|added|worked))(?:\d\.\d|[^.!:\n])*|"
     r"here(?:'|’)s (?:the |a |my )?(?:corrected|correct|revised|updated|better|proper)[^.!:\n]*)[.,!:;]*[ \t]*\n*", re.I)
 
 

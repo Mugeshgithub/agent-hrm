@@ -195,6 +195,9 @@ def compare_payslips(viewer_id, emp_id, month_a, month_b):
 
     ta, tb = _totals(a), _totals(b)
     change = tb["net_paid_cents"] - ta["net_paid_cents"]
+    # the two figures that explain the net change, added up here so the reply never adds them up (number_guard.py)
+    gross_change = tb["gross_cents"] - ta["gross_cents"]
+    deductions_change = (tb["employee_contributions_cents"] + tb["tax_cents"]) - (ta["employee_contributions_cents"] + ta["tax_cents"])
     return {
         "from_month": month_a,
         "to_month": month_b,
@@ -202,6 +205,8 @@ def compare_payslips(viewer_id, emp_id, month_a, month_b):
         "net_paid_after_eur": euro(tb["net_paid_cents"]),
         "net_paid_change_cents": change,
         "net_paid_change_eur": euro(change),
+        "gross_change_eur": euro(gross_change),
+        "deductions_change_eur": euro(deductions_change),     # contributions and tax together; negative means they went down
         "changes": changes,
     }
 

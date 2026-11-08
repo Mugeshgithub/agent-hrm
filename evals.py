@@ -368,6 +368,20 @@ def setup_balance_adjusted():
     leave_admin.adjust_balance("H001", "E001", "casual", 2, "Worked on the Saturday release")
 
 
+def setup_emma_wrong_balance_in_history():
+    # the real bug again (number_guard.py): a WRONG balance saved in Emma's history, twice. Her real casual balance is 8.
+    for _ in range(2):
+        memory.save_message("E001", "user", "How many casual days do I have left?")
+        memory.save_message("E001", "assistant", "You have **12 casual days** left.")
+
+
+def setup_emma_wrong_net_pay_in_history():
+    # a WRONG net pay saved in Emma's history, twice. Her real net pay for October 2026 is EUR 2,195.00.
+    for _ in range(2):
+        memory.save_message("E001", "user", "What was my net pay in October 2026?")
+        memory.save_message("E001", "assistant", "Your net pay for October 2026 was **€2,540.00**.")
+
+
 def setup_emma_pending_paid():
     # Emma (12.5 paid days) has a pending paid request for a Monday-to-Saturday week
     apply_leave("E001", "paid", iso(day(2, 0)), iso(day(2, 5)))
@@ -1146,6 +1160,51 @@ TEST_CASES = [
         "must_call": ["get_payslip"],
         "reply_must_match": r"(?i)31 December|December 31",
         "reply_must_not_match": r"(?i)usually|typically|shortly|after the month",
+    },
+    {
+        # the number guard (number_guard.py): a number of days or an amount must come from a tool in THIS turn
+        "name": "number guard: a wrong balance saved in the history is not repeated",
+        "user": "E001",
+        "auto_confirm": False,
+        "setup": setup_emma_wrong_balance_in_history,
+        "input": "And how many casual days do I have left now?",
+        "reply_must_match": r"\b8\b",
+        "reply_must_not_match": r"\b12\b(?!\.\d)",
+    },
+    {
+        "name": "number guard: a wrong net pay saved in the history is not repeated",
+        "user": "E001",
+        "auto_confirm": False,
+        "setup": setup_emma_wrong_net_pay_in_history,
+        "input": "And what was my net pay in October 2026 exactly?",
+        "reply_must_match": r"2,195",
+        "reply_must_not_match": r"2,?540",
+    },
+    {
+        "name": "number guard: the days left once a pending request is approved come from the tool",
+        "user": "E001",
+        "auto_confirm": False,
+        "setup": setup_priya_one_pending,                  # 2 casual days pending, 8 in the balance
+        "input": "I have a request waiting for approval. How many casual days will I have left once it is approved?",
+        "must_call": ["get_leave_balance"],
+        "reply_must_match": r"\b6\b",
+    },
+    {
+        "name": "number guard: the days left after given dates come from the tool",
+        "user": "E001",
+        "auto_confirm": False,
+        "input": f"If I take casual leave from {say(day(2, 0))} to {say(day(2, 2))}, how many casual days will I have left after that?",
+        "must_call": ["count_leave_days"],
+        "reply_must_match": r"(?i)\b5\s+(?:casual\s+)?(?:days?|left)",         # 8 days, 3 of them taken (Monday to Wednesday)
+    },
+    {
+        # nobody returns a total of the three balances: the model adds them (25.5), the guard sends it back, and the three figures are given
+        "name": "number guard: a total that no tool returned is not worked out",
+        "user": "E001",
+        "auto_confirm": False,
+        "input": "How many leave days do I have in total, all types together?",
+        "reply_must_match": r"(?s)(?=.*\b8\b)(?=.*\b5\b)(?=.*12\.5)",
+        "reply_must_not_match": r"25\.5|\b26\b|calculated|my own arithmetic",
     },
     {
         # real bug (1 Nov): "take paid leave between 1 May and 31 October ... you need to give notice
