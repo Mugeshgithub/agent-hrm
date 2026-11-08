@@ -107,6 +107,15 @@ def trial_limit(contract_type, category=None, start=None, end=None):
     return {"error": f"A {contract_type} contract isn't drafted here: apprenticeships and internships use other documents (a contrat d'apprentissage, a convention de stage)."}
 
 
+def trial_end(contract_type, start, trial):
+    """The last day of the trial period: a CDI one counts in months from the start date, a CDD one in days. None if there is none."""
+    if not trial:
+        return None
+    if contract_type == "CDI":
+        return _add_months(start, trial) - timedelta(days=1)
+    return start + timedelta(days=trial - 1)
+
+
 def limit_for(hr_id, emp_id, category=None, end_date=None):
     # the legal maximum for this person's contract, so the form can show it before HR types a number
     person, err = _hr_and_hire(hr_id, emp_id)

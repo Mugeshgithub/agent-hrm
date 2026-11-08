@@ -94,9 +94,11 @@ export type WelcomeLinkStatus = {
   created_by: string | null; wrong_codes: number; max_wrong_codes: number; last_used_at: string | null;
   events: { event: string; at: string }[];
 } | null;
+export type Reminder = { id: number; message: string; created_at: string };
+export type DailyRun = { chase: string[]; before_day_one: string[]; first_week: string[]; trial_end: string[] };
 export type IssuedLink = { success: true; code: string; expires_at: string; outbox_id: number; to: string };
 export type OutboxMessage = {
-  id: number; emp_id: string; employee_name: string; to_email: string; subject: string; body: string; kind: string;
+  id: number; emp_id: string; employee_name: string; to_email: string; to_name: string | null; subject: string; body: string; kind: string;
   created_at: string; sent_at: string | null; sent_by_name: string | null;
 };
 

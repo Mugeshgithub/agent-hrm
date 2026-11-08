@@ -14,6 +14,7 @@ import hr_queries
 from tools import get_employee
 
 NEW_HIRE, HR, MANAGER = "new_hire", "hr", "manager"
+FIRST_WEEK_DAYS = 7
 TODO, DONE, SKIPPED = "todo", "done", "skipped"
 
 # key, title, owner, days before the start date it is due, what it means
@@ -30,7 +31,10 @@ TEMPLATE = [
     ("welcome", "Welcome message sent", MANAGER, 2, "A short message from the manager before the first day."),
     ("dpae", "DPAE filed", HR, 1,
      "File the déclaration préalable à l'embauche before day one (Code du travail, L1221-10)."),
+    # a negative number of days is AFTER the start date: the manager's first-week check-in, due a week into the job
+    ("checkin", "First-week check-in", MANAGER, -FIRST_WEEK_DAYS, "Meet the new hire in their first week and see how it is going."),
 ]
+LATE_STEPS = {"checkin"}       # steps that only wait on someone from their due date (a week after the start), not from the day of hiring
 
 
 def init_onboarding():
@@ -72,6 +76,8 @@ def _log(conn, emp_id, actor_id, field, old, new, reason):
 
 def _due(start, days_before, today):
     # counted back from the start date, but never in the past on the day the hire is entered
+    if days_before < 0:                                  # after the start date: a first-week step
+        return (start + timedelta(days=-days_before)).isoformat()
     return min(start, max(start - timedelta(days=days_before), today)).isoformat()
 
 
@@ -248,6 +254,8 @@ def open_steps(actor_id, today=None):
     for r in rows:
         hire = hr_queries.person(r["emp_id"])
         if not hire["active"]:
+            continue
+        if r["step_key"] in LATE_STEPS and r["due_date"] > today.isoformat():       # not yet: it is for the first week
             continue
         items.append({"step_id": r["id"], "employee_id": r["emp_id"], "employee_name": hire["name"],
                       "job_title": hire["title"], "start_date": r["start_date"], "step_title": r["title"],

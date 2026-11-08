@@ -16,6 +16,7 @@ import memory
 import notifications
 import tracing
 import payslips
+import checkins
 import contracts
 import documents
 import employees
@@ -176,12 +177,14 @@ def reset_memory():
     onboarding.init_onboarding()
     documents.init_documents()
     contracts.init_contracts()
+    checkins.init_checkins()
     outbox.init_outbox()
     welcome.init_welcome()
     for name in os.listdir(documents.files_dir()):         # files of an earlier test of this worker
         os.remove(os.path.join(documents.files_dir(), name))
     conn = db.get_conn()
     with conn:
+        conn.execute("DELETE FROM onboarding_reminders")
         conn.execute("DELETE FROM contract_downloads")
         conn.execute("DELETE FROM contract_drafts")
         conn.execute("DELETE FROM outbox")
@@ -407,6 +410,15 @@ def outbox_count():
     n = conn.execute("SELECT COUNT(*) FROM outbox").fetchone()[0]
     conn.close()
     return n
+
+
+def setup_new_hire_who_was_reminded():
+    # the documents are due and the daily check has already prepared the reminder: the new hire reads it and asks about it
+    setup_new_hire()
+    conn = db.get_conn()
+    start = conn.execute("SELECT start_date FROM profiles WHERE emp_id = 'E004'").fetchone()[0]
+    conn.close()
+    checkins.run_daily(today=date.fromisoformat(start) - timedelta(days=1))
 
 
 def onboarding_step_status(step_key):
@@ -1023,6 +1035,18 @@ TEST_CASES = [
         "check": lambda: (onboarding_step_status("iban") == "todo" and stored_document_files() == 0
                           and LAST_UPLOAD.get("accepted") is False
                           and any("check digits" in p for p in LAST_UPLOAD.get("problems", []))),
+    },
+    {
+        "name": "welcome: after a reminder the assistant lists everything still missing and names the next item",
+        "user": "E004",
+        "role": "new_hire",
+        "auto_confirm": True,
+        "setup": setup_new_hire_who_was_reminded,
+        "input": "I got a reminder from HR. What am I still missing?",
+        "must_call": ["get_my_onboarding"],
+        "reply_must_match": r"(?is)(?=.*(identity|passport|\bID\b))(?=.*(bank|iban))(?=.*social)",
+        "reply_must_not_match": r"(?i)equipment|laptop|dpae|\bcontract\b",      # those are HR's and the manager's, not hers
+        "check": lambda: len(checkins.reminders_for("E004")) == 2,            # the reminder and the first-day information
     },
     {
         "name": "documents: the assistant never calls a document genuine, even when asked to confirm it",
