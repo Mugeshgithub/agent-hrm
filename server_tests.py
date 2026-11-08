@@ -493,6 +493,22 @@ def a_new_hire_sends_a_document_confirms_it_and_only_they_and_hr_can_open_the_fi
 
 
 @test
+def a_waiting_document_comes_back_after_a_reload_for_its_own_person_only():
+    hr = as_person("H001")
+    emp_id, c = hire_signed_in(hr, "tia@cognivexai.eu", "Tia Lane")
+    _, other = hire_signed_in(hr, "uma@cognivexai.eu", "Uma Fox")
+    assert c.get("/api/welcome-documents/waiting").json() == []
+    doc = upload(c, "id", reads={"readable": True, "looks_off": False, "document_type": "passport", "holder_name": "Tia Lane", "expiry_date": "2099-01-01"}).json()["document_id"]
+    waiting = c.get("/api/welcome-documents/waiting").json()
+    assert [(w["document_id"], w["step_key"]) for w in waiting] == [(doc, "id")] and {"label": "Name on the document", "value": "Tia Lane"} in waiting[0]["read"]
+    assert other.get("/api/welcome-documents/waiting").json() == []                          # someone else's: nothing
+    assert TestClient(server.app).get("/api/welcome-documents/waiting").status_code == 401
+    assert as_person("E001").get("/api/welcome-documents/waiting").status_code == 401        # an ordinary session is not a new hire
+    assert c.post(f"/api/welcome-documents/{doc}/confirm").status_code == 200
+    assert c.get("/api/welcome-documents/waiting").json() == []
+
+
+@test
 def uploads_that_are_too_big_the_wrong_type_or_for_the_wrong_step_never_reach_claude():
     hr = as_person("H001")
     emp_id, c = hire_signed_in(hr, "rae@cognivexai.eu", "Rae Dunn")

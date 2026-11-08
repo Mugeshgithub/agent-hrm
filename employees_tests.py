@@ -560,6 +560,25 @@ def the_file_type_the_size_and_the_step_are_checked_before_claude_reads_anything
 
 
 @test
+def a_document_that_waits_for_confirmation_can_be_asked_for_again_with_what_was_read():
+    fresh(); clear_files()
+    emp_id, other = hire(), hire(email="bea@cognivexai.eu", name="Bea Roy")
+    assert documents.waiting_for(emp_id) == []
+    first = send(emp_id, "id", GOOD_ID)
+    send(other, "iban", {**GOOD_BANK, "holder_name": "Bea Roy"})
+    waiting = documents.waiting_for(emp_id)
+    assert [(w["document_id"], w["step_key"]) for w in waiting] == [(first["document_id"], "id")]
+    assert ("Name on the document", "Anu Patel") in [(r["label"], r["value"]) for r in waiting[0]["read"]]      # in full: it is their own
+    assert [w["step_key"] for w in documents.waiting_for(other)] == ["iban"]                                    # each person sees only theirs
+    documents.confirm(emp_id, first["document_id"])
+    assert documents.waiting_for(emp_id) == []                                                                  # confirmed: no longer waiting
+    again = send(emp_id, "iban", GOOD_BANK)
+    documents.decline(emp_id, again["document_id"])
+    assert documents.waiting_for(emp_id) == []                                                                  # declined: gone too
+    assert documents.waiting_for("nobody") == []
+
+
+@test
 def a_new_file_replaces_one_that_waits_and_saying_it_is_wrong_removes_it():
     fresh(); clear_files()
     emp_id, other = hire(), hire(email="bea@cognivexai.eu", name="Bea Roy")

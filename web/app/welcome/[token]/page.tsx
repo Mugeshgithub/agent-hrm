@@ -6,7 +6,7 @@ import { FormEvent, useEffect, useState } from "react";
 import useSWR, { mutate } from "swr";
 import { api, ApiError, fetcher } from "@/lib/api";
 import { day, dayWithWeekday, relative } from "@/lib/format";
-import { Reminder, WelcomeStep, WelcomeView } from "@/lib/types";
+import { Reminder, WaitingDoc, WelcomeStep, WelcomeView } from "@/lib/types";
 import { ErrorNote } from "@/components/PageHeader";
 import { WelcomeAssistant } from "@/components/WelcomeAssistant";
 import { FlowCard, useDocumentFlow } from "@/components/DocumentFlow";
@@ -96,7 +96,8 @@ type Docs = ReturnType<typeof useDocumentFlow>;
 function Home({ view }: { view: WelcomeView }) {
   const first = view.name.split(" ")[0];
   const [notice, setNotice] = useState<{ id: number; text: string } | null>(null);       // an app event for the assistant
-  const docs = useDocumentFlow((text) => setNotice({ id: Date.now(), text }));
+  const { data: waiting } = useSWR<WaitingDoc[]>("/welcome-documents/waiting", fetcher);
+  const docs = useDocumentFlow((text) => setNotice({ id: Date.now(), text }), view.steps, waiting);
   const { data: reminders } = useSWR<Reminder[]>("/welcome-reminders", fetcher);
   return (
     <>

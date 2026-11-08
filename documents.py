@@ -436,6 +436,16 @@ def status_for(emp_id):
     return out
 
 
+def waiting_for(emp_id):
+    """The documents this person sent that still wait for their "yes, that's right", with what was read in full (it is
+    their own document). The page asks for them on load, so a reload doesn't lose the confirm card."""
+    out = []
+    for d in _rows("SELECT * FROM documents WHERE emp_id = ? AND status = 'read' ORDER BY id", (emp_id,)):
+        fields = json.loads(d["fields_json"] or "{}")
+        out.append({"document_id": d["id"], "step_key": d["step_key"], "read": [{"label": k, "value": v} for k, v in fields.items()]})
+    return out
+
+
 # ---------- who opens a file, and HR's view ----------
 
 def _can_open(viewer_id, doc):

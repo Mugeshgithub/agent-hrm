@@ -564,6 +564,11 @@ async def welcome_upload(request: Request, step: str, name: str = ""):
     return fail_on_error(await run_in_threadpool(documents.submit, emp["id"], step, data, name))
 
 
+@app.get("/api/welcome-documents/waiting")
+def welcome_documents_waiting(request: Request):
+    return documents.waiting_for(new_hire_me(request)["id"])           # their own, still waiting for their confirmation
+
+
 @app.post("/api/welcome-documents/{doc_id}/confirm")
 def welcome_confirm_document(doc_id: int, request: Request):
     return fail_on_error(documents.confirm(new_hire_me(request)["id"], doc_id))
