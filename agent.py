@@ -17,6 +17,7 @@ from memory import init_memory, init_summaries, save_message, build_context
 from notifications import init_notifications, notify_decision, notify_ticket_reply, show_unread
 from policy import search_policy, embed as embed_texts
 import collective_agreement
+import contract_first
 import contracts
 import document_answers
 import employee_files
@@ -758,6 +759,7 @@ def answer_turn(user_text):
         document_retry_used = False
         agreement_retry_used = False
         search_retry_used = False
+        contract_retry_used = False
         number_retry_used = False
         last_turn["tools_called"] = []
         last_turn["refused"] = []
@@ -796,6 +798,13 @@ def answer_turn(user_text):
                 if not search_retry_used and (fix := search_first.nudge(role, user_text, last_turn["tools_called"])):
                     search_retry_used = True
                     print("  [guard] a rules question was answered without searching: asking again")
+                    messages.append({"role": "user", "content": fix})
+                    continue
+
+                # guardrail in code: a question about where a new hire's contract stands, or a request to send one, is answered from get_contract_status (contract_first.py). One retry.
+                if not contract_retry_used and (fix := contract_first.nudge(role, user_text, last_turn["tools_called"])):
+                    contract_retry_used = True
+                    print("  [guard] a contract question was answered without checking the contract: asking again")
                     messages.append({"role": "user", "content": fix})
                     continue
 
@@ -838,7 +847,7 @@ def answer_turn(user_text):
                 if action == "replaced":
                     print("  [guard] still not from a tool: replacing it with the tools' figures")
                     reply = shown
-                if document_retry_used or agreement_retry_used or search_retry_used or number_retry_used:       # a retry note was sent: the reply must not talk about it
+                if document_retry_used or agreement_retry_used or search_retry_used or contract_retry_used or number_retry_used:       # a retry note was sent: the reply must not talk about it
                     reply = document_answers.strip_correction(reply)
 
                 # the policy does not answer it: keep the question, without a name, for HR (policy_gaps.py)

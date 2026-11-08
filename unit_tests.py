@@ -7,6 +7,7 @@ import db
 db.DB_PATH = "unit_test_hr.db"   # its own database, never the real hr.db
 
 import collective_agreement
+import contract_first
 import contracts
 import document_answers
 import documents
@@ -1168,6 +1169,24 @@ def the_privacy_notice_says_only_what_the_app_does_and_what_the_cnil_recommends(
         careers.AI_ASSISTS = ()
     assert "answers your questions about the job" in on and "summary of your application against the job's requirements" in on and "never ranks, scores or rejects" in on
     assert "No AI is used" not in on
+
+
+@test
+def a_contract_question_to_hr_answered_without_checking_the_contract_is_sent_back_once_and_nothing_else_is():
+    nudge = contract_first.nudge
+    for q in ["Send Lea's contract to her now.", "Where does Lea's contract stand?", "Has Hugo's contract been approved?", "Is the contract for Clara signed?",
+              "Can you email Lea her contract?", "Is Lea's contract ready to download?", "Is Lea's contract waiting for approval?", "Le contrat de Lea est-il signé ?",
+              "Please issue the contract for Lea", "What is the status of the new hire's contract?"]:
+        assert nudge("hr", q, []) == contract_first.CONTRACT_FIRST, q                                         # a contract question, no look-up: check first
+        assert nudge("hr", q, ["search_policy"]) == contract_first.CONTRACT_FIRST, q                           # another tool is not the contract tool
+        assert nudge("hr", q, ["get_contract_status"]) is None, q                                              # it looked: nothing to say
+    for q in ["What does my contract say about notice?", "Show me my contract.", "How long can a trial period be in a CDD?", "What is my leave balance?",
+              "Hello", "Show me E001's payslip for October 2026.", "", None]:
+        assert nudge("hr", q, []) is None, q                                                                    # not about a new hire's contract
+    assert nudge("employee", "Send Lea's contract to her now.", []) is None and nudge("manager", "Where does Lea's contract stand?", []) is None   # only HR has the tool
+    assert nudge("new_hire", "Where does my contract stand?", []) is None
+    note = contract_first.CONTRACT_FIRST
+    assert "do not apologise" in note and "not from the person" in note and "get_contract_status" in note and "never sends a contract" in note and "ignore this note" in note
 
 
 if __name__ == "__main__":
