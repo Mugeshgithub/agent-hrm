@@ -20,6 +20,7 @@ import needs_you
 import onboarding
 import pdf_text
 import outbox
+import policy_gaps
 import welcome
 
 TESTS = []
@@ -1127,6 +1128,127 @@ def the_assistant_lists_and_reads_only_the_signed_in_persons_own_documents_and_e
     long_id = next(d["document_id"] for d in employee_files.tool_list("E001")["documents"] if d["title"] == "Very long")
     cut = employee_files.tool_read("E001", long_id)
     assert len(cut["text"]) == employee_files.TEXT_LIMIT and cut["text_is_incomplete"] is True
+
+
+def fake_embedding(text):
+    # a stand-in for the real embedding: a bag of words, so questions that share words are close and the rest is not
+    vec = [0.0] * 64
+    for word in re.findall(r"[a-z]{3,}", re.sub(r"\[[a-z]+\]", " ", text.lower())):      # not the [name] / [email] markers
+        if word not in ("can", "get", "for", "and", "the", "you", "are", "does", "how"):
+            vec[sum(map(ord, word)) % 64] += 1.0
+    return vec
+
+
+def reset_gaps():
+    fresh()
+    conn = db.get_conn()
+    with conn:
+        conn.execute("DELETE FROM policy_gaps")
+        conn.execute("DELETE FROM sqlite_sequence WHERE name = 'policy_gaps'")       # ids start at 1 again, so the tests can name them
+    conn.close()
+    policy_gaps.EMBED = fake_embedding
+
+
+@test
+def a_question_the_policy_does_not_answer_is_kept_counted_and_grouped_without_naming_anyone():
+    reset_gaps()
+    first = policy_gaps.record("Can Emma get a company car? emma@cognivexai.eu")
+    assert first == {"recorded": True, "gap_id": 1, "new": True}
+    assert policy_gaps.record("company car for employees")["gap_id"] == 1                      # the same topic: counted, not listed twice
+    assert policy_gaps.record("is a company car possible")["gap_id"] == 1
+    assert policy_gaps.record("gym membership refund")["gap_id"] == 2                          # another topic
+    gaps = {g["id"]: g for g in policy_gaps.open_gaps()}
+    assert gaps[1]["asks"] == 3 and gaps[2]["asks"] == 1
+    assert [g["id"] for g in policy_gaps.open_gaps()] == [1, 2]                                # most asked first
+    assert gaps[1]["topic"] == "Can [name] get a company car? [email]" and len(gaps[1]["examples"]) == 3
+    assert policy_gaps.record("   ")["recorded"] is False and policy_gaps.record("12")["recorded"] is False and policy_gaps.record(None)["recorded"] is False
+    # nothing in the database points at a person: no such column, and none of the words they used
+    conn = db.get_conn()
+    columns = {r["name"] for r in conn.execute("PRAGMA table_info(policy_gaps)")}
+    dump = " ".join(str(v) for r in conn.execute("SELECT * FROM policy_gaps").fetchall() for v in tuple(r)).lower()
+    conn.close()
+    assert not columns & {"emp_id", "employee_id", "asked_by", "user_id", "person"}, columns
+    for private in ("emma", "cognivexai.eu", "e001"):
+        assert private not in dump, private
+
+
+@test
+def without_an_embedding_questions_are_grouped_by_the_words_they_share():
+    reset_gaps()
+    policy_gaps.EMBED = None
+    assert policy_gaps.record("company car")["new"] and policy_gaps.record("company car policy")["gap_id"] == 1
+    assert policy_gaps.record("gym membership refund")["gap_id"] == 2 and policy_gaps.record("gym membership")["gap_id"] == 2
+    assert policy_gaps.record("company laptop")["gap_id"] == 3
+    def broken(text):
+        raise RuntimeError("the embedding service is down")
+    policy_gaps.EMBED = broken                                                                  # recording a question never fails because of it
+    assert policy_gaps.record("parental leave for fathers")["new"]
+    assert len(policy_gaps.open_gaps()) == 4
+
+
+@test
+def hr_dismisses_a_gap_for_good_or_marks_it_fixed_and_it_comes_back_if_people_still_hear_the_policy_is_silent():
+    reset_gaps()
+    for question in ("company car", "company car policy", "gym membership"):
+        policy_gaps.record(question)
+    for who in ("E001", "M001", "C001", "nobody"):
+        assert "Only HR" in policy_gaps.close(who, 1, "fixed")["error"], who
+    assert "No question" in policy_gaps.close("H001", 99, "fixed")["error"] and "dismissed or marked fixed" in policy_gaps.close("H001", 1, "deleted")["error"]
+    assert policy_gaps.close("H001", 1, "fixed", "added a Company car section") == {"success": True, "status": "fixed"}
+    assert "already closed" in policy_gaps.close("H001", 1, "dismissed")["error"]
+    assert [g["id"] for g in policy_gaps.open_gaps()] == [2]
+    # still unanswered after the fix: it opens again, counted from the fix, and says so
+    assert policy_gaps.record("company car")["reopened"] is True
+    again = {g["id"]: g for g in policy_gaps.open_gaps()}[1]
+    assert again["asks"] == 1 and again["reopened"] is True
+    # dismissed means quiet: further questions like it are not shown
+    assert policy_gaps.close("H001", 2, "dismissed") == {"success": True, "status": "dismissed"}
+    assert policy_gaps.record("gym membership")["recorded"] is False and policy_gaps.record("gym membership")["dismissed"] is True
+    assert [g["id"] for g in policy_gaps.open_gaps()] == [1]
+
+
+@test
+def a_dismissed_gap_only_absorbs_close_paraphrases_so_it_never_swallows_a_neighbouring_topic():
+    reset_gaps()
+    assert policy_gaps.record("company car lease")["new"] and policy_gaps.record("company car insurance")["gap_id"] == 1      # neighbours share a gap while it is open
+    policy_gaps.close("H001", 1, "dismissed")
+    assert policy_gaps.record("company car lease")["dismissed"] is True                  # the same question: quiet
+    other = policy_gaps.record("company car insurance cover")                            # a neighbour is not the same question
+    assert other.get("new") is True and other["gap_id"] == 2, other
+    assert [g["topic"] for g in policy_gaps.open_gaps()] == ["company car insurance cover"]
+
+
+@test
+def hr_sees_the_gaps_in_needs_you_with_the_count_and_nobody_else_does():
+    reset_gaps()
+    hr_before = needs_you.waiting_count("H001")
+    for question in ("company car", "company car policy", "gym membership"):
+        policy_gaps.record(question)
+    box = needs_you.inbox("H001")
+    assert [(g["topic"], g["asks"]) for g in box["policy_gaps"]] == [("company car", 2), ("gym membership", 1)]
+    assert box["waiting_on_you"] == needs_you.waiting_count("H001") == hr_before + 2
+    spoken = needs_you.for_assistant("H001")["questions_the_policy_does_not_answer"]
+    assert spoken == [{"topic": "company car", "times_asked": 2, "also_asked_as": ["company car policy"]}, {"topic": "gym membership", "times_asked": 1, "also_asked_as": []}]
+    assert needs_you.inbox("M001")["policy_gaps"] == [] and needs_you.for_assistant("M001")["questions_the_policy_does_not_answer"] == []
+    assert "error" in needs_you.inbox("E001")
+    policy_gaps.close("H001", 1, "fixed")
+    assert needs_you.waiting_count("H001") == hr_before + 1
+
+
+@test
+def recording_a_gap_after_the_answer_can_never_break_the_answer():
+    reset_gaps()
+    asked = [{"query": "company car", "found": False}]
+    assert policy_gaps.record_from_turn(asked, "The policy doesn't say.")["recorded"] is True
+    assert policy_gaps.record_from_turn([{"query": "remote work", "found": True}], "Up to 2 days a week.") is None
+    real = policy_gaps.record
+    def locked(question):
+        raise RuntimeError("database is locked")
+    policy_gaps.record = locked
+    try:
+        assert policy_gaps.record_from_turn(asked, "The policy doesn't say.") is None            # no exception reaches the person
+    finally:
+        policy_gaps.record = real
 
 
 if __name__ == "__main__":

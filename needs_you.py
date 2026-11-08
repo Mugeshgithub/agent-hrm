@@ -10,6 +10,7 @@ import contracts
 import documents
 import hr_queries
 import onboarding
+import policy_gaps
 from tools import get_employee, get_pending_requests, clean_days
 
 PAID_WARN_ABOVE = 30    # unused paid days. L3141-3 caps a year's paid leave at 30 jours ouvrables, so
@@ -53,9 +54,10 @@ def inbox(emp_id):
     steps = onboarding.open_steps(emp_id)
     flags = documents.flagged_for_review(emp_id)         # HR only: a document something looked off about
     approvals = contracts.pending_for(emp_id)            # managers only: a contract of someone on their team
+    gaps = policy_gaps.open_gaps() if emp["role"] == "hr" else []       # HR only: questions the policy does not answer
     return {"role": emp["role"], "leave_requests": leave, "hr_requests": tickets, "onboarding_steps": steps,
-            "document_flags": flags, "contract_approvals": approvals, "paid_leave_warnings": paid_leave_warnings(emp),
-            "waiting_on_you": len(leave) + len(tickets) + len(steps) + len(flags) + len(approvals)}     # warnings are a heads-up, not a decision
+            "document_flags": flags, "contract_approvals": approvals, "policy_gaps": gaps, "paid_leave_warnings": paid_leave_warnings(emp),
+            "waiting_on_you": len(leave) + len(tickets) + len(steps) + len(flags) + len(approvals) + len(gaps)}     # warnings are a heads-up, not a decision
 
 
 def waiting_count(emp_id):
@@ -66,7 +68,8 @@ def waiting_count(emp_id):
     if emp["role"] == "manager":
         return len(get_pending_requests(emp_id)["pending_requests"]) + len(onboarding.open_steps(emp_id)) + len(contracts.pending_for(emp_id))
     if emp["role"] == "hr":
-        return len(hr_queries.all_tickets("open")) + len(onboarding.open_steps(emp_id)) + len(documents.flagged_for_review(emp_id))
+        return (len(hr_queries.all_tickets("open")) + len(onboarding.open_steps(emp_id)) + len(documents.flagged_for_review(emp_id))
+                + policy_gaps.count_open())
     return 0
 
 
@@ -90,5 +93,7 @@ def for_assistant(emp_id):
         "contracts_to_approve": [{"employee_name": c["employee_name"], "contract_type": c["contract_type"], "start_date": c["start_date"],
                                   "salary_eur": c["salary_eur"], "trial": c["trial_text"], "sent_by": c["submitted_by"]}
                                  for c in box["contract_approvals"]],
+        "questions_the_policy_does_not_answer": [{"topic": g["topic"], "times_asked": g["asks"], "also_asked_as": g["examples"][1:]}
+                                                 for g in box["policy_gaps"]],
         "paid_leave_warnings": [w["message"] for w in box["paid_leave_warnings"]],
     }

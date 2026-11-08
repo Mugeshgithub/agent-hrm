@@ -8,7 +8,7 @@ import { useState } from "react";
 import { mutate } from "swr";
 import { api, fetcher } from "@/lib/api";
 import { day, relative, timestamp } from "@/lib/format";
-import { ContractApproval, DocumentFlag, NeedsYou, WaitingStep } from "@/lib/types";
+import { ContractApproval, DocumentFlag, NeedsYou, PolicyGap, WaitingStep } from "@/lib/types";
 import { PreviewText } from "@/components/ContractPanel";
 import { TextDialog } from "@/components/TextDialog";
 import { Avatar } from "@/components/Shell";
@@ -101,7 +101,52 @@ export default function NeedsYouPage() {
           </ul>
         </section>
       )}
+
+      {!!data?.policy_gaps?.length && (
+        <section aria-labelledby="gaps" className="mb-6">
+          <h2 id="gaps" className="mb-1 font-medium">Questions the policy doesn't answer <span className="text-ink-soft font-normal">({data.policy_gaps.length})</span></h2>
+          <p className="mb-3 text-sm text-ink-soft">
+            Most asked first. Edit the policy, then mark it fixed: it comes back if people still hear "the policy doesn't say".
+            Dismiss it if the policy doesn't need to cover it: questions like it stop showing up.
+          </p>
+          <ul className="panel divide-y divide-rule">
+            {data.policy_gaps.map((g) => <PolicyGapRow key={g.id} g={g} />)}
+          </ul>
+        </section>
+      )}
     </>
+  );
+}
+
+// a question people asked that the policy does not answer. Nobody is named: only the wording and how many times it was asked are kept.
+function PolicyGapRow({ g }: { g: PolicyGap }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  async function close(how: "fixed" | "dismiss") {
+    setBusy(true);
+    setError("");
+    try {
+      await api(`/hr/policy-gaps/${g.id}/${how}`, { body: {} });
+      mutate(() => true);
+    } catch (e) { setError((e as Error).message); setBusy(false); }
+  }
+  const alsoAskedAs = g.examples.slice(1);
+  return (
+    <li className="flex flex-col gap-3 px-5 py-4 sm:flex-row sm:items-start sm:justify-between sm:gap-4">
+      <div className="min-w-0">
+        <p className="font-medium break-words">{g.topic}</p>
+        <p className="text-sm">{g.asks === 1 ? "Asked once" : `Asked ${g.asks} times`}. The policy doesn't say.</p>
+        {alsoAskedAs.length > 0 && <p className="text-sm text-ink-soft break-words">Also asked as: {alsoAskedAs.map((e) => `“${e}”`).join(", ")}</p>}
+        <p className="text-sm text-ink-soft">
+          Last asked {timestamp(g.last_asked_at)}.{g.reopened && " You marked it fixed before, and people still hear \"the policy doesn't say\"."}
+        </p>
+        {error && <p role="alert" className="mt-1 text-sm text-no">{error}</p>}
+      </div>
+      <div className="flex shrink-0 gap-2">
+        <button className="btn-quiet" disabled={busy} onClick={() => close("dismiss")}>Dismiss</button>
+        <button className="btn-primary" disabled={busy} onClick={() => close("fixed")}>Mark fixed</button>
+      </div>
+    </li>
   );
 }
 

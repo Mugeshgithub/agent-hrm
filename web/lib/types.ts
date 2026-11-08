@@ -127,8 +127,12 @@ export type ContractApproval = {
 
 export type DocumentFlag = { document_id: number; employee_id: string; employee_name: string; label: string; reason: string };
 
+// a question people asked that the policy does not answer; nobody is named, the assistant never keeps who asked
+export type PolicyGap = { id: number; topic: string; asks: number; examples: string[]; first_asked_at: string; last_asked_at: string; reopened: boolean };
+
 export type NeedsYou = {
   role: Role; waiting_on_you: number; leave_requests: Pending[]; onboarding_steps: WaitingStep[]; document_flags: DocumentFlag[]; contract_approvals: ContractApproval[];
+  policy_gaps: PolicyGap[];
   hr_requests: { id: number; ticket: string; employee_id: string; employee_name: string; question: string; summary: string; created_at: string }[];
   paid_leave_warnings: { employee_id: string; name: string; paid_days: number; message: string }[];
 };

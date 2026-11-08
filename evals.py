@@ -25,6 +25,7 @@ import hr_queries
 import leave_admin
 import onboarding
 import outbox
+import policy_gaps
 import pdf_text
 import welcome
 from tracing import observe, propagate_attributes
@@ -180,6 +181,7 @@ def reset_memory():
     documents.init_documents()
     contracts.init_contracts()
     employee_files.init_files()
+    policy_gaps.init_gaps()
     checkins.init_checkins()
     outbox.init_outbox()
     welcome.init_welcome()
@@ -189,6 +191,7 @@ def reset_memory():
     with conn:
         conn.execute("DELETE FROM employee_file_views")
         conn.execute("DELETE FROM employee_files")
+        conn.execute("DELETE FROM policy_gaps")
         conn.execute("DELETE FROM onboarding_reminders")
         conn.execute("DELETE FROM contract_downloads")
         conn.execute("DELETE FROM contract_drafts")
@@ -373,6 +376,34 @@ def setup_hr_inbox():
     # HR has Hugo's open request waiting, and Hugo has 31 unused paid days
     setup_karthik_ticket()
     leave_admin.adjust_balance("H001", "E002", "paid", 23.5, "Days brought over for the test")
+
+
+def setup_gym_already_asked():
+    policy_gaps.record("gym membership")          # another employee asked earlier; the policy does not say
+
+
+def setup_company_car_asked_three_ways():
+    for wording in ("company car", "company car policy", "can I get a company car"):
+        policy_gaps.record(wording)
+
+
+def gap_problems(topic=None, asks=None):
+    """A reply_check for the policy-gap evals: what is kept for HR, read from the database. Nobody may be named in it."""
+    def check(reply):
+        gaps = policy_gaps.open_gaps()
+        if topic is None:
+            return [f"expected nothing kept for HR, found {[g['topic'] for g in gaps]}"] if gaps else []
+        if len(gaps) != 1:
+            return [f"expected one question kept for HR, found {len(gaps)}: {[g['topic'] for g in gaps]}"]
+        g, problems = gaps[0], []
+        if not re.search(topic, g["topic"], re.I):
+            problems.append(f"the kept question {g['topic']!r} is not about {topic}")
+        if asks is not None and g["asks"] != asks:
+            problems.append(f"asked {g['asks']} times, expected {asks}")
+        kept = " ".join([g["topic"], *g["examples"]]).lower()
+        problems += [f"the kept question contains {word!r}" for word in ("emma", "laurent", "@", "e001") if word in kept]
+        return problems
+    return check
 
 
 def setup_new_hire():
@@ -740,6 +771,49 @@ TEST_CASES = [
         "must_call": ["search_policy"],
         "reply_must_match": r"(?i)HR|not cover|doesn't cover|does not cover|no information",
         "expected_requests": 0,
+    },
+    {
+        # the policy has nothing on it: the question is kept for HR with no name, e-mail or number in it
+        "name": "policy gap: a question the policy does not answer is kept for HR, without a name",
+        "user": "E001",
+        "auto_confirm": False,
+        "input": "I'm Emma Laurent (emma@cognivexai.eu). Does the company pay for a gym membership?",
+        "must_call": ["search_policy"],
+        "reply_check": gap_problems(topic=r"gym", asks=1),
+        "expected_requests": 0,
+    },
+    {
+        # the policy answers: nothing is kept
+        "name": "policy gap: a question the policy answers is not kept",
+        "user": "E001",
+        "auto_confirm": False,
+        "input": "How many days a week can I work from home?",
+        "must_call": ["search_policy"],
+        "reply_must_match": r"(?i)\b(2|two)\b",
+        "reply_check": gap_problems(),
+        "expected_requests": 0,
+    },
+    {
+        # someone asked about the gym earlier; another wording of it is counted with it, not listed again
+        "name": "policy gap: the same question in other words is counted once",
+        "user": "E001",
+        "auto_confirm": False,
+        "setup": setup_gym_already_asked,
+        "input": "Is there any reimbursement for gym or sports classes?",
+        "must_call": ["search_policy"],
+        "reply_check": gap_problems(topic=r"gym|sport|fitness", asks=2),
+        "expected_requests": 0,
+    },
+    {
+        # HR asks the assistant: the count and the topic, not who
+        "name": "inbox: HR hears the questions the policy does not answer, and how many times",
+        "user": "H001",
+        "auto_confirm": True,
+        "setup": setup_company_car_asked_three_ways,
+        "input": "What needs my attention?",
+        "must_call": ["get_needs_attention"],
+        "must_not_call": ["reply_to_ticket"],
+        "reply_must_match": r"(?is)(?=.*\bcars?\b)(?=.*\b(3|three)\b)",
     },
     {
         "name": "policy: finds sick leave from 'doctor's note' without the word sick",

@@ -15,13 +15,14 @@ from roles import tools_for, allowed
 from db import init_db
 from memory import init_memory, init_summaries, save_message, build_context
 from notifications import init_notifications, notify_decision, notify_ticket_reply, show_unread
-from policy import search_policy
+from policy import search_policy, embed as embed_texts
 import contracts
 import document_answers
 import employee_files
 import tool_guard
 import needs_you
 import onboarding
+import policy_gaps
 from citations import ungrounded_citations, RETRY_MESSAGE, SAFE_REPLY
 from documents import asks_if_genuine, says_cannot_tell, GENUINE_ANSWER, GENUINE_RETRY
 from tools import (
@@ -33,6 +34,7 @@ from tools import (
 )
 
 client = anthropic.Anthropic()
+policy_gaps.EMBED = lambda text: embed_texts([text])[0]   # to group similar questions by meaning
 MODEL = "claude-haiku-4-5"
 
 # Haiku 4.5 prices in dollars per million tokens (check the pricing page if they change)
@@ -89,7 +91,7 @@ SESSION_ID = new_session_id(LOGGED_IN_ID)
 state = {"messages": [], "summary": None}
 
 # what happened in the last answered message: read by the evals (tools used, tool results for citations)
-last_turn = {"tools_called": [], "sources": [], "refused": []}      # refused: calls the code refused (not counted as called)
+last_turn = {"tools_called": [], "sources": [], "refused": [], "policy_searches": []}      # refused: calls the code refused (not counted as called)
 EXTRA_TAGS = []   # extra Langfuse tags, e.g. ["eval"] when the evals drive the agent
 
 SYSTEM_PROMPT = f"""You are an HR assistant for employees, managers and HR staff.
@@ -139,7 +141,7 @@ When asked what needs your attention or what is waiting, call get_needs_attentio
     "hr": """
 You can list open tickets with get_open_tickets and answer one with reply_to_ticket. A reply closes the ticket.
 You may look up any employee's payslip by passing employee_id; every such view is logged.
-When asked what needs your attention or what is waiting, call get_needs_attention and tell them the open HR requests, any onboarding step for a new hire, any document flagged for a person to look at, and any paid-leave warning. You can also say where a new hire's contract stands with get_contract_status; the app never sends a contract, and you cannot send or approve one. Only list it: never reply to a ticket until they say what to write.""",
+When asked what needs your attention or what is waiting, call get_needs_attention and tell them the open HR requests, any onboarding step for a new hire, any document flagged for a person to look at, any question people asked that the policy does not answer (say how many times it was asked, never who: nobody knows), and any paid-leave warning. You can also say where a new hire's contract stands with get_contract_status; the app never sends a contract, and you cannot send or approve one. Only list it: never reply to a ticket until they say what to write.""",
 }
 
 # ALL tools; roles.tools_for() picks which ones each role is sent
@@ -230,7 +232,7 @@ TOOLS = [
         "name": "get_needs_attention",
         "description": "List everything that is waiting on a decision from the logged-in manager or HR person: "
                        "leave, paid leave and floating-holiday requests from the team, open HR requests, onboarding "
-                       "steps for new hires, documents flagged for HR to look at, contracts waiting for a manager's approval, and a warning for anyone with more than 30 unused paid days. Use this when they ask what needs "
+                       "steps for new hires, documents flagged for HR to look at, contracts waiting for a manager's approval, for HR the questions people asked that the company policy does not answer, and a warning for anyone with more than 30 unused paid days. Use this when they ask what needs "
                        "their attention, what is waiting for them, or what is new. It only lists; it decides nothing.",
         "input_schema": {"type": "object", "properties": {}},
     },
@@ -614,6 +616,7 @@ def run_tool(name, tool_input):
 
     if name == "search_policy":
         sections = search_policy(tool_input["question"])
+        last_turn["policy_searches"].append({"query": tool_input["question"], "found": bool(sections)})
         if not sections:
             return {"found": False, "message": "No matching section in the HR policy."}
         return {"found": True, "sections": sections}
@@ -704,6 +707,7 @@ def answer_turn(user_text):
         document_retry_used = False
         last_turn["tools_called"] = []
         last_turn["refused"] = []
+        last_turn["policy_searches"] = []     # what search_policy was asked and whether it found a section (policy_gaps.py)
         last_turn["sources"] = turn_sources
         last_turn["question"] = user_text   # the employee's own words, used by the labour-law search
         while calls_this_message < MAX_CALLS_PER_MESSAGE:
@@ -752,6 +756,9 @@ def answer_turn(user_text):
                 if bad:
                     print(f"  [guard] still ungrounded {bad}: replying safely instead")
                     reply = SAFE_REPLY
+                # the policy does not answer it: keep the question, without a name, for HR (policy_gaps.py)
+                if policy_gaps.record_from_turn(last_turn["policy_searches"], reply):
+                    print("  [policy gap] the question is kept for HR")
                 print(f"\nAgent: {reply}")
                 save_message(LOGGED_IN_ID, "assistant", reply)
                 print(f"\n  [usage] {usage['calls']} calls, {usage['input_tokens']} in, "

@@ -732,6 +732,32 @@ def a_new_hire_link_session_cannot_reach_the_documents_area():
     assert c.post(f"/api/hr/files/{doc}/delete", json={"reason": "x"}).status_code == 403
 
 
+@test
+def hr_closes_a_question_the_policy_does_not_answer_and_nobody_else_can():
+    import policy_gaps
+    policy_gaps.EMBED = None
+    conn = db.get_conn()
+    with conn:
+        conn.execute("DELETE FROM policy_gaps")
+    conn.close()
+    policy_gaps.record("company car")
+    policy_gaps.record("company car policy")
+    policy_gaps.record("gym membership")
+    hr = as_person("H001")
+    gaps = hr.get("/api/needs-you").json()["policy_gaps"]
+    assert [(g["topic"], g["asks"]) for g in gaps] == [("company car", 2), ("gym membership", 1)]
+    assert "employee_id" not in gaps[0] and "emp_id" not in gaps[0]
+    for who in ("E001", "M001", "C001"):
+        assert as_person(who).post(f"/api/hr/policy-gaps/{gaps[0]['id']}/dismiss", json={}).status_code == 403, who
+        assert as_person(who).post(f"/api/hr/policy-gaps/{gaps[0]['id']}/fixed", json={}).status_code == 403, who
+    assert as_person("M001").get("/api/needs-you").json()["policy_gaps"] == []
+    assert hr.post("/api/hr/policy-gaps/999/fixed", json={}).status_code == 400
+    assert hr.post(f"/api/hr/policy-gaps/{gaps[0]['id']}/fixed", json={"note": "added a section"}).status_code == 200
+    assert hr.post(f"/api/hr/policy-gaps/{gaps[0]['id']}/fixed", json={}).status_code == 400            # already closed
+    assert hr.post(f"/api/hr/policy-gaps/{gaps[1]['id']}/dismiss", json={}).status_code == 200
+    assert hr.get("/api/needs-you").json()["policy_gaps"] == []
+
+
 if __name__ == "__main__":
     failed = 0
     for t in TESTS:
