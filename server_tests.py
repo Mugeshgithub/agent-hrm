@@ -798,6 +798,57 @@ def hr_uploads_the_collective_agreement_everyone_opens_it_and_only_hr_changes_it
     assert as_person("E001").get("/api/collective-agreement").json() is None and hr.post("/api/hr/collective-agreement/remove").status_code == 400
 
 
+@test
+def hr_edits_the_policy_everyone_reads_the_edited_handbook_and_nobody_else_can_change_it():
+    import policy_store
+    asked = []
+    policy_store.REINDEX = lambda: asked.append(1)                                   # no embedding service in CI
+    conn = db.get_conn()
+    with conn:
+        conn.execute("DELETE FROM policy_versions")
+        conn.execute("DELETE FROM sqlite_sequence WHERE name = 'policy_versions'")
+    conn.close()
+    hr = as_person("H001")
+    start = hr.get("/api/hr/policy").json()
+    assert start["version"] == 0 and start["original"] and start["saved_by"] is None and any("12 casual leave days" in k for k in start["kept"])
+    wfh = {"base_version": 0, "original_title": "Work from home", "title": "Work from home", "text": "Employees may work from home up to 3 days per week.", "note": "agreement"}
+    for who in ("E001", "M001", "C001"):
+        c = as_person(who)
+        assert c.get("/api/hr/policy").status_code == 403 and c.get("/api/hr/policy/versions").status_code == 403, who
+        assert c.post("/api/hr/policy/section", json=wfh).status_code == 403, who
+        assert c.post("/api/hr/policy/section/delete", json={"base_version": 0, "title": "Work from home"}).status_code == 403, who
+        assert c.post("/api/hr/policy/restore", json={"base_version": 0, "version_id": 0}).status_code == 403, who
+        assert c.get("/api/hr/policy-gaps").status_code == 403, who
+    assert asked == [] and as_person("E001").get("/api/handbook").json()[5]["text"].startswith("Employees may work from home up to 2 days")
+    done = hr.post("/api/hr/policy/section", json=wfh)
+    assert done.status_code == 200 and done.json()["version"] == 1 and done.json()["indexed"] is True and asked == [1], done.text
+    for who in ("E001", "M001", "H001"):                                             # everyone reads the edited text
+        assert as_person(who).get("/api/handbook").json()[5]["text"] == "Employees may work from home up to 3 days per week.", who
+    now = hr.get("/api/hr/policy").json()
+    assert now["version"] == 1 and now["saved_by"] == "Narmadha" and now["change"] == "Edited \"Work from home\""
+    assert hr.post("/api/hr/policy/section", json=wfh).status_code == 400                          # the same save again is on a stale version
+    casual = next(sec for sec in now["sections"] if sec["title"] == "Casual leave")
+    bad = hr.post("/api/hr/policy/section", json={"base_version": 1, "original_title": "Casual leave", "title": "Casual leave", "text": casual["text"].replace("12", "15")})
+    assert bad.status_code == 400 and "12 casual leave days per year" in bad.json()["detail"]
+    assert hr.post("/api/hr/policy/section", json={"base_version": 1, "title": "Company car", "text": "Managers get one after two years."}).json()["version"] == 2
+    history = hr.get("/api/hr/policy/versions").json()
+    assert [v["id"] for v in history] == [2, 1, 0] and history[0]["saved_by"] == "Narmadha" and history[0]["current"] is True
+    assert any(sec["title"] == "Company car" for sec in hr.get("/api/hr/policy/versions/2").json()) and hr.get("/api/hr/policy/versions/99").status_code == 404
+    assert hr.post("/api/hr/policy/section/delete", json={"base_version": 2, "title": "Company car", "note": "no"}).json()["version"] == 3
+    assert hr.post("/api/hr/policy/restore", json={"base_version": 3, "version_id": 0}).json()["change"] == "Restored the policy as shipped"
+    assert as_person("E001").get("/api/handbook").json()[5]["text"].startswith("Employees may work from home up to 2 days")
+    import policy_gaps
+    policy_gaps.EMBED = None
+    conn = db.get_conn()
+    with conn:
+        conn.execute("DELETE FROM policy_gaps")
+    conn.close()
+    assert hr.get("/api/hr/policy-gaps").json() == []
+    policy_gaps.record("language courses")
+    listed = hr.get("/api/hr/policy-gaps").json()
+    assert [(g["topic"], g["asks"]) for g in listed] == [("language courses", 1)] and "employee_id" not in listed[0]       # for the editor's banner: no names
+
+
 if __name__ == "__main__":
     failed = 0
     for t in TESTS:

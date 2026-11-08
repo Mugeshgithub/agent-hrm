@@ -12,6 +12,7 @@ import documents
 import employee_files
 import pdf_text
 import policy_gaps
+import policy_store
 import tool_guard
 import tools
 from eval_retry import MAX_RETRIED, retry_report, run_with_retry
@@ -97,7 +98,7 @@ def not_enough_paid_leave_is_blocked_and_pending_paid_days_count():
 
 @test
 def the_paid_leave_note_appears_only_when_the_dates_leave_the_usual_window():
-    note = tools.PAID_POLICY_NOTE
+    note = tools.paid_policy()[1]
     n = tools.paid_policy_note
     assert n(date(2030, 5, 1), date(2030, 5, 4)) is None          # the first day of the window
     assert n(date(2030, 7, 1), date(2030, 7, 6)) is None
@@ -109,22 +110,23 @@ def the_paid_leave_note_appears_only_when_the_dates_leave_the_usual_window():
 
 
 @test
-def the_note_and_the_window_are_read_from_hr_policy_md_and_the_note_carries_the_whole_policy():
-    # hr_policy.md is the only place they are written: the note is that text, the window comes from its dates
+def the_note_and_the_window_are_read_from_the_policy_text_and_the_note_carries_the_whole_policy():
+    # the policy text is the only place they are written (hr_policy.md until HR edits it in the Handbook): the note is that text, the window comes from its dates
     text = open("hr_policy.md", encoding="utf-8").read()
-    assert tools.PAID_POLICY_NOTE in text
-    assert tools.PAID_WINDOW == ((5, 1), (10, 31))
+    window, note = tools.paid_policy()
+    assert note in text
+    assert window == ((5, 1), (10, 31))
     # the note must not read as a blocker, or as a promise: outside the window it can still be requested, and
     # the manager decides
-    assert "normally taken between 1 May and 31 October" in tools.PAID_POLICY_NOTE
-    assert "can still be requested" in tools.PAID_POLICY_NOTE
-    assert "your manager decides whether to approve it" in tools.PAID_POLICY_NOTE and "approves it" not in tools.PAID_POLICY_NOTE
+    assert "normally taken between 1 May and 31 October" in note
+    assert "can still be requested" in note
+    assert "your manager decides whether to approve it" in note and "approves it" not in note
 
 
 @test
 def paid_leave_results_carry_the_note_outside_the_window_and_other_leave_never_does():
     december = apply_leave("E001", "paid", "2030-12-02", "2030-12-04")
-    assert december["success"] and december["policy_note"] == tools.PAID_POLICY_NOTE
+    assert december["success"] and december["policy_note"] == tools.paid_policy()[1]
     summer = apply_leave("E001", "paid", "2030-07-01", "2030-07-03")
     assert summer["success"] and "policy_note" not in summer
     casual = apply_leave("E001", "casual", "2030-12-09", "2030-12-09")       # a December casual day is normal
@@ -133,7 +135,7 @@ def paid_leave_results_carry_the_note_outside_the_window_and_other_leave_never_d
 
 @test
 def a_balance_answer_about_paid_leave_has_the_note_and_other_balance_answers_do_not():
-    assert get_leave_balance("E001", "paid")["policy_note"] == tools.PAID_POLICY_NOTE
+    assert get_leave_balance("E001", "paid")["policy_note"] == tools.paid_policy()[1]
     assert "policy_note" not in get_leave_balance("E001")
     assert "policy_note" not in get_leave_balance("E001", "casual")
     assert get_leave_balance("E001", "paid")["leave_balance"]["paid"] == 12.5     # the numbers are unchanged
@@ -835,6 +837,43 @@ def a_correction_opening_is_taken_off_a_reply_that_followed_a_retry_note_and_not
                       "Let me know if you need anything else.", "", None):
         assert strip(untouched) == (untouched or ""), untouched
     assert strip("You're right.") == "You're right."                                              # never the whole reply
+
+
+def shipped():
+    return [dict(s) for s in policy_store.default_sections()]
+
+
+@test
+def a_policy_must_keep_the_sentences_the_leave_rules_enforce_and_the_paid_leave_window_the_rules_read():
+    ok = policy_store.problem_with
+    assert ok(shipped()) is None
+    for pattern, what in policy_store.ENFORCED:                                            # each enforced sentence is needed somewhere
+        edited = [dict(s, text=__import__("re").sub(pattern, "XXX", s["text"])) for s in shipped()]
+        assert what in ok(edited) and "ask a developer" in ok(edited), pattern
+    moved = shipped()                                                                        # but where it is written does not matter
+    carry = next(s for s in moved if s["title"] == "Carry forward")
+    moved.remove(carry); moved.append(dict(carry, title="Year end"))
+    assert ok(moved) is None
+    no_window = [dict(s, text=s["text"].replace("Paid leave is normally taken between", "Paid leave is often taken between")) for s in shipped()]
+    assert "Paid leave is normally taken between" in ok(no_window)
+    assert policy_store.paid_policy(shipped())[0] == ((5, 1), (10, 31))
+    shifted = [dict(s, text=s["text"].replace("1 May and 31 October", "1 June and 30 September")) for s in shipped()]
+    assert ok(shifted) is None and policy_store.paid_policy(shifted)[0] == ((6, 1), (9, 30))                # the dates may change: the rules follow
+    french = [dict(s, text=s["text"].replace("between 1 May and 31 October", "between 1 Mai and 31 Octobre")) for s in shipped()]
+    assert "months in English" in ok(french)                                                                    # a misspelled month is refused, with the reason
+
+
+@test
+def a_policy_section_has_a_title_some_text_and_a_sane_size():
+    ok = policy_store.problem_with
+    base = shipped()
+    assert "at least one" in ok([])
+    assert "needs a title" in ok(base + [{"title": "", "text": "x"}]) and "needs some text" in ok(base + [{"title": "New", "text": ""}])
+    assert "one line" in ok(base + [{"title": "a\nb", "text": "x"}]) and "at most 100" in ok(base + [{"title": "t" * 101, "text": "x"}])
+    assert "already a section called \"casual leave\"" in ok(base + [{"title": "casual leave", "text": "x"}]).replace("Casual leave", "casual leave")     # titles are unique, ignoring case
+    assert "too long" in ok(base + [{"title": "New", "text": "x" * 4001}])
+    assert "at most 30" in ok(base + [{"title": f"S{i}", "text": "x"} for i in range(30)])
+    assert ok(base + [{"title": "Company car", "text": "Managers get one after two years."}]) is None
 
 
 if __name__ == "__main__":

@@ -27,6 +27,7 @@ import leave_admin
 import onboarding
 import outbox
 import policy_gaps
+import policy_store
 import pdf_text
 import welcome
 from tracing import observe, propagate_attributes
@@ -183,6 +184,7 @@ def reset_memory():
     contracts.init_contracts()
     employee_files.init_files()
     policy_gaps.init_gaps()
+    policy_store.init_policy()
     collective_agreement.init_agreement()
     checkins.init_checkins()
     outbox.init_outbox()
@@ -194,6 +196,7 @@ def reset_memory():
         conn.execute("DELETE FROM employee_file_views")
         conn.execute("DELETE FROM employee_files")
         conn.execute("DELETE FROM policy_gaps")
+        conn.execute("DELETE FROM policy_versions")
         conn.execute("DELETE FROM agreement_sections")
         conn.execute("DELETE FROM collective_agreements")
         conn.execute("DELETE FROM onboarding_reminders")
@@ -380,6 +383,17 @@ def setup_hr_inbox():
     # HR has Hugo's open request waiting, and Hugo has 31 unused paid days
     setup_karthik_ticket()
     leave_admin.adjust_balance("H001", "E002", "paid", 23.5, "Days brought over for the test")
+
+
+def setup_hr_adds_a_company_car_section():
+    # HR adds a section in the Handbook: the real save, and the real re-index (the new text is embedded at once)
+    done = policy_store.save_section("H001", 0, "", "Company car", "A company car is available to managers after two years of service. Other employees can ask HR for a car allowance instead.")
+    assert done.get("success") and done["indexed"], done
+
+
+def setup_hr_changes_work_from_home_to_four_days():
+    done = policy_store.save_section("H001", 0, "Work from home", "Work from home", "Employees may work from home up to 4 days per week with manager approval. Work from home is not counted as leave.")
+    assert done.get("success") and done["indexed"], done
 
 
 def setup_gym_already_asked():
@@ -891,6 +905,31 @@ TEST_CASES = [
         "must_not_call": ["search_collective_agreement"],
         "reply_must_match": rf"(?is)(?=.*(?:{NAMES_THE_AGREEMENT}))(?=.*(?:not (?:been )?(?:added|uploaded|available|on file)|(?:hasn't|haven't|has not|have not) (?:been )?(?:added|uploaded)|don't have|do not have|no collective agreement|isn't (?:available|on file|added)))",
         "reply_must_not_match": r"(?i)\d+\s?%|percent|\b90\b|\b60 days",
+        "expected_requests": 0,
+    },
+    {
+        # HR added a section about it: the assistant answers from it, and the question is not kept as unanswered
+        "name": "policy editor: a section HR just added answers the question",
+        "user": "E001",
+        "auto_confirm": False,
+        "setup": setup_hr_adds_a_company_car_section,
+        "input": "Can I get a company car?",
+        "must_call": ["search_policy"],
+        "reply_must_match": r"(?is)(?=.*\bmanagers?\b)(?=.*\b(?:two|2) years\b)",
+        "reply_must_not_match": r"(?i)(?:doesn't|does not|don't|do not|isn't|is not) (?:cover|say|mention|specify|address)",
+        "reply_check": gap_problems(),
+        "expected_requests": 0,
+    },
+    {
+        # HR changed a number: the assistant gives the new one, never the old
+        "name": "policy editor: an edited number replaces the old one",
+        "user": "E001",
+        "auto_confirm": False,
+        "setup": setup_hr_changes_work_from_home_to_four_days,
+        "input": "How many days a week can I work from home?",
+        "must_call": ["search_policy"],
+        "reply_must_match": r"(?i)\b(?:4|four)\b",
+        "reply_must_not_match": r"(?i)\b(?:2|two)\s+days",
         "expected_requests": 0,
     },
     {

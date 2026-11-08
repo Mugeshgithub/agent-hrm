@@ -31,6 +31,7 @@ from demo_data import init_all
 import collective_agreement
 import needs_you
 import policy_gaps
+import policy_store
 from notifications import notify_decision, notify_ticket_reply
 from tools import (get_employee, apply_leave, cancel_leave, days_for, holidays_of, get_pending_requests,
                    decide_leave, create_hr_ticket, get_my_tickets, reply_to_ticket, PENDING, LEAVE_TYPES)
@@ -339,12 +340,78 @@ def read_notifications(request: Request):
 @app.get("/api/handbook")
 def handbook(request: Request):
     me(request)
-    text = open("hr_policy.md", encoding="utf-8").read()
-    sections = []
-    for part in text.split("\n## ")[1:]:
-        title, _, body = part.partition("\n")
-        sections.append({"title": title.strip(), "text": body.strip()})
+    return policy_store.sections()
+
+
+# ---------- the policy editor (HR) ----------
+# HR edits the sections of the company policy in the Handbook. Every save is a new version (who, when, what), the earlier ones stay, and
+# the new text is embedded at once for the assistant's search. The rules are in policy_store.py.
+class PolicySectionIn(BaseModel):
+    base_version: int           # the version the person was looking at: a save on top of a newer one is refused
+    original_title: str = ""    # empty: add a new section
+    title: str
+    text: str
+    note: str = ""
+
+
+class PolicyDeleteIn(BaseModel):
+    base_version: int
+    title: str
+    note: str = ""
+
+
+class PolicyRestoreIn(BaseModel):
+    base_version: int
+    version_id: int
+    note: str = ""
+
+
+@app.get("/api/hr/policy")
+def policy_for_editing(request: Request):
+    need(request, "hr")
+    now = policy_store.current()
+    by = get_employee(now["saved_by"]) if now["saved_by"] else None
+    return {"version": now["version"], "sections": now["sections"], "saved_by": by["name"] if by else None, "saved_at": now["saved_at"],
+            "change": now["change"], "original": now["original"], "kept": [what for _, what in policy_store.ENFORCED] + [policy_store.PAID_WINDOW_HELP]}
+
+
+@app.get("/api/hr/policy/versions")
+def policy_versions(request: Request):
+    need(request, "hr")
+    return policy_store.versions()
+
+
+@app.get("/api/hr/policy/versions/{version_id}")
+def policy_version(version_id: int, request: Request):
+    need(request, "hr")
+    sections = policy_store.get_version(version_id)
+    if sections is None:
+        raise HTTPException(404, "No such version.")
     return sections
+
+
+@app.post("/api/hr/policy/section")
+async def save_policy_section(body: PolicySectionIn, request: Request):
+    hr = need(request, "hr")
+    return fail_on_error(await run_in_threadpool(policy_store.save_section, hr["id"], body.base_version, body.original_title, body.title, body.text, body.note))
+
+
+@app.post("/api/hr/policy/section/delete")
+async def delete_policy_section(body: PolicyDeleteIn, request: Request):
+    hr = need(request, "hr")
+    return fail_on_error(await run_in_threadpool(policy_store.delete_section, hr["id"], body.base_version, body.title, body.note))
+
+
+@app.post("/api/hr/policy/restore")
+async def restore_policy_version(body: PolicyRestoreIn, request: Request):
+    hr = need(request, "hr")
+    return fail_on_error(await run_in_threadpool(policy_store.restore, hr["id"], body.base_version, body.version_id, body.note))
+
+
+@app.get("/api/hr/policy-gaps")
+def open_policy_gaps(request: Request):
+    need(request, "hr")
+    return policy_gaps.open_gaps()
 
 
 # ---------- employee records ----------
