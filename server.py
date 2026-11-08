@@ -29,6 +29,7 @@ import payslips
 import welcome
 from demo_data import init_all
 import needs_you
+import policy_gaps
 from notifications import notify_decision, notify_ticket_reply
 from tools import (get_employee, apply_leave, cancel_leave, days_for, holidays_of, get_pending_requests,
                    decide_leave, create_hr_ticket, get_my_tickets, reply_to_ticket, PENDING, LEAVE_TYPES)
@@ -598,6 +599,20 @@ def hr_document_file(doc_id: int, request: Request):
 @app.post("/api/hr/documents/{doc_id}/reviewed")
 def document_reviewed(doc_id: int, body: ReviewIn, request: Request):
     return fail_on_error(documents.mark_reviewed(need(request, "hr")["id"], doc_id, body.note))
+
+
+class GapCloseIn(BaseModel):
+    note: str = ""
+
+
+@app.post("/api/hr/policy-gaps/{gap_id}/dismiss")
+def policy_gap_dismiss(gap_id: int, body: GapCloseIn, request: Request):
+    return fail_on_error(policy_gaps.close(need(request, "hr")["id"], gap_id, "dismissed", body.note))
+
+
+@app.post("/api/hr/policy-gaps/{gap_id}/fixed")
+def policy_gap_fixed(gap_id: int, body: GapCloseIn, request: Request):
+    return fail_on_error(policy_gaps.close(need(request, "hr")["id"], gap_id, "fixed", body.note))
 
 
 @app.post("/api/hr/people/{emp_id}/cancel-hire")

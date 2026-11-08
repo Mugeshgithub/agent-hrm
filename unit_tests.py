@@ -10,6 +10,7 @@ import document_answers
 import documents
 import employee_files
 import pdf_text
+import policy_gaps
 import tool_guard
 import tools
 from eval_retry import MAX_RETRIED, retry_report, run_with_retry
@@ -708,6 +709,46 @@ def a_silent_document_is_recognised_in_a_reply_and_the_missing_part_is_asked_for
     assert nudge(["search_policy"], "Your contract doesn't mention it.") is None and nudge([], "x") is None                                  # no document read: not our business
     assert "do not apologise" in document_answers.SEARCH_NOW and "do not apologise" in document_answers.SAY_SILENT_FIRST    # the nudge must not leak into the reply
     assert "specify" in document_answers.SEARCH_NOW and "labelled" in document_answers.SAY_SILENT_FIRST.replace("labeled", "labelled")
+
+
+@test
+def the_assistant_saying_the_policy_is_silent_is_recognised_and_a_rule_the_policy_gives_is_not():
+    silent = policy_gaps.says_policy_silent
+    for yes in ("The HR policy doesn't cover company cars.", "From the company policy: the policy does not specify a gym budget.",
+                "The policy doesn't explicitly mention sabbaticals.", "I couldn't find anything about it in the HR policy.",
+                "There is nothing in the company policy about parking.", "A company car is not covered by the policy.",
+                "No matching section in the HR policy.", "The handbook is silent on this.", "From the company policy and French labour law: neither covers company cars.",
+                "Your contract doesn't specify it. The company policy has nothing on remote work abroad.", "The policy says nothing about it."):
+        assert silent(yes), yes
+    for no in ("Employees may work from home up to 2 days per week with manager approval.", "The policy doesn't require a doctor's note for one or two days.",
+               "Sick leave isn't covered by the paid-leave policy: it has its own section.", "Your contract doesn't specify it. From the company policy, not your contract: 2 days.",
+               "The company policy gives 30 days of notice.", "", None):
+        assert not silent(no), no
+
+
+@test
+def a_policy_gap_is_a_search_that_found_nothing_or_an_answer_that_says_the_policy_is_silent():
+    topic = policy_gaps.topic_from_turn
+    empty = [{"query": "company car", "found": False}]
+    assert topic(empty, "Here is something unrelated.") == "company car"                                     # nothing came back: a gap, whatever is said
+    assert topic([{"query": "company car", "found": True}], "The policy doesn't cover company cars.") == "company car"   # a section came back, but it does not answer
+    assert topic([{"query": "gym", "found": False}, {"query": "gym membership benefit", "found": True}], "The HR policy doesn't mention it.") == "gym membership benefit"   # the last search
+    assert topic([{"query": "remote work", "found": True}], "Up to 2 days a week with manager approval.") is None     # answered
+    assert topic([{"query": "gym", "found": False}, {"query": "remote work", "found": True}], "Up to 2 days a week.") is None   # a later search found it
+    assert topic([], "The policy doesn't say.") is None and topic(None, "x") is None                              # the policy was not searched: not our business
+    assert topic([{"query": "  ", "found": False}], "x") is None
+
+
+@test
+def a_question_is_kept_without_names_emails_or_numbers():
+    s = policy_gaps.scrub
+    assert s("Can Emma Laurent get a car?", {"Emma", "Laurent"}) == "Can [name] get a car?"
+    assert s("emma@cognivexai.eu asks about a car") == "[email] asks about a car"
+    assert s("badge E001 and H001") == "badge [id] and [id]" and "[number]" in s("my IBAN FR76 3000 6000 0112 3456 7890 189")
+    assert s("call 06 12 34 56 78 about a company car") == "call [number] about a company car"
+    assert s("emmanuel and Emma's car", {"Emma"}) == "emmanuel and [name]'s car"                          # a name inside another word is left alone
+    assert s("  a   long   gap  ") == "a long gap" and len(s("x" * 500)) == policy_gaps.TOPIC_MAX
+    assert s("Emma", {"Emma"}) == "[name]" and s(None) == ""
 
 
 if __name__ == "__main__":
