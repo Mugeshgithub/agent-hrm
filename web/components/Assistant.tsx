@@ -11,7 +11,7 @@ type Msg = { role: "user" | "assistant" | "note"; text: string; card?: Card; res
 type History = { id: number; role: string; content: string }[];
 
 const SUGGESTIONS: Record<string, string[]> = {
-  employee: ["How many days of leave do I have left?", "Why is my October pay lower than September?",
+  employee: ["How many days of leave do I have left?", "What does my contract say about notice?",
              "What does French law say about paid leave?"],
   manager: ["Show me my team's pending requests", "Who on my team is off next week?",
             "What does French law say about the maximum working day?"],

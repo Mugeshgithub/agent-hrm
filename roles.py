@@ -7,6 +7,7 @@ EVERYONE = {
     "get_leave_balance", "get_my_requests", "count_leave_days", "apply_leave", "cancel_leave",
     "search_policy", "search_labour_code", "create_hr_ticket", "get_my_tickets",
     "get_payslip", "compare_payslips", "get_pay_summary", "lookup_colleague", "get_balance_history", "get_holidays",
+    "get_my_documents", "read_my_document",       # the signed-in person's OWN documents: no way to name anyone else's
 }
 
 # a new hire (signed in with their welcome link, before day one) can only read their own onboarding: no leave,

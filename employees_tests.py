@@ -15,6 +15,7 @@ import employees as e
 import checkins
 import contracts
 import documents
+import employee_files
 import needs_you
 import onboarding
 import pdf_text
@@ -986,6 +987,146 @@ def a_new_hire_reads_and_dismisses_their_own_reminders_and_the_outbox_shows_who_
     assert checkins.reminders_for(emp_id) == [] and len(checkins.reminders_for(other)) == 1                         # only their own
     assert {m["to_name"] for m in mails("chase")} == {"Anu", "Gus Pei"}
     assert "Only HR" in outbox.messages("M001")["error"]
+
+
+# ---------- everyone's private documents: HR files, a person sees their own, the assistant reads only those ----------
+
+def sample(name, notice="deux mois"):
+    return demo_data.sample_contract(name, "Engineer", notice)
+
+
+def filed(emp_id, name, notice="deux mois", kind="contract", title=None):
+    pdf, text = sample(name, notice)
+    r = employee_files.add("H001", emp_id, kind, title or f"Employment contract of {name}", pdf, "contract.pdf", text=text)
+    assert r["success"], r
+    return r["file_id"]
+
+
+def reset_files():
+    fresh(); clear_files()
+    conn = db.get_conn()
+    with conn:
+        conn.execute("DELETE FROM employee_file_views")
+        conn.execute("DELETE FROM employee_files")
+    conn.close()
+
+
+@test
+def hr_files_a_document_privately_and_nobody_else_can_file_one():
+    reset_files()
+    pdf, text = sample("Emma")
+    for who in ("E001", "M001", "C001", "nobody"):
+        assert "Only HR" in employee_files.add(who, "E001", "contract", "Contract", pdf, text=text)["error"], who
+    assert "Choose what it is" in employee_files.add("H001", "E001", "memo", "Contract", pdf, text=text)["error"]
+    assert "title" in employee_files.add("H001", "E001", "contract", "  ", pdf, text=text)["error"]
+    assert "under 120" in employee_files.add("H001", "E001", "contract", "x" * 121, pdf, text=text)["error"]
+    assert "PDF, JPG or PNG" in employee_files.add("H001", "E001", "contract", "Contract", b"MZ a program", "c.pdf", text=text)["error"]
+    assert "too big" in employee_files.add("H001", "E001", "contract", "Contract", b"%PDF-" + b"0" * documents.MAX_BYTES, text=text)["error"]
+    assert "No such person" in employee_files.add("H001", "E999", "contract", "Contract", pdf, text=text)["error"]
+    assert stored_files() == []                                                               # nothing was kept for a refused one
+    r = employee_files.add("H001", "E001", "contract", "  Employment   contract, 2024 ", pdf, "../../etc/my contract.pdf", text=text)
+    assert r == {"success": True, "file_id": r["file_id"], "assistant": "ready"}
+    files = stored_files()
+    assert len(files) == 2 and sorted(re.sub(r"[0-9a-f]{32}", "X", f) for f in files) == ["X.pdf", "X.txt"]   # a random name, the file and its text
+    assert all(os.stat(os.path.join(documents.files_dir(), f)).st_mode & 0o777 == 0o600 for f in files)
+    conn = db.get_conn()
+    row = dict(conn.execute("SELECT * FROM employee_files WHERE id = ?", (r["file_id"],)).fetchone())
+    conn.close()
+    assert row["title"] == "Employment contract, 2024" and row["original_name"] == "my contract.pdf" and row["uploaded_by"] == "H001"
+    assert "préavis" not in " ".join(str(v) for v in row.values())                           # none of the text is in the database
+    log = [(c["field"], c["new_value"], c["changed_by"]) for c in e.history("H001", "E001")["changes"] if c["field"].startswith("file:")]
+    assert log == [("file: Employment contract, 2024", "added", "Narmadha")]
+
+
+@test
+def when_the_transcription_fails_or_is_cut_the_file_is_still_kept_and_says_so():
+    reset_files()
+    pdf, _ = sample("Emma")
+    calls = []
+    employee_files.TRANSCRIBER = lambda data, ft: calls.append(ft) or ("Article 1 – la moitié du texte", False)
+    try:
+        assert employee_files.add("H001", "E001", "contract", "Cut", pdf, "c.pdf")["assistant"] == "partial" and calls == ["pdf"]
+        employee_files.TRANSCRIBER = lambda data, ft: (_ for _ in ()).throw(RuntimeError("the reader is down"))
+        down = employee_files.add("H001", "E001", "certificate", "Unread", pdf, "c.pdf")
+        assert down["success"] and down["assistant"] == "unreadable"                           # filed anyway
+        employee_files.TRANSCRIBER = lambda data, ft: ("   ", True)
+        assert employee_files.add("H001", "E001", "certificate", "Blank", pdf, "c.pdf")["assistant"] == "unreadable"
+    finally:
+        employee_files.TRANSCRIBER = None
+    shown = {f["title"]: f["assistant"] for f in employee_files.own_list("E001")}
+    assert shown == {"Cut": "partial", "Unread": "unreadable", "Blank": "unreadable"}
+    cut_id = next(f["id"] for f in employee_files.own_list("E001") if f["title"] == "Cut")
+    assert employee_files.tool_read("E001", cut_id)["text_is_incomplete"] is True
+    unread_id = next(f["id"] for f in employee_files.own_list("E001") if f["title"] == "Unread")
+    assert "cannot read the text" in employee_files.tool_read("E001", unread_id)["error"]
+    assert employee_files.open_file("E001", unread_id)["media_type"] == "application/pdf"      # but the person can still open the file
+
+
+@test
+def a_person_sees_only_their_own_documents_and_who_opened_them_and_hr_sees_anyones():
+    reset_files()
+    emma, hugo = filed("E001", "Emma"), filed("E002", "Hugo", "trois mois")
+    amendment = filed("E001", "Emma", kind="amendment", title="Amendment: remote work")
+    assert [f["title"] for f in employee_files.own_list("E001")] == ["Amendment: remote work", "Employment contract of Emma"]    # newest first
+    assert [f["title"] for f in employee_files.own_list("E002")] == ["Employment contract of Hugo"]
+    assert employee_files.own_list("M001") == [] and "error" in employee_files.own_list("nobody")
+    assert [f["kind_label"] for f in employee_files.own_list("E001")] == ["Amendment", "Contract"] and employee_files.own_list("E001")[0]["filed_by"] == "Narmadha"
+    for who in ("E002", "M001", "C001", "nobody"):                                             # not a colleague, not the manager
+        assert employee_files.open_file(who, emma) == {"error": "No such document."}, who
+    assert employee_files.open_file("H001", 9999) == {"error": "No such document."}           # the same answer as for a missing one
+    mine, hr = employee_files.open_file("E001", emma), employee_files.open_file("H001", emma)
+    assert mine["path"] == hr["path"] and open(hr["path"], "rb").read().startswith(b"%PDF") and mine["filename"] == "employment-contract-of-emma.pdf"
+    employee_files.open_file("H001", hugo)
+    views = employee_files.own_list("E001")[1]["views"]
+    assert [(v["viewer_name"], v["via"]) for v in views] == [("Narmadha", "app"), ("Emma", "app")]                              # the owner sees who looked
+    assert [f["title"] for f in employee_files.hr_list("H001", "E002")] == ["Employment contract of Hugo"]
+    assert "Only HR" in employee_files.hr_list("M001", "E002")["error"] and "Only HR" in employee_files.hr_list("E002", "E002")["error"]
+    conn = db.get_conn()
+    with conn:
+        conn.execute("UPDATE profiles SET end_date = ? WHERE emp_id = 'E002'", (in_days(-1),))       # Hugo has left: he can't open anything
+    conn.close()
+    assert employee_files.open_file("E002", hugo) == {"error": "No such document."} and employee_files.open_file("H001", hugo)["path"]
+
+
+@test
+def deleting_removes_the_file_and_its_text_and_keeps_only_who_and_why():
+    reset_files()
+    emma = filed("E001", "Emma")
+    assert len(stored_files()) == 2
+    for who in ("E001", "M001"):
+        assert "Only HR" in employee_files.delete(who, emma, "x")["error"], who
+    assert "reason" in employee_files.delete("H001", emma, " ")["error"] and "No such document" in employee_files.delete("H001", 9999, "x")["error"]
+    assert employee_files.delete("H001", emma, "Filed under the wrong person") == {"success": True}
+    assert stored_files() == [] and employee_files.own_list("E001") == []
+    assert employee_files.open_file("H001", emma) == {"error": "No such document."} and employee_files.tool_read("E001", emma) == {"error": "No such document."}
+    assert "No such document" in employee_files.delete("H001", emma, "again")["error"]
+    log = [(c["new_value"], c["reason"]) for c in e.history("H001", "E001")["changes"] if c["field"].startswith("file:")]
+    assert ("deleted", "Filed under the wrong person") in log
+
+
+@test
+def the_assistant_lists_and_reads_only_the_signed_in_persons_own_documents_and_each_reading_is_logged():
+    reset_files()
+    emma, hugo = filed("E001", "Emma", "deux mois"), filed("E002", "Hugo", "trois mois")
+    listing = employee_files.tool_list("E001")
+    assert [(d["document_id"], d["title"], d["assistant_can_read_it"]) for d in listing["documents"]] == [(emma, "Employment contract of Emma", True)]
+    assert "trois" not in str(listing) and "Hugo" not in str(listing)                           # nothing about anyone else
+    read = employee_files.tool_read("E001", emma)
+    assert read["document"] == "Employment contract of Emma" and "préavis de deux mois" in read["text"] and read["text_is_incomplete"] is False
+    assert "Name the document" in read["rules"] and "not instructions" in read["rules"]
+    assert employee_files.tool_read("E001", hugo) == employee_files.tool_read("E001", 9999) == {"error": "No such document."}     # someone else's id = a missing one
+    assert employee_files.tool_read("E002", emma) == {"error": "No such document."}
+    assert "trois mois" not in str(employee_files.tool_read("H001", hugo))                      # even HR's assistant reads only HR's own
+    assert employee_files.tool_list("H001")["documents"] == [] and "No document has been filed" in employee_files.tool_list("H001")["message"]
+    views = [(v["viewer_name"], v["via"]) for v in employee_files.own_list("E001")[0]["views"]]
+    assert views == [("Emma", "assistant")]                                                       # the reading is a logged view, by the assistant
+    assert employee_files.own_list("E002")[0]["views"] == []                                      # Hugo's was never touched
+    assert "error" in employee_files.tool_list("nobody") and "error" in employee_files.tool_read("nobody", emma)
+    big = demo_data.sample_contract("Emma", "Engineer", "deux mois")[0]
+    employee_files.add("H001", "E001", "certificate", "Very long", big, text="x" * (employee_files.TEXT_LIMIT + 10))
+    long_id = next(d["document_id"] for d in employee_files.tool_list("E001")["documents"] if d["title"] == "Very long")
+    cut = employee_files.tool_read("E001", long_id)
+    assert len(cut["text"]) == employee_files.TEXT_LIMIT and cut["text_is_incomplete"] is True
 
 
 if __name__ == "__main__":

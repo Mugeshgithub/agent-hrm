@@ -7,6 +7,7 @@ db.DB_PATH = "unit_test_hr.db"   # its own database, never the real hr.db
 
 import contracts
 import documents
+import employee_files
 import pdf_text
 import tools
 from eval_retry import MAX_RETRIED, retry_report, run_with_retry
@@ -255,7 +256,7 @@ def fake_tools():
              "get_payslip", "compare_payslips", "get_pay_summary",
              "get_pending_requests", "get_team_member_balance", "decide_leave",
              "get_open_tickets", "reply_to_ticket", "search_labour_code", "lookup_colleague", "get_balance_history", "get_holidays",
-             "get_needs_attention", "get_my_onboarding", "get_contract_status"]
+             "get_needs_attention", "get_my_onboarding", "get_contract_status", "get_my_documents", "read_my_document"]
     tools = [{"name": n, "description": n, "input_schema": {"type": "object", "properties": {}}}
              for n in names]
     for t in tools:
@@ -285,21 +286,21 @@ def names_for(role):
 def employee_gets_no_manager_or_hr_tools():
     names = names_for("employee")
     assert not names & (MANAGER_ONLY | HR_ONLY | STAFF_ONLY), names
-    assert "apply_leave" in names and len(names) == 15, names
+    assert "apply_leave" in names and len(names) == 17, names
 
 
 @test
 def manager_gets_team_tools_but_not_hr_tools():
     names = names_for("manager")
     assert MANAGER_ONLY <= names and not names & HR_ONLY, names
-    assert len(names) == 19, names
+    assert len(names) == 21, names
 
 
 @test
 def hr_gets_ticket_tools_but_not_manager_tools():
     names = names_for("hr")
     assert HR_ONLY <= names and not names & MANAGER_ONLY, names
-    assert len(names) == 19 and "get_contract_status" in names, names
+    assert len(names) == 21 and "get_contract_status" in names, names
 
 
 @test
@@ -671,6 +672,17 @@ def the_last_day_of_a_trial_period_counts_months_for_a_cdi_and_days_for_a_cdd():
     assert end("CDI", date(2030, 12, 31), 2) == date(2031, 2, 27)                   # a short month: 28 February, minus the day
     assert end("CDD", date(2030, 1, 7), 12) == date(2030, 1, 18) and end("CDD", date(2030, 1, 7), 1) == date(2030, 1, 7)
     assert end("CDI", date(2030, 3, 4), 0) is None and end("CDD", date(2030, 3, 4), 0) is None and end("CDI", date(2030, 3, 4), None) is None
+
+
+@test
+def after_a_document_has_been_read_the_policy_and_law_searches_are_not_offered_for_that_answer():
+    tools = [{"name": n} for n in ("get_my_documents", "read_my_document", "search_policy", "search_labour_code", "get_leave_balance")]
+    names = lambda called: [t["name"] for t in employee_files.tools_after(called, tools)]
+    assert names([]) == [t["name"] for t in tools] and names(["search_policy"]) == [t["name"] for t in tools]       # not about a document yet
+    assert names(["get_my_documents"]) == [t["name"] for t in tools]                                              # listing is not reading
+    after = names(["get_my_documents", "read_my_document"])
+    assert after == ["get_my_documents", "read_my_document", "get_leave_balance"]                                  # the document is the only source
+    assert employee_files.DOCUMENT_ONLY_BLOCKS == {"search_policy", "search_labour_code"} and len(tools) == 5      # the list itself is not changed
 
 
 if __name__ == "__main__":

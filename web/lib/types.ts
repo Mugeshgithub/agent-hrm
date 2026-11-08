@@ -80,6 +80,11 @@ export type WelcomeStep = {
 export type UploadResult =
   | { accepted: true; document_id: number; read: { label: string; value: string }[]; flagged: boolean }
   | { accepted: false; problems: string[]; document_id: number };
+// a person's private documents (contract, amendments, certificates) and who opened each
+export type PersonFile = {
+  id: number; kind: "contract" | "amendment" | "certificate"; kind_label: string; title: string; filed_on: string; filed_by: string | null;
+  assistant: "ready" | "partial" | "unreadable"; views: { viewed_at: string; via: "app" | "assistant"; viewer_name: string | null }[];
+};
 export type WaitingDoc = { document_id: number; step_key: string; read: { label: string; value: string }[] };
 export type HrDocument = {
   id: number; step_key: string; label: string; status: "read" | "confirmed"; uploaded_at: string; confirmed_at: string | null;

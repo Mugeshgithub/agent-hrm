@@ -9,6 +9,7 @@ from datetime import date, timedelta
 
 import db
 db.DB_PATH = os.getenv("HRM_DB", db.DB_PATH)   # same database as server.py (HRM_DB=web_demo.db keeps hr.db untouched)
+import pdf_text
 import payslips
 import hr_queries
 import employees
@@ -16,6 +17,7 @@ import leave_admin
 import checkins
 import contracts
 import documents
+import employee_files
 import onboarding
 import outbox
 import welcome
@@ -39,12 +41,15 @@ def init_all(reset=False):
     documents.init_documents()
     contracts.init_contracts()
     checkins.init_checkins()
+    employee_files.init_files()
     leave_admin.init_leave_admin()   # public holidays and the balance history
     if reset:   # balances start again, so their history does too
         conn = db.get_conn()
         with conn:
             conn.execute("DELETE FROM leave_adjustments")
             conn.execute("DELETE FROM leave_runs")
+            conn.execute("DELETE FROM employee_file_views")
+            conn.execute("DELETE FROM employee_files")
             conn.execute("DELETE FROM onboarding_reminders")
             conn.execute("DELETE FROM contract_downloads")
             conn.execute("DELETE FROM contract_drafts")
@@ -128,6 +133,34 @@ def seed_onboarding():
     print(f"Onboarding added for {hired['name']}.")
 
 
+def sample_contract(name, title, notice, extra=()):
+    """A short French employment contract as a PDF and as text, for the demo and the tests. `notice` is how the resignation
+    notice is worded ("un mois"); `extra` adds more articles, as (heading, text) pairs."""
+    blocks = [("h1", "CONTRAT DE TRAVAIL À DURÉE INDÉTERMINÉE"), ("gap", ""), ("p", f"Entre CognivexAI et {name}."),
+              ("h2", "Article 1 – Fonctions"), ("p", f"{name} est engagé(e) en qualité de {title}."),
+              ("h2", "Article 2 – Durée du travail"), ("p", "La durée du travail est de 35 heures par semaine."),
+              ("h2", "Article 3 – Congés payés"), ("p", "Le Salarié acquiert 2,5 jours ouvrables de congés payés par mois de travail effectif."),
+              ("h2", "Article 4 – Préavis"), ("p", f"En cas de démission, le Salarié respecte un préavis de {notice}.")]
+    for n, (heading, text) in enumerate(extra, start=5):
+        blocks += [("h2", f"Article {n} – {heading}"), ("p", text)]
+    return pdf_text.make_pdf(blocks, title="Contrat de travail"), "\n".join(t for s, t in blocks if s != "gap")
+
+
+def seed_files():
+    # a contract in each demo person's documents area, filed by HR. The text is given, so no Claude call is needed.
+    conn = db.get_conn()
+    has_any = conn.execute("SELECT COUNT(*) FROM employee_files").fetchone()[0]
+    conn.close()
+    if has_any:
+        print("Documents already exist; nothing added.")
+        return
+    for emp_id, title, notice in (("E001", "Software Engineer", "un mois"), ("E002", "Data Analyst", "un mois"), ("M001", "Engineering Manager", "deux mois")):
+        person = hr_queries.person(emp_id)
+        pdf, text = sample_contract(person["name"], title, notice)
+        employee_files.add("H001", emp_id, "contract", f"Employment contract, {person['start_date'][:4]}", pdf, "contrat.pdf", text=text)
+    print("Contracts filed for Emma, Hugo and Lucas.")
+
+
 def catch_up_paid_leave():
     # a demo database starts with 0 paid days. Credit January up to last month with the REAL monthly
     # job, once, so people have what they would have earned (the job refuses to credit a month twice)
@@ -147,4 +180,5 @@ if __name__ == "__main__":
     init_all(reset="--reset" in sys.argv)
     seed_activity()
     seed_onboarding()
+    seed_files()
     catch_up_paid_leave()

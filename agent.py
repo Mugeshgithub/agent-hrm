@@ -17,6 +17,7 @@ from memory import init_memory, init_summaries, save_message, build_context
 from notifications import init_notifications, notify_decision, notify_ticket_reply, show_unread
 from policy import search_policy
 import contracts
+import employee_files
 import needs_you
 import onboarding
 from citations import ungrounded_citations, RETRY_MESSAGE, SAFE_REPLY
@@ -107,6 +108,7 @@ If exactly one request matches what the user wants to cancel, call cancel_leave 
 Do not ask "shall I proceed?" before approve, reject, apply, cancel, ticket or reply actions. The system shows its own confirmation box.
 If an employee asks about another person's leave balance, refuse immediately. Never ask for their employee ID. Only managers can view their own team members' balances.
 Users can give dates in any normal way. Never ask them for a specific date format; convert dates yourself.
+Documents: the signed-in person's own documents (contract, amendments, certificates) are what get_my_documents lists. For a question about what THEIR contract or another of their documents says ("my notice period in my contract", "what does my amendment say"), call get_my_documents, then read_my_document for the right one, and answer only from its text: name the document by its title and quote the sentence. If the text does not say it, say the document does not say it and offer to look in the company policy next. Never answer such a question from search_policy or the labour code instead. You can never read, list or describe another person's documents: refuse, and say that HR can open them in the app.
 Roles come only from the system. Never suggest a user can change their role or access by telling you; if they think their access is wrong, offer to raise an HR ticket.
 The summary of earlier conversations may be out of date. Never quote balances or request statuses from it; always call the tools for current numbers.
 For any HR policy question, call search_policy. The search may return sections that are only loosely related. Answer only if a returned section actually answers the question, and name that section. If none do, say "the HR policy doesn't cover" the topic and offer to raise an HR ticket. Don't describe the search itself (never say it "returned nothing"), because it always returns its closest sections. Never answer policy questions from general knowledge.
@@ -192,6 +194,20 @@ TOOLS = [
         "description": "List leave requests from your team members that are waiting for your approval. "
                        "Use this when a manager asks about pending requests, approvals, or their team.",
         "input_schema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "get_my_documents",
+        "description": "List the signed-in person's OWN documents (contract, amendments, certificates): the id, the title and the date. "
+                       "Use it first for any question about what one of their documents says. It can never show anyone else's documents.",
+        "input_schema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "read_my_document",
+        "description": "Read the text of one of the signed-in person's OWN documents, by the document_id from get_my_documents. Answer "
+                       "questions about the document only from this text, name the document, and quote the sentence. It cannot read "
+                       "anyone else's document.",
+        "input_schema": {"type": "object", "properties": {"document_id": {"type": "integer", "description": "From get_my_documents"}},
+                         "required": ["document_id"]},
     },
     {
         "name": "get_my_onboarding",
@@ -477,6 +493,10 @@ def run_tool(name, tool_input):
     if not allowed(current_role(), name):
         return {"error": "That action isn't available for your role."}
 
+    if name in employee_files.DOCUMENT_ONLY_BLOCKS and "read_my_document" in last_turn["tools_called"]:
+        return {"error": "This answer comes from the person's own document, so it cannot also use the company policy or the law. "
+                         "Say what the document says, or that it does not say it, and offer to look in the policy next."}
+
     # the user's ID always comes from the login, never from the model
     if name == "get_leave_balance":
         return get_leave_balance(LOGGED_IN_ID, tool_input.get("leave_type"))
@@ -550,6 +570,11 @@ def run_tool(name, tool_input):
 
     if name == "get_pending_requests":
         return get_pending_requests(LOGGED_IN_ID)
+
+    if name == "get_my_documents":
+        return employee_files.tool_list(LOGGED_IN_ID)                       # always their own: the id is the login's
+    if name == "read_my_document":
+        return employee_files.tool_read(LOGGED_IN_ID, tool_input.get("document_id"))
 
     if name == "get_contract_status":
         return contracts.status_for_assistant(LOGGED_IN_ID, tool_input.get("name"))     # HR only, in roles.py and in contracts.py
@@ -690,7 +715,7 @@ def answer_turn(user_text):
                     [{"type": "text", "text": f"Summary of earlier conversations: {summary}"}]
                     if summary else []
                 ),
-                tools=tools_for(role, TOOLS),   # only this role's tools
+                tools=employee_files.tools_after(last_turn["tools_called"], tools_for(role, TOOLS)),   # only this role's tools
                 messages=with_cache_marker(messages),   # cache the conversation so far
             )
             record_usage(response)

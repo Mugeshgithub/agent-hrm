@@ -14,6 +14,7 @@ db.DB_PATH = os.environ["HRM_DB"]
 from fastapi.testclient import TestClient
 import demo_data
 import documents
+import employee_files
 import pdf_text
 demo_data.init_all(reset=True)
 demo_data.seed_activity()
@@ -661,6 +662,74 @@ def hr_runs_the_daily_check_by_hand_and_the_new_hire_reads_and_dismisses_the_rem
     assert as_person("E001").get("/api/welcome-reminders").status_code == 401             # an ordinary session is not a new hire
     assert c.post("/api/welcome-reminders/read").json() == {"ok": True} and c.get("/api/welcome-reminders").json() == []
     assert c.post("/api/hr/onboarding/daily-run").status_code == 403                        # and a link session can't run it
+
+
+def file_for(hr, emp_id, title="Employment contract", kind="contract", text="Article 4 – Préavis: deux mois.", data=None):
+    employee_files.TRANSCRIBER = lambda d, ft: (text, True)
+    try:
+        return hr.post(f"/api/hr/people/{emp_id}/files?kind={kind}&title={title}&name=c.pdf", content=data or FILE,
+                       headers={"content-type": "application/octet-stream"})
+    finally:
+        employee_files.TRANSCRIBER = None
+
+
+@test
+def hr_files_a_document_for_anyone_and_a_person_sees_and_opens_only_their_own():
+    hr = as_person("H001")
+    made = file_for(hr, "E001", "Emma contract")
+    assert made.status_code == 200 and made.json()["assistant"] == "ready", made.text
+    emma_file = made.json()["file_id"]
+    hugo_file = file_for(hr, "E002", "Hugo contract").json()["file_id"]
+    emma, hugo = as_person("E001"), as_person("E002")
+    assert [f["title"] for f in emma.get("/api/files").json()] == ["Emma contract"]
+    assert [f["title"] for f in hugo.get("/api/files").json()] == ["Hugo contract"]
+    mine = emma.get(f"/api/files/{emma_file}/file")
+    assert mine.status_code == 200 and mine.content == FILE and mine.headers["content-type"] == "application/pdf"
+    assert "inline" in mine.headers["content-disposition"]
+    for who in ("E002", "M001", "C001"):                                                     # a colleague, the manager, the CEO
+        assert as_person(who).get(f"/api/files/{emma_file}/file").status_code == 404, who
+    assert emma.get(f"/api/files/{hugo_file}/file").status_code == 404                       # and Emma can't open Hugo's by guessing its id
+    assert hr.get(f"/api/files/{emma_file}/file").status_code == 200                         # HR can
+    views = [(v["viewer_name"], v["via"]) for v in emma.get("/api/files").json()[0]["views"]]
+    assert views == [("Narmadha", "app"), ("Emma", "app")]                                   # the owner sees who opened it
+    assert [f["title"] for f in hr.get("/api/hr/people/E001/files").json()] == ["Emma contract"]
+    for who in ("E001", "M001"):
+        assert as_person(who).get("/api/hr/people/E002/files").status_code == 403, who       # not even your own page's HR route
+    assert TestClient(server.app).get("/api/files").status_code == 401
+
+
+@test
+def only_hr_can_file_or_delete_and_a_bad_upload_is_refused_before_anything_is_stored():
+    hr = as_person("H001")
+    before = len(os.listdir(documents.files_dir()))
+    for who in ("E001", "M001"):
+        assert file_for(as_person(who), "E001").status_code == 403, who
+    assert TestClient(server.app).post("/api/hr/people/E001/files?kind=contract&title=x", content=FILE).status_code == 401
+    assert file_for(hr, "E001", kind="memo").status_code == 400
+    assert file_for(hr, "E001", title=" ").status_code == 400
+    assert file_for(hr, "E999").status_code == 400
+    assert file_for(hr, "E001", data=b"MZ a program").json()["detail"].startswith("I can only read PDF, JPG or PNG")
+    big = file_for(hr, "E001", data=b"%PDF-" + b"0" * documents.MAX_BYTES)
+    assert big.status_code == 413 and "10 MB" in big.json()["detail"]
+    assert len(os.listdir(documents.files_dir())) == before                                  # nothing stored for any of them
+    doc = file_for(hr, "E003", "Clara certificate", "certificate").json()["file_id"]
+    for who in ("E003", "M001"):
+        assert as_person(who).post(f"/api/hr/files/{doc}/delete", json={"reason": "x"}).status_code == 403, who
+    assert hr.post(f"/api/hr/files/{doc}/delete", json={"reason": ""}).status_code == 400
+    assert hr.post(f"/api/hr/files/{doc}/delete", json={"reason": "Wrong person"}).status_code == 200
+    assert len(os.listdir(documents.files_dir())) == before
+    assert as_person("E003").get(f"/api/files/{doc}/file").status_code == 404 and as_person("E003").get("/api/files").json() == []
+
+
+@test
+def a_new_hire_link_session_cannot_reach_the_documents_area():
+    hr = as_person("H001")
+    emp_id, c = hire_signed_in(hr, "val@cognivexai.eu", "Val Moss")
+    doc = file_for(hr, emp_id, "Val contract").json()["file_id"]
+    for path in ("/api/files", f"/api/files/{doc}/file", f"/api/hr/people/{emp_id}/files"):
+        assert c.get(path).status_code == 403, path
+    assert c.post(f"/api/hr/people/{emp_id}/files?kind=contract&title=x", content=FILE).status_code == 403
+    assert c.post(f"/api/hr/files/{doc}/delete", json={"reason": "x"}).status_code == 403
 
 
 if __name__ == "__main__":
