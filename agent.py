@@ -18,6 +18,7 @@ from notifications import init_notifications, notify_decision, notify_ticket_rep
 from policy import search_policy
 import contracts
 import employee_files
+import tool_guard
 import needs_you
 import onboarding
 from citations import ungrounded_citations, RETRY_MESSAGE, SAFE_REPLY
@@ -87,7 +88,7 @@ SESSION_ID = new_session_id(LOGGED_IN_ID)
 state = {"messages": [], "summary": None}
 
 # what happened in the last answered message: read by the evals (tools used, tool results for citations)
-last_turn = {"tools_called": [], "sources": []}
+last_turn = {"tools_called": [], "sources": [], "refused": []}      # refused: calls the code refused (not counted as called)
 EXTRA_TAGS = []   # extra Langfuse tags, e.g. ["eval"] when the evals drive the agent
 
 SYSTEM_PROMPT = f"""You are an HR assistant for employees, managers and HR staff.
@@ -489,13 +490,9 @@ def confirmed(name, tool_input, details):
 
 @observe()   # each tool call shows up as a step inside the trace
 def run_tool(name, tool_input):
-    # defence in depth: even if a tool call gets through, the role must allow it
-    if not allowed(current_role(), name):
-        return {"error": "That action isn't available for your role."}
-
-    if name in employee_files.DOCUMENT_ONLY_BLOCKS and "read_my_document" in last_turn["tools_called"]:
-        return {"error": "This answer comes from the person's own document, so it cannot also use the company policy or the law. "
-                         "Say what the document says, or that it does not say it, and offer to look in the policy next."}
+    # defence in depth: even if a tool call gets through, the role and the source rules must allow it
+    if (refused := tool_guard.refusal(current_role(), name, last_turn["tools_called"])):
+        return refused
 
     # the user's ID always comes from the login, never from the model
     if name == "get_leave_balance":
@@ -704,6 +701,7 @@ def answer_turn(user_text):
         citation_retry_used = False
         genuine_retry_used = False
         last_turn["tools_called"] = []
+        last_turn["refused"] = []
         last_turn["sources"] = turn_sources
         last_turn["question"] = user_text   # the employee's own words, used by the labour-law search
         while calls_this_message < MAX_CALLS_PER_MESSAGE:
@@ -755,8 +753,11 @@ def answer_turn(user_text):
             for block in response.content:
                 if block.type == "tool_use":
                     print(f"  [tool call] {block.name} {block.input}")
-                    last_turn["tools_called"].append(block.name)
-                    result = run_tool(block.name, block.input)
+                    if tool_guard.refusal(role, block.name, last_turn["tools_called"]):
+                        last_turn["refused"].append(block.name)         # refused by the code: it did nothing, so it is not "called"
+                    else:
+                        last_turn["tools_called"].append(block.name)
+                    result = run_tool(block.name, block.input)          # run_tool applies the same refusal
                     turn_sources.append(json.dumps(result, ensure_ascii=False))
                     tool_results.append({
                         "type": "tool_result",
