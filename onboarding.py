@@ -109,7 +109,7 @@ def _shape(row, today):
     return row
 
 
-def _is_hr(actor_id):
+def is_hr(actor_id):
     staff = get_employee(actor_id)
     person = hr_queries.person(actor_id) if staff else None
     return bool(person and person["active"] and person["role"] == "hr")
@@ -117,7 +117,7 @@ def _is_hr(actor_id):
 
 def checklist(viewer_id, emp_id, today=None):
     # HR's view on a person's profile. None when the person has no onboarding.
-    if not _is_hr(viewer_id):
+    if not is_hr(viewer_id):
         return {"error": "Only HR can see an onboarding checklist."}
     today = today or date.today()
     steps = _rows(STEP + " WHERE o.emp_id = ? ORDER BY s.position", (emp_id,))
@@ -131,6 +131,24 @@ def checklist(viewer_id, emp_id, today=None):
             "manager_name": person["manager_name"], "steps": steps,
             "progress": {"done": done, "skipped": skipped, "total": len(steps),
                          "complete": done + skipped == len(steps)}}
+
+
+def my_checklist(emp_id, today=None):
+    # The new hire's own view (the emp_id comes from their welcome link, never from the model). Only what they
+    # need: the step, who does it, when, and where it stands. No notes and no names of the people who handled
+    # it. "next_for_you" is the first step that is theirs and still to do.
+    today = today or date.today()
+    steps = _rows(STEP + " WHERE o.emp_id = ? ORDER BY s.position", (emp_id,))
+    person = hr_queries.person(emp_id)
+    if not steps or not person or not person["active"]:
+        return {"error": "There is no onboarding checklist for you."}
+    mine = [{"step": s["title"], "what": s["detail"], "who": {NEW_HIRE: "you", HR: "HR", MANAGER: "your manager"}[s["owner"]],
+             "due_date": s["due_date"], "status": s["status"],
+             "overdue": s["status"] == TODO and s["due_date"] < today.isoformat()} for s in steps]
+    next_for_you = next((s["step"] for s in mine if s["who"] == "you" and s["status"] == TODO), None)
+    return {"name": person["name"], "job_title": person["title"], "start_date": person["start_date"],
+            "manager": person["manager_name"], "steps": mine, "next_for_you": next_for_you,
+            "done": sum(s["status"] != TODO for s in mine), "total": len(mine)}
 
 
 def open_steps(actor_id, today=None):
@@ -169,7 +187,7 @@ def _step_for(actor_id, step_id, action):
     hire = hr_queries.person(step["emp_id"])
     if not hire["active"]:
         return None, {"error": f"{hire['name']} no longer works here."}
-    if _is_hr(actor_id):
+    if is_hr(actor_id):
         return step, None
     staff = get_employee(actor_id)
     own_manager_step = (action == "complete" and staff is not None and staff["role"] == "manager"

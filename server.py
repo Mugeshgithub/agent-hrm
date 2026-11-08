@@ -18,7 +18,9 @@ import employees
 import hr_queries
 import leave_admin
 import onboarding
+import outbox
 import payslips
+import welcome
 from demo_data import init_all
 import needs_you
 from notifications import notify_decision, notify_ticket_reply
@@ -36,7 +38,13 @@ app.add_middleware(SessionMiddleware, secret_key=os.getenv("HRM_SESSION_SECRET")
 
 # ---------- session ----------
 
+APP_URL = os.getenv("HRM_APP_URL", "http://localhost:3000")     # where the welcome links point
+
+
 def me(request: Request):
+    if request.session.get("new_hire"):
+        # a welcome-link session can only use the /api/welcome pages below: every other page refuses it here
+        raise HTTPException(403, "This page isn't available from a welcome link.")
     emp_id = request.session.get("emp_id")
     emp = get_employee(emp_id) if emp_id else None
     if emp is None or not employees.is_active(emp_id):      # people who have left lose access
@@ -76,6 +84,15 @@ def login(body: SessionIn, request: Request):
     request.session.clear()
     request.session["emp_id"] = body.employee_id
     return hr_queries.person(body.employee_id)
+
+
+def new_hire_me(request: Request):
+    # the person behind a welcome link: the id was fixed when the code was accepted, the request can't change it
+    emp_id = request.session.get("emp_id") if request.session.get("new_hire") else None
+    emp = get_employee(emp_id) if emp_id else None
+    if emp is None or not employees.is_active(emp_id):
+        raise HTTPException(401, "Open your welcome link and enter your code to continue.")
+    return emp
 
 
 @app.delete("/api/session")
@@ -418,6 +435,97 @@ def reopen_onboarding_step(step_id: int, body: StepReasonIn, request: Request):
     return fail_on_error(onboarding.reopen_step(me(request)["id"], step_id, body.reason))
 
 
+# ---------- the new hire's welcome link ----------
+# HR issues a link (the email waits in the outbox); the new hire opens it with a 6-digit code and gets a session
+# that can only read their own checklist and talk to the welcome assistant. Rules: welcome.py, outbox.py.
+class AskIn(BaseModel):
+    message: str
+
+
+class WelcomeLoginIn(BaseModel):
+    token: str
+    code: str
+
+
+@app.post("/api/hr/people/{emp_id}/welcome-link")
+def issue_welcome_link(emp_id: str, request: Request):
+    hr = need(request, "hr")
+    return fail_on_error(welcome.issue_link(hr["id"], emp_id, APP_URL))
+
+
+@app.get("/api/hr/people/{emp_id}/welcome-link")
+def welcome_link_status(emp_id: str, request: Request):
+    hr = need(request, "hr")
+    return fail_on_error(welcome.link_status(hr["id"], emp_id))          # null when there is no link yet
+
+
+@app.post("/api/hr/people/{emp_id}/welcome-link/cancel")
+def cancel_welcome_link(emp_id: str, body: StepReasonIn, request: Request):
+    hr = need(request, "hr")
+    return fail_on_error(welcome.revoke_link(hr["id"], emp_id, body.reason))
+
+
+@app.get("/api/hr/outbox")
+def hr_outbox(request: Request):
+    hr = need(request, "hr")
+    return fail_on_error(outbox.messages(hr["id"]))
+
+
+@app.post("/api/hr/outbox/{message_id}/sent")
+def outbox_sent(message_id: int, request: Request):
+    hr = need(request, "hr")
+    return fail_on_error(outbox.mark_sent(hr["id"], message_id))
+
+
+@app.get("/api/welcome/{token}")
+def welcome_state(token: str):
+    return welcome.link_state(token)                                       # ready, expired, locked... nothing more
+
+
+@app.post("/api/welcome/login")
+def welcome_login(body: WelcomeLoginIn, request: Request):
+    result = welcome.open_link(body.token, body.code)
+    if "error" in result:
+        raise HTTPException(400, result["error"])
+    request.session.clear()
+    request.session["emp_id"] = result["emp_id"]
+    request.session["new_hire"] = True
+    return onboarding.my_checklist(result["emp_id"])
+
+
+@app.get("/api/welcome-me")
+def welcome_me(request: Request):
+    emp = new_hire_me(request)
+    return fail_on_error(onboarding.my_checklist(emp["id"]))
+
+
+@app.delete("/api/welcome-me")
+def welcome_sign_out(request: Request):
+    request.session.clear()
+    return {"ok": True}
+
+
+@app.get("/api/welcome-assistant/history")
+def welcome_history(request: Request):
+    return hr_queries.chat_history(new_hire_me(request)["id"])
+
+
+@app.post("/api/welcome-assistant")
+def welcome_ask(body: AskIn, request: Request):
+    emp = new_hire_me(request)
+    text = body.message.strip()
+    if not text:
+        raise HTTPException(400, "Type a question first.")
+    with agent_lock:
+        agent = _agent_for(emp["id"], "new_hire")
+        agent.pending_action.clear()
+        try:
+            reply = agent.handle_message(text)
+        except Exception as e:
+            raise HTTPException(503, f"The assistant isn't available right now ({type(e).__name__}).")
+        return {"reply": reply}
+
+
 # ---------- leave administration ----------
 class HolidayIn(BaseModel):
     day: str
@@ -585,22 +693,18 @@ def run_month_accrual(request: Request):
 # Good for a local demo; a multi-user deployment would keep per-session agent state instead.
 
 agent_lock = threading.Lock()
-agent_user = {"id": None}
-
-
-class AskIn(BaseModel):
-    message: str
+agent_user = {"key": None}      # (person, role override): a welcome-link session never shares a conversation
 
 
 class ConfirmIn(BaseModel):
     accept: bool
 
 
-def _agent_for(emp_id):
+def _agent_for(emp_id, role=None):
     import agent
-    if agent_user["id"] != emp_id:
-        agent.start_session(emp_id)
-        agent_user["id"] = emp_id
+    if agent_user["key"] != (emp_id, role):
+        agent.start_session(emp_id, role)
+        agent_user["key"] = (emp_id, role)
     # in the web app, write actions become confirmation cards instead of terminal prompts
     agent.confirm_with_human = lambda details: agent.AWAITING_CONFIRMATION
     return agent

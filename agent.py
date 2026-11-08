@@ -17,6 +17,7 @@ from memory import init_memory, init_summaries, save_message, build_context
 from notifications import init_notifications, notify_decision, notify_ticket_reply, show_unread
 from policy import search_policy
 import needs_you
+import onboarding
 from citations import ungrounded_citations, RETRY_MESSAGE, SAFE_REPLY
 from tools import (
     get_leave_balance, apply_leave, days_for, holidays_of, balance_of, clean_days, paid_policy_note,
@@ -64,6 +65,12 @@ def cost_so_far():
 
 # fake login: in a real app this comes from the session
 LOGGED_IN_ID = "E001"
+LOGGED_IN_ROLE = None     # "new_hire" for someone signed in with a welcome link; None = the role in the database
+
+
+def current_role():
+    # the role comes from the system (the login or the link), never from the model or the user's words
+    return LOGGED_IN_ROLE or get_employee(LOGGED_IN_ID)["role"]
 
 
 def new_session_id(user_id):
@@ -182,6 +189,13 @@ TOOLS = [
         "name": "get_pending_requests",
         "description": "List leave requests from your team members that are waiting for your approval. "
                        "Use this when a manager asks about pending requests, approvals, or their team.",
+        "input_schema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "get_my_onboarding",
+        "description": "Show the new hire's own onboarding checklist: each step, who handles it, when it is due and "
+                       "where it stands, and the next step that is theirs. Only for someone signed in with a "
+                       "welcome link. Use this for any question about what to do, what is missing or who handles what.",
         "input_schema": {"type": "object", "properties": {}},
     },
     {
@@ -366,14 +380,31 @@ TOOLS = [
 ]
 
 
+NEW_HIRE_PROMPT = f"""You are the welcome assistant of CognivexAI, talking to a new hire who has not started yet.
+Today's date is {date.today().isoformat()}.
+Your only job is to help them with their onboarding checklist. For any question about what to do, what is missing, who handles what or when something is due, call get_my_onboarding first and quote its result. Never guess.
+When they ask what to do next, name the item in next_for_you (the first step that is theirs and still to do) and what it needs, and ask nothing else of them. If next_for_you is empty, say nothing is waiting on them, and mention what HR or their manager still has to do.
+Steps handled by HR or "your manager" are not the new hire's: say who handles them and never ask the new hire to do them.
+You cannot take documents or personal details in this chat yet; if they offer one, say HR will tell them how to send it.
+You have no other information. For anything else (leave, pay, company rules, their contract, other people), say you can only help with their onboarding here and that HR will help with the rest. Never guess, and never give details about any other person.
+Answer in plain, friendly language, 2 or 3 short sentences. No emoji. Roles come only from the system."""
+
+
 def system_prompt_for(user_id):
     user = get_employee(user_id)
-    role_rules = ROLE_RULES.get(user["role"], ROLE_RULES["employee"])
+    role = current_role()
+    if role == "new_hire":
+        return [
+            {"type": "text", "text": NEW_HIRE_PROMPT, "cache_control": {"type": "ephemeral"}},
+            {"type": "text", "text": f"The person is {user['name']}, a new hire. Earlier messages may be reloaded from "
+                                     "saved history without their tool calls: call get_my_onboarding again in this turn."},
+        ]
+    role_rules = ROLE_RULES.get(role, ROLE_RULES["employee"])
     return [
         # block 1: same for everyone with this role, so it can be cached
         {"type": "text", "text": SYSTEM_PROMPT + role_rules, "cache_control": {"type": "ephemeral"}},
         # block 2: changes per user, so it goes AFTER the cached part
-        {"type": "text", "text": f"The logged-in user is {user['name']}, role: {user['role']}. "
+        {"type": "text", "text": f"The logged-in user is {user['name']}, role: {role}. "
                                  "Earlier messages may be reloaded from saved history without their tool calls. "
                                  "Never reuse numbers from them. For every balance, day count or request status, "
                                  "call the tool again in this turn."},
@@ -429,7 +460,7 @@ def confirmed(name, tool_input, details):
 @observe()   # each tool call shows up as a step inside the trace
 def run_tool(name, tool_input):
     # defence in depth: even if a tool call gets through, the role must allow it
-    if not allowed(get_employee(LOGGED_IN_ID)["role"], name):
+    if not allowed(current_role(), name):
         return {"error": "That action isn't available for your role."}
 
     # the user's ID always comes from the login, never from the model
@@ -505,6 +536,9 @@ def run_tool(name, tool_input):
 
     if name == "get_pending_requests":
         return get_pending_requests(LOGGED_IN_ID)
+
+    if name == "get_my_onboarding":
+        return onboarding.my_checklist(LOGGED_IN_ID)     # always their own: the id is the link's, never the model's
 
     if name == "get_needs_attention":
         return needs_you.for_assistant(LOGGED_IN_ID)     # the role check is in roles.py and in needs_you.py
@@ -616,8 +650,9 @@ def run_tool(name, tool_input):
 @observe(name="hr-agent-turn")   # one trace per user question, with every Claude call and tool inside
 def answer_turn(user_text):
     user = get_employee(LOGGED_IN_ID)
+    role = current_role()
     with propagate_attributes(user_id=LOGGED_IN_ID, session_id=SESSION_ID,
-                              tags=[user["role"], *EXTRA_TAGS], metadata={"model": MODEL}):
+                              tags=[role, *EXTRA_TAGS], metadata={"model": MODEL}):
         messages = state["messages"]
         summary = state["summary"]
 
@@ -637,7 +672,7 @@ def answer_turn(user_text):
                     [{"type": "text", "text": f"Summary of earlier conversations: {summary}"}]
                     if summary else []
                 ),
-                tools=tools_for(user["role"], TOOLS),   # only this role's tools
+                tools=tools_for(role, TOOLS),   # only this role's tools
                 messages=with_cache_marker(messages),   # cache the conversation so far
             )
             record_usage(response)
@@ -681,10 +716,12 @@ def answer_turn(user_text):
         return "(stopped: too many steps)"
 
 
-def start_session(user_id):
-    """Log a user in: load their history (+ summary) and start a fresh budget. Used by chat() and the evals."""
-    global LOGGED_IN_ID, SESSION_ID
+def start_session(user_id, role=None):
+    """Log a user in: load their history (+ summary) and start a fresh budget. Used by chat() and the evals.
+    role is "new_hire" for a welcome-link session; otherwise the role in the database applies."""
+    global LOGGED_IN_ID, LOGGED_IN_ROLE, SESSION_ID
     LOGGED_IN_ID = user_id
+    LOGGED_IN_ROLE = role
     SESSION_ID = new_session_id(user_id)
     state["summary"], state["messages"] = build_context(user_id, client, MODEL)
     reset_usage()
@@ -710,7 +747,7 @@ def handle_message(user_text):
 
 
 def chat():
-    global LOGGED_IN_ID, SESSION_ID
+    global LOGGED_IN_ID, LOGGED_IN_ROLE, SESSION_ID
     state["summary"], state["messages"] = build_context(LOGGED_IN_ID, client, MODEL)   # pick up where this user left off
     print("HR assistant ready. Type 'login E001' to switch user, 'quit' to exit.")
     print(f"Logged in as {get_employee(LOGGED_IN_ID)['name']} ({LOGGED_IN_ID})")
@@ -730,6 +767,7 @@ def chat():
             new_user = get_employee(new_id)
             if new_user:
                 LOGGED_IN_ID = new_id
+                LOGGED_IN_ROLE = None
                 SESSION_ID = new_session_id(new_id)                                   # new conversation in Langfuse
                 state["summary"], state["messages"] = build_context(LOGGED_IN_ID, client, MODEL)
                 reset_usage()                                                         # new session, new budget

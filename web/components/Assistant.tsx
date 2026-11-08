@@ -149,7 +149,7 @@ function ConfirmCard({ card, busy, onDecide }: { card: Card; busy: boolean; onDe
 }
 
 // light formatting: paragraphs, bullet lists, **bold**, and law articles shown as references
-function Rich({ text }: { text: string }) {
+export function Rich({ text }: { text: string }) {
   const blocks = text.split(/\n{2,}/);
   return (
     <>

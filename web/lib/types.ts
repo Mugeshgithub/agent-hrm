@@ -67,6 +67,26 @@ export type WaitingStep = {
   step_title: string; detail: string; owner: StepOwner; due_date: string; overdue: boolean;
 };
 
+// the new hire's welcome link: what they see, what HR sees about the link, and the outbox
+export type WelcomeStep = {
+  step: string; what: string; who: "you" | "HR" | "your manager"; due_date: string;
+  status: "todo" | "done" | "skipped"; overdue: boolean;
+};
+export type WelcomeView = {
+  name: string; job_title: string; start_date: string; manager: string | null;
+  steps: WelcomeStep[]; next_for_you: string | null; done: number; total: number;
+};
+export type WelcomeLinkStatus = {
+  state: "ready" | "expired" | "locked" | "revoked" | "invalid"; created_at: string; expires_at: string;
+  created_by: string | null; wrong_codes: number; max_wrong_codes: number; last_used_at: string | null;
+  events: { event: string; at: string }[];
+} | null;
+export type IssuedLink = { success: true; code: string; expires_at: string; outbox_id: number; to: string };
+export type OutboxMessage = {
+  id: number; emp_id: string; employee_name: string; to_email: string; subject: string; body: string; kind: string;
+  created_at: string; sent_at: string | null; sent_by_name: string | null;
+};
+
 export type NeedsYou = {
   role: Role; waiting_on_you: number; leave_requests: Pending[]; onboarding_steps: WaitingStep[];
   hr_requests: { id: number; ticket: string; employee_id: string; employee_name: string; question: string; summary: string; created_at: string }[];

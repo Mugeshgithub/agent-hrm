@@ -4,7 +4,7 @@ import { usePathname, useRouter } from "next/navigation";
 import { ReactNode, useEffect, useRef, useState } from "react";
 import useSWR, { mutate } from "swr";
 import {
-  Bell, BookOpen, CalendarCog, CalendarDays, CheckSquare, Contact, Home, Inbox, Menu, MessageCircleQuestion,
+  Bell, BookOpen, CalendarCog, CalendarDays, CheckSquare, Contact, Home, Inbox, Mail, Menu, MessageCircleQuestion,
   MessageSquare, Receipt, ShieldCheck, Sun, Users, X,
 } from "lucide-react";
 import { api, ApiError, fetcher } from "@/lib/api";
@@ -35,6 +35,7 @@ function navFor(me: Person, waiting: number, openTickets: number): { title: stri
     { href: "/inbox", label: "Request inbox", icon: Inbox, badge: openTickets },
     { href: "/access-log", label: "Payslip access", icon: ShieldCheck },
     { href: "/leave-admin", label: "Leave settings", icon: CalendarCog },
+    { href: "/outbox", label: "Outbox", icon: Mail },
   ] });
   groups.push({ title: "Company", items: [
     { href: "/people", label: "People", icon: Contact },
@@ -57,6 +58,10 @@ export function Shell({ children }: { children: ReactNode }) {
   useEffect(() => setMenuOpen(false), [path]);
 
   if (!me) {
+    // a 403 here means a welcome-link session: it has its own page and no access to this one
+    if (error instanceof ApiError && error.status === 403) {
+      return <div className="min-h-screen grid place-items-center px-4 text-center text-ink-soft">You're signed in with a welcome link, which only opens your own checklist. Open the link from your email again to see it, or sign in as someone else on the sign-in page.</div>;
+    }
     return <div className="min-h-screen grid place-items-center text-ink-soft">{error && !(error instanceof ApiError && error.status === 401) ? "Can't reach the server. Is the API running on port 8000?" : "Loading…"}</div>;
   }
 
