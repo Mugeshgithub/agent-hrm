@@ -20,6 +20,7 @@ import collective_agreement
 import contracts
 import document_answers
 import employee_files
+import search_first
 import tool_guard
 import needs_you
 import onboarding
@@ -441,6 +442,7 @@ If they ask whether a document was checked, is genuine, real or valid, your repl
 
 
 def system_prompt_for(user_id):
+    from employees import category_prompt       # imported here: employees imports tools, as in run_tool
     user = get_employee(user_id)
     role = current_role()
     if role == "new_hire":
@@ -458,7 +460,7 @@ def system_prompt_for(user_id):
                                             "search_policy and search_labour_code to call first, or together."}]
           if (order := collective_agreement.agreement_prompt()) else []),
         # block 3: changes per user, so it goes AFTER the cached part
-        {"type": "text", "text": f"The logged-in user is {user['name']}, role: {role}. "
+        {"type": "text", "text": f"The logged-in user is {user['name']}, role: {role}. {category_prompt(user_id)} "
                                  "Earlier messages may be reloaded from saved history without their tool calls. "
                                  "Never reuse numbers from them. For every balance, day count or request status, "
                                  "call the tool again in this turn."},
@@ -729,6 +731,7 @@ def answer_turn(user_text):
         genuine_retry_used = False
         document_retry_used = False
         agreement_retry_used = False
+        search_retry_used = False
         last_turn["tools_called"] = []
         last_turn["refused"] = []
         last_turn["policy_searches"] = []     # what search_policy was asked and whether it found a section (policy_gaps.py)
@@ -762,6 +765,13 @@ def answer_turn(user_text):
                     print("  [guard] still no \"can't tell\": replying with the fixed answer")
                     reply = GENUINE_ANSWER
 
+                # guardrail in code: a question about the company's rules is searched, not asked back or handed to HR (search_first.py). One retry.
+                if not search_retry_used and (fix := search_first.nudge(role, user_text, last_turn["tools_called"])):
+                    search_retry_used = True
+                    print("  [guard] a rules question was answered without searching: asking again")
+                    messages.append({"role": "user", "content": fix})
+                    continue
+
                 # guardrail in code: an answer about the person's own document says when the document is silent, and only then
                 # gives the policy or the law, labelled (see document_answers.py). One retry.
                 if not document_retry_used and (fix := document_answers.nudge(last_turn["tools_called"], reply)):
@@ -787,7 +797,7 @@ def answer_turn(user_text):
                 if bad:
                     print(f"  [guard] still ungrounded {bad}: replying safely instead")
                     reply = SAFE_REPLY
-                if document_retry_used or agreement_retry_used:       # a retry note was sent: the reply must not talk about it
+                if document_retry_used or agreement_retry_used or search_retry_used:       # a retry note was sent: the reply must not talk about it
                     reply = document_answers.strip_correction(reply)
 
                 # the policy does not answer it: keep the question, without a name, for HR (policy_gaps.py)

@@ -210,7 +210,7 @@ def reset_memory():
         conn.execute("DELETE FROM onboarding_steps")
         conn.execute("DELETE FROM onboardings")
         conn.execute("DELETE FROM profiles WHERE emp_id NOT IN (SELECT id FROM employees)")   # hired by an earlier test
-        conn.execute("UPDATE profiles SET holiday_plan_id = NULL")
+        conn.execute("UPDATE profiles SET holiday_plan_id = NULL, category = NULL")        # a category an earlier test recorded must not carry over
     conn.close()
 
 
@@ -547,6 +547,29 @@ def setup_agreement():
 def setup_emma_contract_and_agreement():
     setup_emma_contract()
     setup_agreement()
+
+
+# "as a cadre", "you are recorded as a cadre", "applies to you as a cadre": the category said as hers, not only quoted from an article
+FOR_HER = r"\b(?:you|your|you're|as an?|for you|recorded|classified|on file)\b[^.\n]{0,80}\b"
+
+
+def hr_records_clara_as(category):
+    result = employees.update_employee("H001", "E003", {"category": category}, "Category confirmed from the contract")
+    assert result.get("success"), result
+
+
+def setup_agreement_and_clara_is_cadre():
+    setup_agreement()
+    hr_records_clara_as("Cadre")
+
+
+def setup_agreement_and_clara_is_non_cadre():
+    setup_agreement()
+    hr_records_clara_as("Non-cadre")
+
+
+def setup_clara_is_cadre():
+    hr_records_clara_as("Cadre")
 
 
 # how a reply says that the document is silent, and how it labels the company policy (used by the "silent contract" evals)
@@ -897,6 +920,43 @@ TEST_CASES = [
         "expected_requests": 0,
     },
     {
+        # HR recorded the category: the assistant uses it, gives the one rule that applies, and does not send her to HR or list the other cases
+        "name": "category: a recorded category gives the one rule that applies, in the agreement",
+        "user": "E003",
+        "auto_confirm": False,
+        "setup": setup_agreement_and_clara_is_cadre,
+        "input": "How long is my notice period if I resign?",
+        "must_call": ["search_collective_agreement"],
+        # three months, said for HER category (a quote of the whole article names cadres too, and picks nobody)
+        "reply_must_match": rf"(?is)(?=.*\b(?:three|3|trois)\s+(?:months|mois))(?=.*{FOR_HER}cadre)",
+        "reply_must_not_match": r"(?is)hasn.t set|not set|confirm which|your notice (?:period )?(?:is|would be) (?:\*\*)?(?:one|1)\b",
+        "expected_requests": 0,
+    },
+    {
+        "name": "category: another recorded category gets its own rule, not the cadre one",
+        "user": "E003",
+        "auto_confirm": False,
+        "setup": setup_agreement_and_clara_is_non_cadre,
+        "input": "How long is my notice period if I resign?",
+        "must_call": ["search_collective_agreement"],
+        "reply_must_match": rf"(?is)(?=.*\b(?:one|1|un)[ -](?:month|mois)\b)(?=.*{FOR_HER}non[- ]?cadre)",
+        "reply_must_not_match": r"(?is)hasn.t set|not set|confirm which|your notice (?:period )?(?:is|would be) (?:\*\*)?(?:three|3)\b",
+        "expected_requests": 0,
+    },
+    {
+        # nothing recorded: she is told HR hasn't set it, gets each case, and HR can confirm; her job title decides nothing
+        "name": "category: when HR has not set it the assistant says so and gives each case",
+        "user": "E003",
+        "auto_confirm": False,
+        "setup": setup_agreement,
+        "input": "How long is my notice period if I resign?",
+        "must_call": ["search_collective_agreement"],
+        "reply_must_match": r"(?is)(?=.*(?:hasn.t|has not) set your category)(?=.*\b(?:one|1|un)[ -](?:month|mois)\b)(?=.*\b(?:three|3|trois)\s+(?:months|mois))",
+        # a hedged "one month for employees, three for cadres" is the right answer; what it must not do is give her a category
+        "reply_must_not_match": r"(?i)\b(?:since|because|as) you(?:'re| are)\b|\bHR has you\b|\byour category (?:is|on file is)\b|\bas an? (?:non[- ]?)?cadre\b",
+        "expected_requests": 0,
+    },
+    {
         # no agreement uploaded: the assistant has no such tool, says HR has not added it, and invents nothing
         "name": "collective agreement: none uploaded, so it says so and invents nothing",
         "user": "E001",
@@ -1121,6 +1181,19 @@ TEST_CASES = [
         "input": "What does French law say about how many days of paid leave I earn?",
         "must_call": ["search_labour_code"],
         "reply_must_match": r"(?is)(?=.*L\.?\s?3141-3)(?=.*(2[.,]5|deux jours et demi|30))",
+    },
+    {
+        # the labour code gives a different trial period to each category: with HR's record she hears the one that applies to her
+        "name": "law: a recorded category decides which trial period applies",
+        "user": "E003",
+        "auto_confirm": False,
+        "needs_labour_db": True,
+        "setup": setup_clara_is_cadre,
+        "judge_facts": ["HR's record of this person's category (statut) is Cadre. The assistant was told this in its instructions, not by a tool."],
+        "input": "What is the longest trial period my employer can give me?",
+        "must_call": ["search_labour_code"],
+        "reply_must_match": r"(?is)\b(?:four|4|quatre)\s+(?:months|mois)",
+        "reply_must_not_match": r"(?i)hasn.t set|not set",
     },
     {
         # an amount below the law must be flagged; asked as a claim, so we don't need an illegal policy
@@ -1530,8 +1603,9 @@ def attempt(case):
             problems.append(f"cites articles no tool returned this turn: {', '.join(bad)}")
     # LLM-as-judge on answers built from sources (policy and law): catches invented reasons and
     # wrong attributions that keyword checks miss. Leave, permission and pay tests are checked by code.
+    # "judge_facts": what the assistant was told in its instructions about this person (not by a tool), so the judge knows it is true
     if case["name"].startswith(("policy:", "law:")):
-        for issue in judge(case["input"], reply, agent.last_turn["sources"]):
+        for issue in judge(case["input"], reply, agent.last_turn["sources"] + list(case.get("judge_facts", []))):
             problems.append(f"judge: unsupported \"{issue.get('claim')}\" ({issue.get('why')})")
     if "check" in case and not case["check"]():
         problems.append("database check failed")

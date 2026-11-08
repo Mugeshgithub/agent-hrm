@@ -25,6 +25,15 @@ POLICY_WINDOW = json.dumps({"found": True, "sections": [{"title": "Paid leave (c
     "Paid leave is normally taken between 1 May and 31 October. Outside this period, paid leave can still be "
     "requested and is handled like any other leave request: your manager decides whether to approve it."}]},
     ensure_ascii=False)
+# what search_policy really returns for "doctor's note": the sick leave section, and a section about something else
+POLICY_SICK_SEARCH = json.dumps({"found": True, "sections": [
+    {"title": "Sick leave", "text": "Employees get 6 sick leave days per year. Sick leave of more than 2 consecutive days requires a medical "
+                                    "certificate, uploaded within 3 days of returning to work."},
+    {"title": "Notice period", "text": "The notice period is 30 days for employees and 60 days for managers. Leave cannot be taken during the "
+                                        "notice period without HR approval."}]}, ensure_ascii=False)
+POLICY_CARRY = json.dumps({"found": True, "sections": [{"title": "Carry forward", "text":
+    "Up to 5 unused casual leave days can be carried forward to the next year. Unused sick leave cannot be carried forward and lapses on 31 "
+    "December. Unused paid leave is not lost at the end of the year: it is carried forward in full."}]}, ensure_ascii=False)
 NOTHING_FOUND = json.dumps({"found": False, "message": "No matching section in the HR policy."})
 TICKET_NO = json.dumps({"created": False, "message": "The user chose not to raise a ticket. Nothing was sent."})
 PAYSLIP_DEC = json.dumps({"error": "No payslip has been issued for 2026-12 yet. Payslips are issued on the last working day of the month; this one is due on 31 December 2026."})
@@ -71,7 +80,61 @@ CASES = [
      "What is the company car policy?",
      "The HR policy doesn't cover company cars, but employees can claim a mileage allowance for business trips.",
      [POLICY_HOLIDAYS]),
+    # a new condition, exception or requirement that the text does not contain: unsupported, even when it sounds like the same rule
+    ("bad: a new condition next to a direct consequence (tell your manager by 9am)", False,
+     "Do I need a doctor's note if I am off for 1 day?",
+     "For 1 or 2 consecutive days no note is needed, but you must tell your manager before 9am on the first day.",
+     [POLICY_SICK]),
+    ("bad: a new exception to a direct consequence (more than twice this year)", False,
+     "Do I need a doctor's note for 2 days?",
+     "For 1 or 2 consecutive days you don't need a note, unless you have already been off sick more than twice this year.",
+     [POLICY_SICK]),
+    ("bad: a new requirement added to the stated one (signed by a doctor in France)", False,
+     "Do I need a doctor's note?",
+     "Yes, for more than 2 consecutive days you need a medical certificate, and it must be signed by a doctor registered in France.",
+     [POLICY_SICK]),
+    ("bad: a new power for HR next to a direct consequence", False,
+     "Do I need a doctor's note for 1 day?",
+     "No, for 1 or 2 consecutive days a note is not required, although HR may still ask you for one.",
+     [POLICY_SICK]),
+    ("bad: a new condition drawn from an unrelated section (a note during the notice period)", False,
+     "Do I need a doctor's note?",
+     "For 1 or 2 consecutive days no note is needed, but during your notice period any sick day needs a doctor's note.",
+     [POLICY_SICK_SEARCH]),
     # ---- GOOD: the judge must pass these ----
+    # what follows directly from a stated rule is not a new claim: "more than 2 days needs a note" says that 1 or 2 days do not
+    ("good: direct consequence of 'more than 2 consecutive days' (1 or 2 days need no note)", True,
+     "Do I need a doctor's note if I am off for 2 days?",
+     "No. The policy asks for a medical certificate only when sick leave is more than 2 consecutive days, so for 1 or 2 days you don't need one.",
+     [POLICY_SICK]),
+    ("good: direct consequence, with the rule it comes from (the reply the evals once rejected)", True,
+     "Do I need a doctor's note?",
+     "For 1 or 2 consecutive days, a doctor's note is not required by the policy. For more than 2 consecutive days you need a medical "
+     "certificate, uploaded within 3 days of returning to work.",
+     [POLICY_SICK]),
+    ("good: direct consequence, with the real two-section search result", True,
+     "Do I need a doctor's note?",
+     "For 1 or 2 consecutive days, a doctor's note is not required by the policy. For more than 2 consecutive days, a medical "
+     "certificate is needed, and it must be uploaded within 3 days of returning to work.",
+     [POLICY_SICK_SEARCH]),
+    ("good: direct consequence in other words, with the real two-section search result", True,
+     "Do I need a doctor's note?",
+     "Per the Sick leave section, a medical certificate is needed only for sick leave of more than 2 consecutive days, so for 1 or 2 days "
+     "you don't need a doctor's note.",
+     [POLICY_SICK_SEARCH]),
+    ("good: the exact reply the doctor's-note eval got flagged for (real, 8 Nov), with the real search result", True,
+     "Do I need a doctor's note?",
+     "Yes, if you take more than 2 consecutive sick leave days, you need to provide a medical certificate (uploaded within 3 days of "
+     "returning to work). For 1 or 2 consecutive days, a doctor's note is not required by the policy.",
+     [POLICY_SICK_SEARCH]),
+    ("good: harmless advice that follows from a stated rule (the judge once flagged it, 8 Nov)", True,
+     "Can I carry my sick leave over to next year?",
+     "No. Unused sick leave cannot be carried forward and lapses on 31 December, so it's worth using them if you can.",
+     [POLICY_CARRY]),
+    ("good: direct consequence of a date window (July is inside 1 May to 31 October)", True,
+     "Is July a normal time for paid leave?",
+     "Yes. Paid leave is normally taken between 1 May and 31 October, and July falls inside that period.",
+     [POLICY_WINDOW]),
     ("good: 'the policy doesn't cover it', the only section found is about another topic", True,
      "What is the company car policy?",
      "The HR policy doesn't cover a company car policy. Would you like me to raise an HR ticket to ask about this?",

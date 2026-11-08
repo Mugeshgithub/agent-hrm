@@ -19,7 +19,7 @@ import { mutate } from "swr";
 
 const FIELD: Record<string, string> = {
   name: "Name", email: "Email", role: "Role", manager_id: "Manager", title: "Job title",
-  department: "Department", location: "Location", contract_type: "Contract", end_date: "Last day",
+  department: "Department", location: "Location", contract_type: "Contract", category: "Category", end_date: "Last day",
   holiday_plan: "Holiday plan",
 };
 
@@ -100,6 +100,11 @@ export default function ProfilePage({ params }: { params: { id: string } }) {
               <Item label="Started">{fullDate(p.start_date)} <span className="text-ink-soft">({tenure(p.start_date)})</span></Item>
               <Item label="Role in this app">{ROLE[p.role]}</Item>
               {isHR && <Item label="Contract">{CONTRACT[p.contract_type ?? "CDI"] ?? p.contract_type}</Item>}
+              {(isHR || p.id === me.id) && (
+                <Item label="Category (statut)">
+                  {p.category ?? <span className="text-ink-soft">{isHR ? "Not set. The assistant says so when a rule depends on it." : "HR hasn't set it yet"}</span>}
+                </Item>
+              )}
               {isHR && <Item label="Employee ID">{p.id}</Item>}
               {isHR && p.holiday_plan && <Item label="Holiday plan"><PlanPicker person={p} /></Item>}
             </dl>
@@ -216,6 +221,7 @@ function describe(c: Change, nameOf: (id: string | null) => string) {
     if (c.field === "manager_id") return nameOf(v);
     if (c.field === "role") return v ? ROLE[v] ?? v : "None";
     if (c.field === "contract_type") return v ? CONTRACT[v] ?? v : "None";
+    if (c.field === "category") return v || "Not set";
     return v || "None";
   };
   return `${FIELD[c.field] ?? c.field}: ${show(c.old_value)} to ${show(c.new_value)}`;

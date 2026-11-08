@@ -13,6 +13,7 @@ import employee_files
 import pdf_text
 import policy_gaps
 import policy_store
+import search_first
 import tool_guard
 import tools
 from eval_retry import MAX_RETRIED, retry_report, run_with_retry
@@ -874,6 +875,30 @@ def a_policy_section_has_a_title_some_text_and_a_sane_size():
     assert "too long" in ok(base + [{"title": "New", "text": "x" * 4001}])
     assert "at most 30" in ok(base + [{"title": f"S{i}", "text": "x"} for i in range(30)])
     assert ok(base + [{"title": "Company car", "text": "Managers get one after two years."}]) is None
+
+
+@test
+def a_rules_question_answered_without_any_tool_is_sent_back_once_to_search_and_nothing_else_is():
+    nudge = search_first.nudge
+    for q in ["Do I need a doctor's note?", "Can I get a company car?", "How many days of sick leave do I get?", "Am I allowed to work from home on Fridays?",
+              "is there a dress code", "What happens if I am late?", "Do I have to use my casual leave before March"]:
+        assert nudge("employee", q, []) == search_first.SEARCH_FIRST, q                       # a rules question, no tool: search first
+    assert nudge("manager", "Can I get a company car?", []) and nudge("hr", "Can I get a company car?", [])
+    assert nudge("employee", "Do I need a doctor's note?", ["search_policy"]) is None        # it searched
+    assert nudge("employee", "How many days do I have left?", ["get_leave_balance"]) is None   # any tool is a look-up: not this guard's business
+    assert nudge("employee", "Can I get a company car?", ["read_my_document"]) is None
+    for q in ["Hi", "Thanks, that is all", "I need to take leave next week", "Show me my payslip for October", "What is my balance?", "Who is my manager?", ""]:
+        assert nudge("employee", q, []) is None, q                                            # not a question about the rules
+    assert nudge("new_hire", "Do I need a doctor's note?", []) is None                      # a welcome-link session cannot search the policy
+    assert nudge("employee", None, []) is None
+
+
+@test
+def the_search_first_note_is_hidden_from_the_person_and_lets_an_off_topic_question_through():
+    note = search_first.SEARCH_FIRST
+    assert "do not apologise" in note and "not from the person" in note                      # the person never sees it, so the reply must not talk about it
+    assert "search_policy" in note and "search_labour_code" in note and "ticket" in note
+    assert "ignore this note" in note                                                          # "can I bring my dog?" may be off topic: it is not forced into a search
 
 
 if __name__ == "__main__":

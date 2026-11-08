@@ -12,18 +12,20 @@ import { ErrorNote } from "@/components/PageHeader";
 
 export const ROLE: Record<string, string> = { employee: "Employee", manager: "Manager", hr: "HR" };
 const CONTRACTS = ["CDI", "CDD", "Apprenticeship", "Internship"];
+// the category (statut) in French labour law. The rules are in employees.py; the assistant uses it for notice and trial periods.
+const CATEGORIES = ["Non-cadre", "Agent de maîtrise", "Cadre"];
 export const CONTRACT: Record<string, string> = {
   CDI: "Permanent (CDI)", CDD: "Fixed-term (CDD)", Apprenticeship: "Apprenticeship", Internship: "Internship",
 };
 
 type Fields = {
   name: string; email: string; role: string; title: string; department: string; location: string;
-  manager_id: string; start_date: string; contract_type: string;
+  manager_id: string; start_date: string; contract_type: string; category: string;      // category "" means HR has not set it
 };
 
 const EMPTY: Fields = {
   name: "", email: "", role: "employee", title: "", department: "", location: "Paris",
-  manager_id: "", start_date: "", contract_type: "CDI",
+  manager_id: "", start_date: "", contract_type: "CDI", category: "",
 };
 
 function usePeopleOptions() {
@@ -79,6 +81,12 @@ function DetailFields({ f, set, editing, selfId }:
           {CONTRACTS.map((c) => <option key={c} value={c}>{CONTRACT[c]}</option>)}
         </select>
       </Field>
+      <Field label="Category (statut)" hint="The assistant uses it for notice and trial periods. Leave empty if you don't know: it then says HR hasn't set it.">
+        <select className="field" value={f.category} onChange={(e) => set("category", e.target.value)}>
+          <option value="">Not set</option>
+          {CATEGORIES.map((c) => <option key={c} value={c}>{c}</option>)}
+        </select>
+      </Field>
       {!editing && (
         <Field label="Start date" hint="They start with 12 casual and 6 sick days, as in the policy. Paid leave is earned at 2.5 days a month.">
           <input className="field" type="date" required value={f.start_date} onChange={(e) => set("start_date", e.target.value)} />
@@ -127,7 +135,7 @@ export function EditPersonDialog({ person, open, onClose }: { person: Profile; o
   const start: Fields = {
     name: person.name, email: person.email, role: person.role, title: person.title, department: person.department,
     location: person.location, manager_id: person.manager_id ?? "", start_date: person.start_date,
-    contract_type: person.contract_type ?? "CDI",
+    contract_type: person.contract_type ?? "CDI", category: person.category ?? "",
   };
   const [f, setF] = useState<Fields>(start);
   const [reason, setReason] = useState("");

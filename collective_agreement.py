@@ -41,8 +41,10 @@ HEADING = re.compile(r"^\s*(?:#{1,4}\s+\S.*|(?:article|art\.)\s*\d+[A-Za-z0-9.\-
 RULES = ("These articles are from the company's collective agreement (convention collective). Name the agreement and the article you used, "
          "for example: \"From the collective agreement ({name}, article 7): ...\". If they do not answer the question, say that the agreement "
          "does not specify it, and go on to the company policy. Never present them as the person's contract or as the company policy. "
-         "If an article depends on the person's category (for example employee or cadre), seniority or status, and their documents do not say "
-         "which applies to them, give each case and say that HR can confirm which one applies to them. Never decide it from their job title.")
+         "If an article depends on the person's category (for example employee or cadre), seniority or status: use the category HR has "
+         "recorded for them (it is in the note about the logged-in user). If HR hasn't set it and their documents do not say which applies to "
+         "them, say \"HR hasn't set your category\", give each case and say that HR can confirm which one applies to them. Never decide it from "
+         "their job title.")
 
 
 def init_agreement():
