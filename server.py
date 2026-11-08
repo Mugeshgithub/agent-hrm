@@ -1,6 +1,7 @@
 # server.py: the web API for the HRM app. Run:  uvicorn server:app --reload --port 8000
 # Identity comes from the signed session cookie, never from the browser's request body.
 # Every change goes through tools.py / payslips.py, the same code the agent and the tests use.
+import json
 import os
 import secrets
 import threading
@@ -15,6 +16,7 @@ from pydantic import BaseModel
 from starlette.concurrency import run_in_threadpool
 from starlette.middleware.sessions import SessionMiddleware
 
+import careers
 import checkins
 import contracts
 import db
@@ -943,6 +945,103 @@ def recruitment_move(application_id: int, body: MoveIn, request: Request):
 @app.get("/api/recruitment/candidates/{application_id}/history")
 def recruitment_history(application_id: int, request: Request):
     return recruitment_result(jobs.history(recruiter(request)["id"], application_id))
+
+
+@app.get("/api/recruitment/candidates/{application_id}/cv")
+def recruitment_cv(application_id: int, request: Request):
+    result = recruitment_result(careers.open_cv(recruiter(request)["id"], application_id))          # HR or the hiring manager; each opening is logged
+    return FileResponse(result["path"], media_type="application/pdf", filename=result["filename"], content_disposition_type="attachment",
+                        headers={"X-Content-Type-Options": "nosniff", "Content-Security-Policy": "sandbox"})
+
+
+@app.post("/api/recruitment/candidates/{application_id}/tracking-link")
+def recruitment_new_link(application_id: int, request: Request):
+    result = recruitment_result(careers.new_tracking_token(need(request, "hr")["id"], application_id))
+    return {"link": f"{APP_URL}/careers/track/{result['token']}"}                                    # shown once: only the hash is kept
+
+
+@app.get("/api/hr/recruitment/settings")
+def recruitment_settings(request: Request):
+    return recruitment_result(careers.settings(need(request, "hr")["id"]))
+
+
+class RetentionIn(BaseModel):
+    retention_months: int | str
+
+
+@app.post("/api/hr/recruitment/settings")
+def recruitment_set_retention(body: RetentionIn, request: Request):
+    return recruitment_result(careers.set_retention(need(request, "hr")["id"], body.retention_months))
+
+
+@app.post("/api/hr/recruitment/retention-run")
+def recruitment_run_retention(request: Request):
+    return careers.run_retention(ran_by=need(request, "hr")["id"])                                   # the same as the daily job (recruitment_jobs.py)
+
+
+# ---------- the careers page: public, no login ----------
+# Anyone can read an open job and apply. Nothing here uses the session: a person's private tracking link is the only key to their own
+# application. The size is capped, the rate is limited, and the CV is checked before anything is saved (careers.py).
+APPLY_LIMIT = 8 * 1024 * 1024          # a 5 MB CV is about 6.7 MB as base64, plus the form
+APPLY_BY_ADDRESS = careers.Throttle(10, 3600)
+APPLY_BY_EMAIL = careers.Throttle(3, 3600)
+
+
+def careers_result(result):
+    if isinstance(result, dict) and "error" in result:
+        raise HTTPException(404 if result["error"] in (careers.NOT_OPEN, careers.NOT_FOUND) else 400, result["error"])
+    return result
+
+
+@app.get("/api/careers/jobs")
+def careers_jobs():
+    return careers.open_jobs()
+
+
+@app.get("/api/careers/jobs/{job_id}")
+def careers_job(job_id: int):
+    return {"job": careers_result(careers.open_job(job_id)), "notice": careers.notice(), "retention_months": jobs.retention_months()}
+
+
+@app.post("/api/careers/jobs/{job_id}/apply")
+async def careers_apply(job_id: int, request: Request):
+    address = (request.headers.get("x-forwarded-for") or (request.client.host if request.client else "?")).split(",")[0].strip()
+    if not APPLY_BY_ADDRESS.allow(address):
+        raise HTTPException(429, "Too many applications from this address. Please try again later.")
+    if int(request.headers.get("content-length") or 0) > APPLY_LIMIT:
+        raise HTTPException(413, "That is too big. The CV limit is 5 MB.")
+    chunks, total = [], 0
+    async for chunk in request.stream():
+        total += len(chunk)
+        if total > APPLY_LIMIT:
+            raise HTTPException(413, "That is too big. The CV limit is 5 MB.")
+        chunks.append(chunk)
+    try:
+        data = json.loads(b"".join(chunks))
+    except ValueError:
+        data = None
+    if not isinstance(data, dict):
+        raise HTTPException(400, "Something went wrong with the form. Please try again.")
+    if not APPLY_BY_EMAIL.allow(str(data.get("email") or "").strip().lower()):
+        raise HTTPException(429, "Too many applications with this email address. Please try again later.")
+    cv = careers.decode_cv(data.get("cv"))
+    result = careers_result(await run_in_threadpool(careers.apply, job_id, data, cv if cv is not None else b""))
+    return {"link": f"{APP_URL}/careers/track/{result['token']}"}                                    # shown once on the confirmation page
+
+
+@app.get("/api/careers/track/{token}")
+def careers_tracking(token: str):
+    return careers_result(careers.tracking(token))
+
+
+@app.post("/api/careers/track/{token}/withdraw")
+def careers_withdraw(token: str):
+    return careers_result(careers.withdraw(token))
+
+
+@app.post("/api/careers/track/{token}/leave-talent-pool")
+def careers_leave_pool(token: str):
+    return careers_result(careers.leave_talent_pool(token))
 
 
 # ---------- leave administration ----------

@@ -24,6 +24,7 @@ export default function JobPage({ params }: { params: { id: string } }) {
   const [adding, setAdding] = useState(false);
   const [moving, setMoving] = useState<Candidate | null>(null);
   const [viewing, setViewing] = useState<Candidate | null>(null);
+  const [linking, setLinking] = useState<Candidate | null>(null);
   const [problem, setProblem] = useState("");
 
   if (!allowed || (error instanceof ApiError && (error.status === 404 || error.status === 403))) {
@@ -89,7 +90,7 @@ export default function JobPage({ params }: { params: { id: string } }) {
           {job.status === "closed" && ACTIVE_STAGES.some((s) => job.counts[s] > 0) && (
             <p className="mb-3 panel px-5 py-3 text-sm text-ink-soft">This job is closed, but some people are still waiting for a decision. Closing a job rejects nobody: move each candidate yourself.</p>
           )}
-          {ALL_STAGES.map((stage) => <StageSection key={stage} stage={stage} candidates={by(stage)} onMove={setMoving} onHistory={setViewing} />)}
+          {ALL_STAGES.map((stage) => <StageSection key={stage} stage={stage} candidates={by(stage)} isHR={me.role === "hr"} onMove={setMoving} onHistory={setViewing} onLink={setLinking} />)}
         </>
       )}
 
@@ -108,9 +109,14 @@ export default function JobPage({ params }: { params: { id: string } }) {
       {adding && <AddCandidateDialog jobId={job.id} onClose={() => setAdding(false)} />}
       {moving && <MoveDialog c={moving} onClose={() => setMoving(null)} />}
       {viewing && <HistoryDialog c={viewing} onClose={() => setViewing(null)} />}
+      {linking && <NewLinkDialog c={linking} onClose={() => setLinking(null)} />}
     </>
   );
 }
+
+const EVENT_LABEL: Record<string, string> = {
+  added: "Added", "cv opened": "CV opened", "new link": "New tracking link", "talent pool left": "Left the talent pool", erased: "Personal data erased",
+};
 
 function eventText(event: string, detail: string) {
   if (event === "created") return `created the job (${detail})`;
@@ -120,11 +126,12 @@ function eventText(event: string, detail: string) {
   return event;
 }
 
-function StageSection({ stage, candidates, onMove, onHistory }: { stage: JobStage; candidates: Candidate[]; onMove: (c: Candidate) => void; onHistory: (c: Candidate) => void }) {
+function StageSection({ stage, candidates, isHR, onMove, onHistory, onLink }:
+  { stage: JobStage; candidates: Candidate[]; isHR: boolean; onMove: (c: Candidate) => void; onHistory: (c: Candidate) => void; onLink: (c: Candidate) => void }) {
   const folded = stage === "not_selected" || stage === "hired";
   const list = (
     <ul className="panel divide-y divide-rule">
-      {candidates.map((c) => <CandidateRow key={c.id} c={c} onMove={onMove} onHistory={onHistory} />)}
+      {candidates.map((c) => <CandidateRow key={c.id} c={c} isHR={isHR} onMove={onMove} onHistory={onHistory} onLink={onLink} />)}
     </ul>
   );
   if (!candidates.length) return null;
@@ -145,21 +152,38 @@ function StageSection({ stage, candidates, onMove, onHistory }: { stage: JobStag
   );
 }
 
-function CandidateRow({ c, onMove, onHistory }: { c: Candidate; onMove: (c: Candidate) => void; onHistory: (c: Candidate) => void }) {
+function CandidateRow({ c, isHR, onMove, onHistory, onLink }:
+  { c: Candidate; isHR: boolean; onMove: (c: Candidate) => void; onHistory: (c: Candidate) => void; onLink: (c: Candidate) => void }) {
+  const full = (iso: string) => `${day(iso)} ${iso.slice(0, 4)}`;
   return (
-    <li className="flex flex-col gap-3 px-5 py-4 sm:flex-row sm:items-center sm:justify-between">
-      <div className="flex items-start gap-3 min-w-0">
-        <Avatar name={c.name} size={32} />
-        <div className="min-w-0">
-          <p className="font-medium">{c.name}</p>
-          <p className="text-sm text-ink-soft">Applied {day(c.applied_at)}, {c.days_in_stage === 0 ? "moved here today" : `${c.days_in_stage} ${c.days_in_stage === 1 ? "day" : "days"} in this stage`}</p>
-          <p className="text-sm text-ink-soft break-all">{c.email}{c.phone ? `, ${c.phone}` : ""}</p>
+    <li className="px-5 py-4">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <div className="flex items-start gap-3 min-w-0">
+          <Avatar name={c.name} size={32} />
+          <div className="min-w-0">
+            <p className="font-medium">{c.name}</p>
+            <p className="text-sm text-ink-soft">Applied {day(c.applied_at)}, {c.days_in_stage === 0 ? "moved here today" : `${c.days_in_stage} ${c.days_in_stage === 1 ? "day" : "days"} in this stage`}</p>
+            <p className="text-sm text-ink-soft break-all">{c.email}{c.phone ? `, ${c.phone}` : ""}</p>
+            <p className="text-sm text-ink-soft">
+              {c.source === "careers page" ? "Applied on the careers page" : "Added by hand"}
+              {c.talent_pool && c.consented_on ? `, in the talent pool (agreed ${full(c.consented_on)})` : ""}.
+              {c.erase_on ? ` Personal data erased on ${full(c.erase_on)}.` : ""}
+            </p>
+          </div>
+        </div>
+        <div className="flex shrink-0 flex-wrap gap-2">
+          {c.has_cv && <a className="btn-quiet" href={`/api/recruitment/candidates/${c.id}/cv`}>Open CV</a>}
+          {isHR && c.source === "careers page" && <button className="btn-quiet" onClick={() => onLink(c)}>New link</button>}
+          <button className="btn-quiet" onClick={() => onHistory(c)}>History</button>
+          {c.stage !== "hired" && <button className="btn-primary" onClick={() => onMove(c)}>Move</button>}
         </div>
       </div>
-      <div className="flex shrink-0 gap-2">
-        <button className="btn-quiet" onClick={() => onHistory(c)}>History</button>
-        {c.stage !== "hired" && <button className="btn-primary" onClick={() => onMove(c)}>Move</button>}
-      </div>
+      {c.cover_letter && (
+        <details className="mt-3 pl-11 text-sm">
+          <summary className="cursor-pointer text-ink-soft">Cover letter</summary>
+          <p className="mt-1 whitespace-pre-line">{c.cover_letter}</p>
+        </details>
+      )}
     </li>
   );
 }
@@ -234,6 +258,45 @@ function MoveDialog({ c, onClose }: { c: Candidate; onClose: () => void }) {
   );
 }
 
+// HR gives a candidate a new tracking link (the old one stops working). Only a hash is kept, so the link is shown here once, to copy into an email.
+function NewLinkDialog({ c, onClose }: { c: Candidate; onClose: () => void }) {
+  const [link, setLink] = useState("");
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [copied, setCopied] = useState(false);
+  async function issue() {
+    setBusy(true);
+    setError("");
+    try { setLink((await api<{ link: string }>(`/recruitment/candidates/${c.id}/tracking-link`, { body: {} })).link); mutate(() => true); }
+    catch (x) { setError((x as Error).message); }
+    finally { setBusy(false); }
+  }
+  return (
+    <Dialog open onClose={onClose} title={`New link for ${c.name}`}>
+      <div className="space-y-4">
+        {!link ? (
+          <>
+            <p className="text-ink-soft">This makes a new private link to the candidate's page and stops the old one working. The app sends no emails: you copy the link and send it yourself. It is shown once.</p>
+            {error && <ErrorNote message={error} />}
+            <div className="flex justify-end gap-2">
+              <button className="btn-quiet" onClick={onClose}>Cancel</button>
+              <button className="btn-primary" disabled={busy} onClick={issue}>Make a new link</button>
+            </div>
+          </>
+        ) : (
+          <>
+            <p className="break-all rounded border border-rule bg-paper px-3 py-2 text-sm">{link}</p>
+            <div className="flex justify-end gap-2">
+              <button className="btn-quiet" onClick={async () => { try { await navigator.clipboard.writeText(link); setCopied(true); } catch {} }}>{copied ? "Copied" : "Copy the link"}</button>
+              <button className="btn-primary" onClick={onClose}>Done</button>
+            </div>
+          </>
+        )}
+      </div>
+    </Dialog>
+  );
+}
+
 function HistoryDialog({ c, onClose }: { c: Candidate; onClose: () => void }) {
   const { data, error } = useSWR<CandidateEvent[]>(`/recruitment/candidates/${c.id}/history`, fetcher);
   return (
@@ -244,7 +307,7 @@ function HistoryDialog({ c, onClose }: { c: Candidate; onClose: () => void }) {
         <ol className="space-y-3">
           {data.map((e, i) => (
             <li key={i} className="text-sm">
-              <p><span className="font-medium">{e.event === "added" ? "Added" : `${STAGE[e.from_stage as JobStage]} to ${STAGE[e.to_stage as JobStage]}`}</span>
+              <p><span className="font-medium">{EVENT_LABEL[e.event] ?? `${STAGE[e.from_stage as JobStage]} to ${STAGE[e.to_stage as JobStage]}`}</span>
                 <span className="text-ink-soft"> by {e.actor_name ?? "someone"}, {timestamp(e.created_at)}</span></p>
               {e.reason && <p className="text-ink-soft">{e.reason}</p>}
             </li>

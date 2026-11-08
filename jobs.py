@@ -15,6 +15,7 @@ from datetime import date
 
 import db
 import employees
+import retention
 from tools import get_employee
 
 STAGES = ("applied", "screening", "interview", "offer", "hired", "not_selected")
@@ -95,6 +96,29 @@ def init_jobs():
                 stage TEXT NOT NULL DEFAULT 'applied',
                 applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 stage_changed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )""")
+        # what the careers page adds (careers.py): the candidate's own details, the consent, the private tracking link and the CV on disk
+        for column, definition in (("cover_letter", "TEXT NOT NULL DEFAULT ''"), ("cv_file", "TEXT"), ("track_hash", "TEXT"), ("consent_at", "TEXT"),
+                                   ("notice_version", "TEXT"), ("talent_pool", "INTEGER NOT NULL DEFAULT 0"), ("last_contact_at", "TEXT"),
+                                   ("erased_at", "TEXT")):
+            db.add_column_if_missing(conn, "applications", column, definition)
+        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS applications_track ON applications(track_hash) WHERE track_hash IS NOT NULL")
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS candidate_erasures (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                application_id INTEGER NOT NULL,
+                job_id INTEGER NOT NULL,
+                stage TEXT NOT NULL,
+                reason TEXT NOT NULL,
+                erased_by TEXT,
+                erased_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )""")
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS recruitment_settings (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL,
+                updated_by TEXT,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             )""")
         conn.execute("""
             CREATE TABLE IF NOT EXISTS application_events (
@@ -230,7 +254,7 @@ def _present(job, actor, counts=None):
 
 def _counts(job_id):
     counts = {s: 0 for s in STAGES}
-    for r in _rows("SELECT stage, COUNT(*) AS n FROM applications WHERE job_id = ? GROUP BY stage", (job_id,)):
+    for r in _rows("SELECT stage, COUNT(*) AS n FROM applications WHERE job_id = ? AND erased_at IS NULL GROUP BY stage", (job_id,)):
         counts[r["stage"]] = r["n"]
     return counts
 
@@ -342,12 +366,36 @@ def hiring_managers(actor_id):
 
 # ---------- candidates ----------
 
-def _candidate(row, with_contact):
+def retention_months():
+    """How many months a talent-pool candidate's data is kept after the last contact (HR's setting, 24 at the most: see retention.py)."""
+    rows = _rows("SELECT value FROM recruitment_settings WHERE key = 'retention_months'")
+    return retention.valid_months(rows[0]["value"]) if rows and retention.valid_months(rows[0]["value"]) else retention.DEFAULT_MONTHS
+
+
+def _day(sql):
+    return date.fromisoformat(str(sql)[:10]) if sql else None
+
+
+def erase_plan(row, job, months):
+    """(the day this candidate's personal data is erased, the rule that says so) from retention.py; (None, None) for a hired candidate."""
+    last = max(_day(row["applied_at"]), _day(row.get("last_contact_at")) or _day(row["applied_at"]))
+    return retention.erase_plan(row["stage"], bool(row.get("talent_pool")), last, _day(row["stage_changed_at"]) if row["stage"] == "not_selected" else None,
+                                _day(job["closed_at"]) if job and job["status"] == "closed" else None, months)
+
+
+def erase_date(row, job, months):
+    return erase_plan(row, job, months)[0]
+
+
+def _candidate(row, with_contact, job=None, months=None):
     days = (date.today() - date.fromisoformat(row["stage_changed_at"][:10])).days
     out = {"id": row["id"], "name": row["name"], "stage": row["stage"], "applied_at": row["applied_at"],
            "stage_changed_at": row["stage_changed_at"], "days_in_stage": days, "source": row["source"]}
     if with_contact:
-        out.update(email=row["email"], phone=row["phone"])
+        erase = erase_date(row, job, months or retention.DEFAULT_MONTHS) if job else None
+        out.update(email=row["email"], phone=row["phone"], cover_letter=row.get("cover_letter") or "", has_cv=bool(row.get("cv_file")),
+                   talent_pool=bool(row.get("talent_pool")), consented_on=(row.get("consent_at") or "")[:10] or None,
+                   erase_on=erase.isoformat() if erase else None)
     return out
 
 
@@ -356,9 +404,10 @@ def pipeline(actor_id, job_id):
     actor, job = _actor(actor_id), _job(job_id)
     if not can_see(actor, job):
         return {"error": NOT_FOUND}
-    rows = _rows("SELECT * FROM applications WHERE job_id = ? ORDER BY applied_at, id", (job_id,))
+    rows = _rows("SELECT * FROM applications WHERE job_id = ? AND erased_at IS NULL ORDER BY applied_at, id", (job_id,))
+    months = retention_months()
     return {"job": _present(job, actor, _counts(job_id)), "stages": [{"key": s, "label": LABELS[s]} for s in STAGES],
-            "candidates": [_candidate(r, True) for r in rows],
+            "candidates": [_candidate(r, True, job, months) for r in rows],
             "events": _rows("""SELECT e.event, e.detail, e.created_at, p.name AS actor_name FROM job_events e
                                LEFT JOIN employees p ON p.id = e.actor_id WHERE e.job_id = ? ORDER BY e.id DESC LIMIT 30""", (job_id,))}
 
@@ -381,7 +430,7 @@ def add_candidate(actor_id, job_id, data, source="added by HR"):
         return {"error": "Give a valid email address."}
     if len(phone) > 40:
         return {"error": "The phone number is too long."}
-    if _rows("SELECT id FROM applications WHERE job_id = ? AND lower(email) = ?", (job_id, email.lower())):
+    if _rows("SELECT id FROM applications WHERE job_id = ? AND erased_at IS NULL AND lower(email) = ?", (job_id, email.lower())):
         return {"error": "This person is already in this job's pipeline."}
     conn = db.get_conn()
     try:
@@ -391,7 +440,7 @@ def add_candidate(actor_id, job_id, data, source="added by HR"):
                          (cur.lastrowid, actor_id, source))
     finally:
         conn.close()
-    return _candidate(_rows("SELECT * FROM applications WHERE id = ?", (cur.lastrowid,))[0], True)
+    return _candidate(_rows("SELECT * FROM applications WHERE id = ?", (cur.lastrowid,))[0], True, job, retention_months())
 
 
 def move(actor_id, application_id, to_stage, reason=""):
@@ -418,12 +467,14 @@ def move(actor_id, application_id, to_stage, reason=""):
     conn = db.get_conn()
     try:
         with conn:
-            conn.execute("UPDATE applications SET stage = ?, stage_changed_at = CURRENT_TIMESTAMP WHERE id = ?", (to_stage, application_id))
+            conn.execute("UPDATE applications SET stage = ?, stage_changed_at = CURRENT_TIMESTAMP, "
+                         "last_contact_at = CASE WHEN ? THEN CURRENT_TIMESTAMP ELSE last_contact_at END WHERE id = ?",
+                         (to_stage, to_stage in retention.CONTACT_STAGES, application_id))
             conn.execute("INSERT INTO application_events (application_id, actor_id, event, from_stage, to_stage, reason) VALUES (?, ?, 'moved', ?, ?, ?)",
                          (application_id, actor_id, app["stage"], to_stage, reason))
     finally:
         conn.close()
-    return _candidate(_rows("SELECT * FROM applications WHERE id = ?", (application_id,))[0], True)
+    return _candidate(_rows("SELECT * FROM applications WHERE id = ?", (application_id,))[0], True, job, retention_months())
 
 
 def history(actor_id, application_id):
@@ -443,7 +494,7 @@ def new_applications(actor_id):
         return []
     where, params = ("", ()) if actor["role"] == "hr" else ("AND j.hiring_manager_id = ?", (actor_id,))
     return _rows(f"""SELECT a.id AS application_id, a.name, a.applied_at, j.id AS job_id, j.title AS job_title FROM applications a
-                     JOIN jobs j ON j.id = a.job_id WHERE a.stage = 'applied' {where} ORDER BY a.applied_at, a.id""", params)
+                     JOIN jobs j ON j.id = a.job_id WHERE a.stage = 'applied' AND a.erased_at IS NULL {where} ORDER BY a.applied_at, a.id""", params)
 
 
 def candidate_names(actor_id):
@@ -451,7 +502,7 @@ def candidate_names(actor_id):
     actor = _actor(actor_id)
     if actor is None or actor["role"] not in ("hr", "manager"):
         return []
-    where, params = ("", ()) if actor["role"] == "hr" else ("WHERE j.hiring_manager_id = ?", (actor_id,))
+    where, params = ("WHERE a.erased_at IS NULL", ()) if actor["role"] == "hr" else ("WHERE a.erased_at IS NULL AND j.hiring_manager_id = ?", (actor_id,))
     try:
         return [r["name"] for r in _rows(f"SELECT DISTINCT a.name FROM applications a JOIN jobs j ON j.id = a.job_id {where}", params)]
     except sqlite3.Error:
@@ -475,7 +526,7 @@ def for_assistant(actor_id, job=None):
         return {"error": "No job of that name that you can see."}
     out = []
     for j in found[:3]:
-        rows = _rows("SELECT * FROM applications WHERE job_id = ? ORDER BY applied_at, id", (j["id"],))
+        rows = _rows("SELECT * FROM applications WHERE job_id = ? AND erased_at IS NULL ORDER BY applied_at, id", (j["id"],))
         out.append({"job_id": j["id"], "title": j["title"], "status": j["status"], "hiring_manager": j["hiring_manager_name"],
                     "candidates": [{"name": c["name"], "stage": LABELS[c["stage"]], "applied_on": c["applied_at"][:10], "days_in_stage": c["days_in_stage"]}
                                    for c in (_candidate(r, False) for r in rows)]})

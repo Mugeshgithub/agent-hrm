@@ -10,11 +10,13 @@ import collective_agreement
 import contracts
 import document_answers
 import documents
+import careers
 import employee_files
 import jobs
 import number_guard
 import pdf_text
 import policy_gaps
+import retention
 import policy_store
 import recruitment_guard
 import search_first
@@ -1101,6 +1103,71 @@ def the_job_text_check_catches_the_plain_cases_and_leaves_ordinary_text_alone():
         assert found(text) == [], text
     assert [f["words"] for f in jobs.text_problems({"title": "Young and dynamic people wanted", "description": "x", "must_have": ["Native English speaker"], "nice_to_have": []})] == [
         "Young and dynamic people", "Native English speaker"]                                           # the title and the requirements are read too
+
+
+# ---------- recruitment: the careers page, and how long a candidate's data is kept (retention.py, careers.py) ----------
+
+D = date
+
+
+@test
+def a_candidates_data_is_erased_on_the_day_the_cnil_based_rules_say():
+    plan = retention.erase_plan
+    contact = D(2026, 1, 15)
+    assert plan("hired", True, contact) == (None, None) and plan("hired", False, contact, D(2026, 2, 1)) == (None, None)       # a hired candidate is an employee now
+    # in the talent pool (they agreed): at most 24 months after the last contact, whatever HR types
+    assert plan("applied", True, contact) == (D(2028, 1, 15), "talent pool limit")
+    assert plan("interview", True, contact, months=6) == (D(2026, 7, 15), "talent pool limit")
+    assert plan("interview", True, contact, months=60) == (D(2028, 1, 15), "talent pool limit")
+    # not in the talent pool: 30 days after "Not selected", 90 days after the job closed if they never got a decision, never later than the limit
+    assert plan("not_selected", False, contact, decided_on=D(2026, 3, 1)) == (D(2026, 3, 31), "not selected")
+    assert plan("screening", False, contact, job_closed_on=D(2026, 5, 1)) == (D(2026, 7, 30), "job closed")
+    assert plan("not_selected", False, contact, decided_on=D(2026, 3, 1), job_closed_on=D(2026, 2, 1)) == (D(2026, 3, 31), "not selected")    # the earlier rule wins
+    assert plan("not_selected", False, contact, decided_on=D(2026, 6, 1), job_closed_on=D(2026, 2, 1)) == (D(2026, 5, 2), "job closed")
+    assert plan("applied", False, contact) == (D(2028, 1, 15), "retention limit")                   # an open job, no decision: only the outer limit
+    assert plan("applied", False, contact, job_closed_on=D(2030, 1, 1), months=3) == (D(2026, 4, 15), "retention limit")
+    assert retention.add_months(D(2026, 1, 31), 1) == D(2026, 2, 28) and retention.add_months(D(2026, 11, 8), 24) == D(2028, 11, 8)
+    assert [retention.valid_months(v) for v in (24, "12", " 1 ", 0, 25, "x", None, 2.5)] == [24, 12, 1, None, None, None, None, None]
+    assert "cnil.fr" in retention.CNIL_URL and "Recrutement" in retention.CNIL_CITE
+
+
+@test
+def a_cv_is_checked_before_anything_is_saved():
+    good = pdf_text.make_pdf([("h1", "Inès Garnier"), ("p", "Data analyst, 3 years of SQL.")])
+    assert careers.check_cv(good) is None
+    assert "Attach your CV" in careers.check_cv(b"") and "Attach your CV" in careers.check_cv(None)
+    assert "too big" in careers.check_cv(good + b"0" * careers.MAX_CV_BYTES)
+    assert "must be a PDF" in careers.check_cv(b"MZ\x90\x00 a renamed program") and "must be a PDF" in careers.check_cv(b"\x89PNG\r\n\x1a\n" + b"0" * 50)
+    assert "password" in careers.check_cv(good + b"\n/Encrypt << /Filter /Standard >>")
+    for marker in (b"/JavaScript", b"/JS (app.alert(1))", b"/Launch", b"/OpenAction", b"/EmbeddedFile"):
+        assert "script or an attachment" in careers.check_cv(good + b"\n" + marker), marker
+    assert careers.decode_cv("JVBERi0=") == b"%PDF-" and careers.decode_cv("not base64!") is None and careers.decode_cv(None) == b""
+
+
+@test
+def applications_are_rate_limited_per_key_and_the_window_slides():
+    t = careers.Throttle(2, 60)
+    assert [t.allow("a", 0), t.allow("a", 10), t.allow("a", 20)] == [True, True, False]
+    assert t.allow("b", 20) is True                                                                      # another address is not affected
+    assert t.allow("a", 61) is True and t.allow("a", 62) is False                                         # the first try left the window
+
+
+@test
+def the_privacy_notice_says_only_what_the_app_does_and_what_the_cnil_recommends():
+    n = careers.notice(18)
+    text = " ".join(s["text"] for s in n["sections"])
+    assert [s["title"] for s in n["sections"]] == ["Who reads your application", "Artificial intelligence", "What we ask for, and what not to send",
+                                                   "How long we keep it", "Your rights"]
+    assert "18 months" in text and "30 days after we mark it as not selected" in text and "90 days after the job closes" in text and "two years" in text
+    assert "talent-pool box" in text and "CNIL" in text and "L1132-1" in text and "withdraw and erase" in text
+    assert "No AI is used on your application today" in text and "never ranks" not in text                      # nothing to promise yet
+    try:
+        careers.AI_ASSISTS = ("questions", "summaries")
+        on = " ".join(s["text"] for s in careers.notice(24)["sections"])
+    finally:
+        careers.AI_ASSISTS = ()
+    assert "answers your questions about the job" in on and "summary of your application against the job's requirements" in on and "never ranks, scores or rejects" in on
+    assert "No AI is used" not in on
 
 
 if __name__ == "__main__":

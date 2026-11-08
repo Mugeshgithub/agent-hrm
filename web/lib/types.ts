@@ -184,13 +184,29 @@ export type Job = {
 };
 export type Candidate = {
   id: number; name: string; stage: JobStage; applied_at: string; stage_changed_at: string; days_in_stage: number; source: string;
-  email: string; phone: string;
+  email: string; phone: string; cover_letter: string; has_cv: boolean;
+  talent_pool: boolean; consented_on: string | null; erase_on: string | null;      // erase_on: the day their personal data is erased (null once hired)
 };
 export type Pipeline = {
   job: Job; stages: { key: JobStage; label: string }[]; candidates: Candidate[];
   events: { event: string; detail: string; created_at: string; actor_name: string | null }[];
 };
 export type CandidateEvent = {
-  event: "added" | "moved"; from_stage: JobStage | null; to_stage: JobStage | null; reason: string; created_at: string; actor_name: string | null;
+  event: string; from_stage: JobStage | null; to_stage: JobStage | null; reason: string; created_at: string; actor_name: string | null;
 };
 export type NewApplication = { application_id: number; name: string; applied_at: string; job_id: number; job_title: string };
+
+// the careers page (careers.py): public, no login. A candidate sees an open job, the privacy notice, and their own application by a private link.
+export type PublicJob = {
+  id: number; title: string; team: string; location: string; contract_type: string; description: string;
+  must_have: string[]; nice_to_have: string[]; salary_min: number | null; salary_max: number | null;
+};
+export type Notice = { version: string; sections: { title: string; text: string }[] };
+export type Tracking = {
+  name: string; job_title: string; applied_on: string; stage: JobStage; stage_label: string; message: string;
+  talent_pool: boolean; erase_on: string | null; can_withdraw: boolean;
+};
+export type RetentionSettings = {
+  retention_months: number; max_months: number; default_months: number; not_selected_days: number; closed_job_days: number;
+  cite: string; url: string; erased_so_far: number;
+};

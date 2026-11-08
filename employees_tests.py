@@ -13,6 +13,7 @@ os.environ["HRM_DB"] = db.DB_PATH          # so demo_data.py can't switch back t
 import demo_data
 import employees as e
 import checkins
+import careers
 import collective_agreement
 import contracts
 import documents
@@ -23,6 +24,7 @@ import onboarding
 import pdf_text
 import outbox
 import policy_gaps
+import retention
 import policy_store
 import tools
 import welcome
@@ -1793,6 +1795,242 @@ def the_assistant_reads_names_stages_and_dates_only_and_only_for_jobs_the_person
     for who in ("E001", "E002", "E003"):
         assert "for HR and hiring managers" in jobs.for_assistant(who)["error"] and jobs.candidate_names(who) == []
     assert sorted(jobs.candidate_names("H001")) == ["Inès Garnier", "Karim Benali"] and jobs.candidate_names("C001") == []
+
+
+# ---------- recruitment: the careers page, tracking, erasing and retention (careers.py, retention.py) ----------
+
+def a_cv(text="Data analyst. Three years of SQL and Python."):
+    return pdf_text.make_pdf([("h1", "Inès Garnier"), ("p", text)])
+
+
+APPLICATION = {"name": "Inès Garnier", "email": "Ines.Garnier@example.com", "phone": "+33 6 12 34 56 78", "cover_letter": "I would like to join.", "consent": True}
+
+
+def cv_files():
+    return {n for n in os.listdir(documents.files_dir()) if n.startswith("cv_")}
+
+
+def apply_to(job_id, talent_pool=False, **changes):
+    done = careers.apply(job_id, {**APPLICATION, "talent_pool": talent_pool, **changes}, a_cv())
+    assert "token" in done, done
+    return done["token"]
+
+
+def application_id(job_id, index=-1):
+    return jobs.pipeline("H001", job_id)["candidates"][index]["id"]
+
+
+def set_columns(app_id, **columns):
+    conn = db.get_conn()
+    with conn:
+        conn.execute(f"UPDATE applications SET {', '.join(f'{k} = ?' for k in columns)} WHERE id = ?", (*columns.values(), app_id))
+    conn.close()
+
+
+def days_ago(n):
+    return (datetime.now() - timedelta(days=n)).strftime("%Y-%m-%d %H:%M:%S")
+
+
+@test
+def the_careers_page_shows_open_jobs_only_and_never_who_hires_or_who_applied():
+    fresh()
+    draft = jobs.create_job("H001", JOB)["id"]
+    first = jobs.create_job("H001", {**JOB, "title": "Support Engineer"})["id"]
+    jobs.set_status("H001", first, "open")
+    second = jobs.create_job("H001", {**JOB, "title": "Old job"})["id"]
+    jobs.set_status("H001", second, "open")
+    jobs.set_status("H001", second, "closed")
+    assert [j["title"] for j in careers.open_jobs()] == ["Support Engineer"]
+    assert careers.open_job(draft) == {"error": careers.NOT_OPEN} and careers.open_job(second) == {"error": careers.NOT_OPEN} and careers.open_job(999) == {"error": careers.NOT_OPEN}
+    shown = careers.open_job(first)
+    assert set(shown) == {"id", "title", "team", "location", "contract_type", "description", "must_have", "nice_to_have", "salary_min", "salary_max"}
+    apply_to(first)
+    assert "Garnier" not in str(careers.open_jobs()) and "M001" not in str(careers.open_jobs()) and "Lucas" not in str(shown)
+
+
+@test
+def an_application_is_saved_with_the_consent_the_cv_and_a_tracking_token_that_is_only_stored_as_a_hash():
+    job = an_open_job()
+    before = cv_files()
+    token = apply_to(job, talent_pool=True)
+    app = jobs.pipeline("H001", job)["candidates"][0]
+    assert (app["name"], app["email"], app["stage"], app["source"]) == ("Inès Garnier", "ines.garnier@example.com", "applied", "careers page")
+    assert app["talent_pool"] is True and app["has_cv"] is True and app["consented_on"] == date.today().isoformat() and app["cover_letter"] == "I would like to join."
+    new = cv_files() - before
+    assert len(new) == 1 and open(os.path.join(documents.files_dir(), new.pop()), "rb").read() == a_cv()
+    conn = db.get_conn()
+    row = conn.execute("SELECT * FROM applications").fetchone()
+    assert token not in str(dict(row)) and row["track_hash"] == careers._hash(token) and row["notice_version"] == careers.NOTICE_VERSION
+    first = conn.execute("SELECT * FROM application_events").fetchone()
+    conn.close()
+    assert (first["event"], first["actor_id"], first["to_stage"]) == ("added", None, "applied") and "talent pool: yes" in first["reason"]
+    assert [x["name"] for x in jobs.new_applications("M001")] == ["Inès Garnier"]                       # it waits in Needs you like any application
+    again = careers.apply(job, {**APPLICATION, "talent_pool": False}, a_cv())                              # the same person may apply twice: each gets their own link
+    assert again["token"] != token and len(jobs.pipeline("H001", job)["candidates"]) == 2
+
+
+@test
+def an_application_needs_consent_a_real_cv_and_an_open_job_and_a_refusal_leaves_nothing_behind():
+    job = an_open_job()
+    before = cv_files()
+    for change, word in [({"consent": False}, "Tick the box"), ({"consent": "yes"}, "Tick the box"), ({"consent": None}, "Tick the box"), ({"name": "I"}, "Give your name"),
+                         ({"email": "nobody"}, "valid email"), ({"email": ""}, "valid email"), ({"phone": "1" * 41}, "phone number is too long"),
+                         ({"cover_letter": "x" * 3001}, "cover letter is too long")]:
+        assert word in careers.apply(job, {**APPLICATION, **change}, a_cv())["error"], change
+    for cv, word in [(b"", "Attach your CV"), (b"MZ not a pdf", "must be a PDF"), (a_cv() + b"/JavaScript", "script"), (a_cv() + b"/Encrypt", "password")]:
+        assert word in careers.apply(job, APPLICATION, cv)["error"], word
+    assert careers.apply(999, APPLICATION, a_cv()) == {"error": careers.NOT_OPEN}
+    jobs.set_status("H001", job, "closed")
+    assert careers.apply(job, APPLICATION, a_cv()) == {"error": careers.NOT_OPEN}
+    assert jobs.pipeline("H001", job)["candidates"] == [] and cv_files() == before                        # no application, no file left behind
+
+
+@test
+def a_candidate_sees_where_they_stand_in_plain_words_and_never_the_reason():
+    job = an_open_job()
+    token = apply_to(job)
+    view = careers.tracking(token)
+    assert (view["job_title"], view["stage"], view["stage_label"], view["name"]) == ("Data Analyst", "applied", "Received", "Inès Garnier")
+    assert "A person at CognivexAI will read it" in view["message"] and view["can_withdraw"] is True and view["talent_pool"] is False
+    cid = application_id(job)
+    jobs.move("M001", cid, "screening")
+    assert careers.tracking(token)["stage_label"] == "Being reviewed"
+    jobs.move("M001", cid, "not_selected", "Does not have the SQL experience the job needs")
+    seen = careers.tracking(token)
+    assert seen["stage_label"] == "Not selected" and "SQL" not in str(seen) and "reason" not in str(seen).lower()                          # the reason stays internal
+    assert seen["erase_on"] == (date.today() + timedelta(days=30)).isoformat()                           # and they are told when their data goes
+    for bad in ("nope", "", None, "A" * 43):
+        assert careers.tracking(bad) == {"error": careers.NOT_FOUND}, bad
+
+
+@test
+def withdrawing_erases_every_trace_of_the_person_and_only_a_record_without_personal_data_stays():
+    job = an_open_job()
+    before = cv_files()
+    token = apply_to(job, talent_pool=True)
+    other = apply_to(job, name="Karim Benali", email="karim@example.com")
+    cid = application_id(job, 0)
+    assert len(cv_files() - before) == 2
+    assert careers.withdraw(token) == {"erased": True}
+    assert len(cv_files() - before) == 1                                                                     # their CV file is gone, the other's is not
+    conn = db.get_conn()
+    row = dict(conn.execute("SELECT * FROM applications WHERE id = ?", (cid,)).fetchone())
+    erasure = dict(conn.execute("SELECT * FROM candidate_erasures WHERE application_id = ?", (cid,)).fetchone())
+    log = [dict(r) for r in conn.execute("SELECT * FROM application_events WHERE application_id = ?", (cid,))]
+    conn.close()
+    assert (row["name"], row["email"], row["phone"], row["cover_letter"], row["cv_file"], row["track_hash"]) == ("(erased)", "", "", "", None, None) and row["erased_at"]
+    assert erasure["reason"] == "Withdrawn and erased by the candidate" and erasure["stage"] == "applied"
+    for place in (str(erasure), str(log)):
+        assert "Garnier" not in place and "ines" not in place.lower() and "+33" not in place                    # the log of the erasure holds nothing personal
+    assert careers.tracking(token) == {"error": careers.NOT_FOUND} and careers.withdraw(token) == {"error": careers.NOT_FOUND}
+    shown = jobs.pipeline("H001", job)
+    assert [c["name"] for c in shown["candidates"]] == ["Karim Benali"] and shown["job"]["counts"]["applied"] == 1
+    assert [x["name"] for x in jobs.new_applications("H001")] == ["Karim Benali"] and jobs.candidate_names("H001") == ["Karim Benali"]
+    assert "Garnier" not in str(jobs.for_assistant("H001", "Data Analyst")) and careers.tracking(other)["name"] == "Karim Benali"
+    hired = jobs.move("H001", application_id(job), "screening") and application_id(job)
+    for stage in ("interview", "offer", "hired"):
+        jobs.move("H001", hired, stage)
+    assert "contact HR" in careers.withdraw(other)["error"] and careers.tracking(other)["can_withdraw"] is False                # a hired person is an employee now
+
+
+@test
+def a_candidate_can_leave_the_talent_pool_and_hr_can_give_a_new_link_that_replaces_the_old_one():
+    job = an_open_job()
+    token = apply_to(job, talent_pool=True)
+    cid = application_id(job)
+    assert careers.tracking(token)["talent_pool"] is True
+    left = careers.leave_talent_pool(token)
+    assert left["talent_pool"] is False and left["erase_on"] == retention.erase_on("applied", False, date.today()).isoformat()          # no longer the pool's 24 months
+    assert [e["event"] for e in jobs.history("H001", cid)] == ["added", "talent pool left"]
+    assert careers.leave_talent_pool("nope") == {"error": careers.NOT_FOUND}
+    assert careers.new_tracking_token("M001", cid) == {"error": "Only HR gives a candidate a new link."}
+    assert careers.new_tracking_token("E001", cid) == {"error": "No such candidate."} and careers.new_tracking_token("C001", cid) == {"error": "No such candidate."}
+    fresh_link = careers.new_tracking_token("H001", cid)["token"]
+    assert careers.tracking(token) == {"error": careers.NOT_FOUND} and careers.tracking(fresh_link)["name"] == "Inès Garnier"       # the old link stops working
+    assert [e["event"] for e in jobs.history("H001", cid)] == ["added", "talent pool left", "new link"]
+
+
+@test
+def only_hr_and_the_hiring_manager_open_a_cv_and_each_opening_is_logged():
+    job = an_open_job()
+    apply_to(job)
+    jobs.add_candidate("H001", job, {"name": "Théo Marchand", "email": "theo@example.com"})                 # added by hand: no CV
+    first, manual = application_id(job, 0), application_id(job, 1)
+    opened = careers.open_cv("M001", first)
+    assert opened["filename"] == f"cv-{first}.pdf" and open(opened["path"], "rb").read() == a_cv()
+    assert careers.open_cv("H001", first)["path"] == opened["path"]
+    for who in ("C001", "E001", "E002"):
+        assert careers.open_cv(who, first) == {"error": "No such candidate."}, who
+    assert careers.open_cv("H001", manual) == {"error": "This candidate has no CV."} and careers.open_cv("H001", 999) == {"error": "No such candidate."}
+    log = [(e["event"], e["actor_name"]) for e in jobs.history("H001", first)]
+    assert log == [("added", None), ("cv opened", "Lucas"), ("cv opened", "Narmadha")]
+
+
+@test
+def the_daily_job_erases_each_candidate_on_the_day_the_rules_say_and_logs_it_without_a_name():
+    job = an_open_job()
+    for i, pool in enumerate([True, True, False, False, False, False]):
+        apply_to(job, talent_pool=pool, name=f"Person {i}", email=f"p{i}@example.com")
+    ids = {c["name"]: c["id"] for c in jobs.pipeline("H001", job)["candidates"]}
+    before = cv_files()
+    set_columns(ids["Person 0"], applied_at=days_ago(800), last_contact_at=days_ago(800))                 # in the talent pool, 26 months since the last contact
+    set_columns(ids["Person 1"], applied_at=days_ago(800), last_contact_at=days_ago(300))                 # in the talent pool, 10 months
+    for name, age in (("Person 2", 31), ("Person 3", 29)):                                                 # not selected 31 and 29 days ago, no talent pool
+        jobs.move("H001", ids[name], "not_selected", "Does not have the experience the job needs")
+        set_columns(ids[name], stage_changed_at=days_ago(age))
+    for stage in ("screening", "interview", "offer", "hired"):
+        jobs.move("H001", ids["Person 5"], stage)
+    set_columns(ids["Person 5"], applied_at=days_ago(900), last_contact_at=days_ago(900))                 # hired long ago: never erased here
+    erase_on = {c["name"]: c["erase_on"] for c in jobs.pipeline("H001", job)["candidates"]}
+    assert erase_on["Person 5"] is None and erase_on["Person 0"] < date.today().isoformat() < erase_on["Person 1"]
+    done = careers.run_retention(ran_by="H001")
+    assert done["erased"] == 2 and done["by_rule"] == {"talent pool limit": 1, "not selected": 1}, done            # Person 4: no decision, open job, nothing is due yet
+    assert sorted(c["name"] for c in jobs.pipeline("H001", job)["candidates"]) == ["Person 1", "Person 3", "Person 4", "Person 5"]
+    assert len(before - cv_files()) == 2                                                                   # the two erased people's CV files are gone
+    assert careers.run_retention()["erased"] == 0                                                           # safe to run every day
+    # the job closes 91 days ago: the person who never got a decision goes, the hired one stays
+    jobs.set_status("H001", job, "closed")
+    set_columns_on_job(job, closed_at=days_ago(91))
+    assert careers.run_retention(ran_by="H001")["by_rule"] == {"job closed": 2}                             # Person 4 (undecided) and Person 3 (not selected 29 days ago, but the job closed long ago)
+    assert sorted(c["name"] for c in jobs.pipeline("H001", job)["candidates"]) == ["Person 1", "Person 5"]    # the talent pool member (10 months) and the hired one stay
+    erasures = careers._rows("SELECT * FROM candidate_erasures ORDER BY id")
+    assert len(erasures) == 4 and {e["erased_by"] for e in erasures} == {"H001"} and all(e["reason"].startswith("Retention (") for e in erasures)
+    assert "Person" not in str(erasures) and "@example.com" not in str(erasures) and careers.settings("H001")["erased_so_far"] == 4
+
+
+def set_columns_on_job(job_id, **columns):
+    conn = db.get_conn()
+    with conn:
+        conn.execute(f"UPDATE jobs SET {', '.join(f'{k} = ?' for k in columns)} WHERE id = ?", (*columns.values(), job_id))
+    conn.close()
+
+
+@test
+def hr_sets_how_long_a_talent_pool_is_kept_up_to_the_cnil_limit_and_nobody_else_can():
+    fresh()
+    assert careers.settings("H001")["retention_months"] == 24 and careers.settings("H001")["max_months"] == 24 and "Recrutement" in careers.settings("H001")["cite"]
+    assert careers.settings("M001") == {"error": "Only HR can see this."} and "Only HR" in careers.set_retention("M001", 6)["error"]
+    for bad in (0, 25, "x", "", 2.5, -3):
+        assert "1 to 24" in careers.set_retention("H001", bad)["error"], bad
+    assert careers.set_retention("H001", "12")["retention_months"] == 12 and jobs.retention_months() == 12
+    job = an_open_job()
+    careers.set_retention("H001", 6)
+    apply_to(job, talent_pool=True)
+    cid = application_id(job)
+    set_columns(cid, applied_at=days_ago(200), last_contact_at=days_ago(200))                               # 6.5 months: past the setting, well inside 24
+    assert careers.run_retention()["erased"] == 1 and jobs.pipeline("H001", job)["candidates"] == []
+
+
+@test
+def moving_a_candidate_to_a_stage_that_means_contact_restarts_the_clock_and_screening_does_not():
+    job = an_open_job()
+    apply_to(job, talent_pool=True)
+    cid = application_id(job)
+    set_columns(cid, applied_at=days_ago(100), last_contact_at=days_ago(100))
+    jobs.move("H001", cid, "screening")
+    assert careers._rows("SELECT last_contact_at FROM applications")[0]["last_contact_at"][:10] == days_ago(100)[:10]               # an internal move is not a contact
+    jobs.move("H001", cid, "interview")
+    assert careers._rows("SELECT last_contact_at FROM applications")[0]["last_contact_at"][:10] == date.today().isoformat()
 
 
 if __name__ == "__main__":
