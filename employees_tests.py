@@ -12,6 +12,7 @@ os.environ["HRM_FILES_DIR"] = tempfile.mkdtemp()                       # and a t
 os.environ["HRM_DB"] = db.DB_PATH          # so demo_data.py can't switch back to web_demo.db
 import demo_data
 import employees as e
+import contracts
 import documents
 import needs_you
 import onboarding
@@ -633,6 +634,193 @@ def a_document_something_looked_off_about_goes_to_hr_and_stays_until_a_person_ha
     assert needs_you.inbox("H001")["document_flags"] == [] and needs_you.waiting_count("H001") == waiting - 1
     assert "already looked" in documents.mark_reviewed("H001", r["document_id"], "again")["error"]
     assert documents.hr_documents("H001", emp_id)[0]["flag_reviewed_by"] == "Narmadha"
+
+
+# ---------- the contract: drafting, the law, who approves, and what leaves the app ----------
+
+TERMS = {"salary_eur": "3200", "category": "executive", "trial": 4}
+
+
+def drafted(emp_id=None, **changes):
+    emp_id = emp_id or hire()
+    r = contracts.create_draft("H001", emp_id, {**TERMS, **changes})
+    assert r.get("success"), r
+    return emp_id, r["draft_id"]
+
+
+def approved():
+    emp_id, draft = drafted()
+    assert contracts.submit("H001", draft)["success"]
+    assert contracts.decide("M001", draft, "approve")["status"] == "approved"
+    return emp_id, draft
+
+
+@test
+def hr_drafts_a_contract_from_the_record_and_the_law_limits_the_trial_period():
+    fresh()
+    emp_id = hire()
+    for who in ("E001", "M001", emp_id, "nobody"):
+        assert "Only HR" in contracts.create_draft(who, emp_id, TERMS)["error"], who
+    long_trial = contracts.create_draft("H001", emp_id, {**TERMS, "trial": 5})["error"]
+    assert "L1221-19" in long_trial and "4 months" in long_trial                                  # the law is cited, with the number
+    assert "L1221-19" in contracts.create_draft("H001", emp_id, {**TERMS, "category": "employee", "trial": 3})["error"]
+    assert "salary" in contracts.create_draft("H001", emp_id, {**TERMS, "salary_eur": ""})["error"]
+    assert "no onboarding" in contracts.create_draft("H001", "E001", TERMS)["error"]               # started long ago
+    assert "No current person" in contracts.create_draft("H001", "E999", TERMS)["error"]
+    intern = hire(email="int@cognivexai.eu", name="Ines Roy", contract_type="Internship")
+    assert "isn't drafted here" in contracts.create_draft("H001", intern, TERMS)["error"]
+    r = contracts.create_draft("H001", emp_id, TERMS)
+    assert r["success"] and "already has a contract" in contracts.create_draft("H001", emp_id, TERMS)["error"]
+    view = contracts.hr_view("H001", emp_id)
+    assert view["status"] == "draft" and view["fields"] == {"salary_eur": 3200.0, "weekly_hours": 35, "category": "executive", "trial": 4}
+    assert view["person"]["title"] == "QA Engineer" and view["person"]["contract_type"] == "CDI"   # from the record, not the form
+    assert view["approver"] == "Lucas" and view["created_by"] == "Narmadha" and "Only HR" in contracts.hr_view("M001", emp_id)["error"]
+    cdd = hire(email="cdd@cognivexai.eu", name="Cleo Fox", contract_type="CDD")
+    problems = contracts.create_draft("H001", cdd, {"salary_eur": 2500, "trial": 12, "end_date": in_days(30 + 89), "cdd_reason": "Remplacement"})
+    assert problems["success"] is True                                                             # 89 days: 12 days of trial is the maximum
+    assert "L1242-10" in contracts.update_draft("H001", problems["draft_id"], {"salary_eur": 2500, "trial": 13, "end_date": in_days(30 + 89), "cdd_reason": "x"})["error"]
+
+
+@test
+def a_draft_goes_to_the_new_hires_own_manager_who_approves_or_rejects_it_with_a_reason():
+    fresh()
+    emp_id, draft = drafted()
+    for who in ("E001", "M001", "C001"):
+        assert "Only HR" in contracts.submit(who, draft)["error"], who
+    assert "nothing to decide" in contracts.decide("M001", draft, "approve")["error"]               # nobody decides before it is sent
+    for who in ("H001", "C001", "E001", emp_id):
+        assert "Only the new hire's manager" in contracts.decide(who, draft, "approve")["error"], who
+    assert contracts.submit("H001", draft) == {"success": True, "approver": "Lucas"}
+    assert "is waiting for approval" in contracts.submit("H001", draft)["error"]                  # not twice
+    for who in ("H001", "C001", "E001", emp_id, "nobody"):                                         # HR, another manager, the hire, anyone
+        assert "Only the new hire's manager" in contracts.decide(who, draft, "approve")["error"], who
+    assert "Give a reason" in contracts.decide("M001", draft, "reject", " ")["error"]
+    assert "approve or reject" in contracts.decide("M001", draft, "maybe")["error"]
+    assert contracts.decide("M001", draft, "reject", "The salary should be 3400")["status"] == "rejected"
+    view = contracts.hr_view("H001", emp_id)
+    assert view["status"] == "rejected" and view["decision_note"] == "The salary should be 3400" and view["decided_by"] == "Lucas"
+    assert "rejected" in contracts.submit("H001", draft)["error"]                                  # HR has to change it first
+    assert contracts.update_draft("H001", draft, {**TERMS, "salary_eur": "3400"})["success"]
+    assert contracts.hr_view("H001", emp_id)["status"] == "draft"
+    contracts.submit("H001", draft)
+    assert contracts.decide("M001", draft, "approve")["status"] == "approved"
+    assert "can't be changed" in contracts.update_draft("H001", draft, TERMS)["error"]              # approved is final
+    log = [(c["field"], c["old_value"], c["new_value"], c["changed_by"]) for c in e.history("H001", emp_id)["changes"] if c["field"] == "contract"]
+    assert ("contract", "pending_approval", "rejected", "Lucas") in log and ("contract", "pending_approval", "approved", "Lucas") in log
+
+
+@test
+def the_pdf_only_exists_after_the_approval_and_every_download_is_logged():
+    fresh()
+    emp_id, draft = drafted()
+    assert "only be downloaded once it is approved" in contracts.pdf_for("H001", draft)["error"]   # a draft
+    contracts.submit("H001", draft)
+    assert "waiting for approval" in contracts.pdf_for("H001", draft)["error"]                    # not even when sent
+    contracts.decide("M001", draft, "reject", "Change it")
+    assert "rejected" in contracts.pdf_for("H001", draft)["error"]
+    contracts.update_draft("H001", draft, TERMS); contracts.submit("H001", draft); contracts.decide("M001", draft, "approve")
+    for who in ("M001", "C001", "E001", emp_id):                                                  # the approver cannot download it either
+        assert "Only HR" in contracts.pdf_for(who, draft)["error"], who
+    pdf = contracts.pdf_for("H001", draft)
+    assert pdf["pdf"].startswith(b"%PDF-1.4") and b"CONTRAT DE TRAVAIL" in pdf["pdf"] and pdf["filename"] == f"contrat-anu-{draft}.pdf"
+    assert b"approuv" in pdf["pdf"]                                                               # who approved it, on the document
+    contracts.pdf_for("H001", draft)
+    assert len(contracts.hr_view("H001", emp_id)["downloads"]) == 2 and contracts.hr_view("H001", emp_id)["can_download"] is True
+    assert contracts.preview("H001", draft)["title"].startswith("CONTRAT DE TRAVAIL") and contracts.preview("M001", draft)["status"] == "approved"
+    for who in ("C001", "E001", emp_id):
+        assert contracts.preview(who, draft) == {"error": "No such contract."}, who               # only HR and the approving manager read it
+
+
+@test
+def signing_needs_an_approved_contract_and_completes_the_checklist_step():
+    fresh()
+    emp_id, draft = drafted()
+    assert "Only an approved contract" in contracts.mark_signed("H001", draft, in_days(0))["error"]
+    contracts.submit("H001", draft)
+    assert "Only an approved contract" in contracts.mark_signed("H001", draft, in_days(0))["error"]
+    contracts.decide("M001", draft, "approve")
+    assert "Only HR" in contracts.mark_signed("M001", draft, in_days(0))["error"]
+    assert "future" in contracts.mark_signed("H001", draft, in_days(3))["error"]
+    assert "before it was approved" in contracts.mark_signed("H001", draft, in_days(-5))["error"]
+    assert "Give the date" in contracts.mark_signed("H001", draft, "yesterday")["error"]
+    assert step(emp_id, "contract")["status"] == "todo"
+    assert contracts.mark_signed("H001", draft, in_days(0), "Both copies received") == {"success": True}
+    assert step(emp_id, "contract")["status"] == "done" and "Contract signed" in step(emp_id, "contract")["note"]       # the checklist follows
+    view = contracts.hr_view("H001", emp_id)
+    assert view["status"] == "signed" and view["signed_on"] == in_days(0) and view["signed_by"] == "Narmadha"
+    assert "signed" in contracts.cancel_draft("H001", draft, "oops")["error"] and "can't be changed" in contracts.update_draft("H001", draft, TERMS)["error"]
+    assert contracts.pdf_for("H001", draft)["pdf"].startswith(b"%PDF")                              # still downloadable
+
+
+@test
+def a_record_that_changed_after_the_draft_makes_it_stale_and_blocks_sending_approving_and_downloading():
+    fresh()
+    emp_id, draft = drafted()
+    e.update_employee("H001", emp_id, {"title": "Lead QA Engineer"}, "Promotion before the start")
+    assert contracts.hr_view("H001", emp_id)["stale"] is True
+    assert "record changed" in contracts.submit("H001", draft)["error"]
+    assert contracts.update_draft("H001", draft, TERMS)["success"]                                  # saving again brings it up to date
+    assert contracts.hr_view("H001", emp_id)["stale"] is False and contracts.hr_view("H001", emp_id)["person"]["title"] == "Lead QA Engineer"
+    contracts.submit("H001", draft)
+    e.update_employee("H001", emp_id, {"title": "Principal QA Engineer"}, "Another change")
+    assert "record changed" in contracts.decide("M001", draft, "approve")["error"]                  # the manager can't approve something out of date
+    assert contracts.update_draft("H001", draft, TERMS)["success"]                                  # HR pulls it back from approval...
+    assert contracts.hr_view("H001", emp_id)["status"] == "draft" and contracts.pending_for("M001") == []     # ...and the manager no longer sees it
+    contracts.submit("H001", draft); contracts.decide("M001", draft, "approve")
+    e.update_employee("H001", emp_id, {"title": "Staff QA Engineer"}, "And another")
+    assert "record changed" in contracts.pdf_for("H001", draft)["error"]
+
+
+@test
+def a_contract_can_be_cancelled_with_a_reason_and_written_again():
+    fresh()
+    emp_id, draft = drafted()
+    contracts.submit("H001", draft)
+    assert "Only HR" in contracts.cancel_draft("M001", draft, "x")["error"] and "reason" in contracts.cancel_draft("H001", draft, " ")["error"]
+    assert contracts.cancel_draft("H001", draft, "Wrong terms") == {"success": True}
+    assert contracts.hr_view("H001", emp_id)["status"] == "cancelled" and contracts.pending_for("M001") == []
+    assert "cancelled" in contracts.submit("H001", draft)["error"] and "cancelled" in contracts.decide("M001", draft, "approve")["error"]
+    again = contracts.create_draft("H001", emp_id, TERMS)
+    assert again["success"] and contracts.hr_view("H001", emp_id)["id"] == again["draft_id"]       # the live one is shown, not the cancelled one
+
+
+@test
+def a_pending_contract_waits_in_the_needs_you_inbox_of_the_hires_manager_and_nobody_else():
+    fresh()
+    emp_id, draft = drafted()
+    assert needs_you.inbox("M001")["contract_approvals"] == []                                      # a draft is not waiting for anyone yet
+    contracts.submit("H001", draft)
+    box = needs_you.inbox("M001")
+    assert [(c["employee_name"], c["contract_type"], c["salary_eur"], c["trial_text"], c["submitted_by"]) for c in box["contract_approvals"]] == [
+        ("Anu", "CDI", 3200.0, "4 months", "Narmadha")]
+    assert box["waiting_on_you"] == len(box["leave_requests"]) + len(box["onboarding_steps"]) + 1 and needs_you.waiting_count("M001") == box["waiting_on_you"]
+    assert needs_you.inbox("C001")["contract_approvals"] == [] and needs_you.inbox("H001")["contract_approvals"] == []
+    assert needs_you.for_assistant("M001")["contracts_to_approve"] == [
+        {"employee_name": "Anu", "contract_type": "CDI", "start_date": in_days(30), "salary_eur": 3200.0, "trial": "4 months", "sent_by": "Narmadha"}]
+    contracts.decide("M001", draft, "approve")
+    assert needs_you.inbox("M001")["contract_approvals"] == [] and needs_you.waiting_count("M001") == box["waiting_on_you"] - 1
+
+
+@test
+def the_assistant_tool_only_reports_where_a_contract_stands_and_only_to_hr():
+    fresh()
+    emp_id = hire()
+    status = contracts.status_for_assistant
+    assert "Only HR" in status("M001", "Anu")["error"] and "Only HR" in status(emp_id, "Anu")["error"]
+    assert "No current person" in status("H001", "Zebra")["error"]
+    assert status("H001", "Anu")["status"] == "no contract has been drafted yet"
+    assert "never sends a contract" in status("H001", "Anu")["how_a_contract_leaves_the_app"]
+    _, draft = drafted(emp_id)
+    assert status("H001", "Anu")["status"] == "a draft" and status("H001", "Anu")["pdf_can_be_downloaded"] is False
+    contracts.submit("H001", draft)
+    waiting = status("H001", "Anu")
+    assert waiting["status"] == "waiting for approval" and waiting["waiting_for"] == "approval by Lucas" and waiting["pdf_can_be_downloaded"] is False
+    contracts.decide("M001", draft, "approve")
+    ok = status("H001", "Anu")
+    assert ok["status"] == "approved" and ok["approved_by"] == "Lucas" and ok["pdf_can_be_downloaded"] is True and ok["waiting_for"] is None
+    hire(email="anya@cognivexai.eu", name="Anya Ng")
+    assert status("H001", "Anu")["employee"] == "Anu"
+    assert status("H001", "An")["several"] == ["Anu", "Anya Ng"] and "error" in status("H001", "A")        # a name that fits two people asks which
 
 
 if __name__ == "__main__":

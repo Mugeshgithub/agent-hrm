@@ -19,7 +19,7 @@ ROLE_TOOLS = {
     NEW_HIRE: NEW_HIRE_TOOLS,
     "employee": EVERYONE,
     "manager":  EVERYONE | {"get_pending_requests", "get_team_member_balance", "decide_leave", "get_needs_attention"},
-    "hr":       EVERYONE | {"get_open_tickets", "reply_to_ticket", "get_needs_attention"},
+    "hr":       EVERYONE | {"get_open_tickets", "reply_to_ticket", "get_needs_attention", "get_contract_status"},
 }
 
 # tools where only HR may name another employee

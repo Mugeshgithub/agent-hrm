@@ -9,6 +9,7 @@ import { HrDocument, Onboarding, OnboardingStep, StepOwner } from "@/lib/types";
 import { Dialog } from "@/components/Dialog";
 import { ErrorNote } from "@/components/PageHeader";
 import { TextDialog } from "@/components/TextDialog";
+import { ContractPanel } from "@/components/ContractPanel";
 import { WelcomeLinkPanel } from "@/components/WelcomeLinkPanel";
 
 export const OWNER: Record<StepOwner, string> = { new_hire: "New hire", hr: "HR", manager: "Manager" };
@@ -24,7 +25,7 @@ function StepStatus({ s }: { s: OnboardingStep }) {
   );
 }
 
-export function OnboardingChecklist({ data }: { data: Onboarding }) {
+export function OnboardingChecklist({ data, contractType }: { data: Onboarding; contractType: string }) {
   const [asking, setAsking] = useState<{ step: OnboardingStep; action: "skip" | "reopen" } | null>(null);
   const [cancelling, setCancelling] = useState(false);
   const { data: documents } = useSWR<HrDocument[]>(`/hr/people/${data.emp_id}/documents`, fetcher);
@@ -61,6 +62,7 @@ export function OnboardingChecklist({ data }: { data: Onboarding }) {
         </p>
       </div>
       <WelcomeLinkPanel empId={data.emp_id} firstName={data.name.split(" ")[0]} />
+      <ContractPanel empId={data.emp_id} firstName={data.name.split(" ")[0]} contractType={contractType} startDate={data.start_date} />
       {error && <div className="px-5 pt-3"><ErrorNote message={error} /></div>}
       <ol className="mt-4 divide-y divide-rule border-t border-rule">
         {data.steps.map((s) => (

@@ -8,7 +8,8 @@ import { useState } from "react";
 import { mutate } from "swr";
 import { api, fetcher } from "@/lib/api";
 import { day, relative, timestamp } from "@/lib/format";
-import { DocumentFlag, NeedsYou, WaitingStep } from "@/lib/types";
+import { ContractApproval, DocumentFlag, NeedsYou, WaitingStep } from "@/lib/types";
+import { PreviewText } from "@/components/ContractPanel";
 import { TextDialog } from "@/components/TextDialog";
 import { Avatar } from "@/components/Shell";
 import { LeaveDecision } from "@/components/LeaveDecision";
@@ -61,6 +62,13 @@ export default function NeedsYouPage() {
           <ul className="panel divide-y divide-rule">
             {data.onboarding_steps.map((s) => <OnboardingStepRow key={s.step_id} s={s} isHR={me.role === "hr"} />)}
           </ul>
+        </section>
+      )}
+
+      {!!data?.contract_approvals?.length && (
+        <section aria-labelledby="contracts" className="mb-6">
+          <h2 id="contracts" className="mb-3 font-medium">Contracts to approve <span className="text-ink-soft font-normal">({data.contract_approvals.length})</span></h2>
+          <ul className="space-y-4">{data.contract_approvals.map((c) => <ContractApprovalCard key={c.draft_id} c={c} />)}</ul>
         </section>
       )}
 
@@ -154,6 +162,59 @@ function DocumentFlagRow({ f }: { f: DocumentFlag }) {
                     intro="Only do this once a person has opened the file and looked at what seemed off."
                     placeholder="For example: compared with the original, it is fine" onClose={() => setReviewing(false)} />
       )}
+    </li>
+  );
+}
+
+// a contract written by HR for someone on this manager's team: read it, then approve or reject (a reason is needed to reject)
+function ContractApprovalCard({ c }: { c: ContractApproval }) {
+  const [reading, setReading] = useState(false);
+  const [rejecting, setRejecting] = useState(false);
+  const [reason, setReason] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  async function decide(decision: "approve" | "reject") {
+    setBusy(true);
+    setError("");
+    try { await api(`/contracts/${c.draft_id}/decision`, { body: { decision, reason: decision === "reject" ? reason.trim() : "" } }); mutate(() => true); }
+    catch (e) { setError((e as Error).message); setBusy(false); }
+  }
+  return (
+    <li className="panel">
+      <div className="grid gap-4 p-5 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto] md:items-start">
+        <div className="flex items-start gap-3">
+          <Avatar name={c.employee_name} size={36} />
+          <div>
+            <p className="font-medium">{c.employee_name}'s {c.contract_type} contract</p>
+            <p>{c.job_title}, starts {day(c.start_date)}</p>
+            <p className="text-sm text-ink-soft">Written by {c.submitted_by}</p>
+          </div>
+        </div>
+        <div className="space-y-1 text-sm">
+          <p><span className="text-ink-soft">Gross salary </span><span className="font-medium">{c.salary_eur.toLocaleString("fr-FR", { style: "currency", currency: "EUR" })} a month</span>, {c.weekly_hours} hours a week</p>
+          <p><span className="text-ink-soft">Trial period </span><span className="font-medium">{c.trial_text}</span>, checked against the law</p>
+          <button className="text-dossier hover:underline" onClick={() => setReading((r) => !r)}>{reading ? "Hide the contract" : "Read the contract"}</button>
+        </div>
+        {!rejecting && (
+          <div className="flex gap-2 md:justify-end">
+            <button className="btn-quiet" disabled={busy} onClick={() => setRejecting(true)}>Reject</button>
+            <button className="btn-primary" disabled={busy || c.stale} onClick={() => decide("approve")}>Approve</button>
+          </div>
+        )}
+      </div>
+      {c.stale && <p className="px-5 pb-3 text-sm text-no">The person's details changed after this was sent. HR has to update it first.</p>}
+      {reading && <div className="px-5 pb-4"><PreviewText id={c.draft_id} /></div>}
+      {rejecting && (
+        <div className="border-t border-rule px-5 py-4">
+          <label className="block"><span className="label">What should HR change?</span>
+            <input className="field" value={reason} onChange={(e) => setReason(e.target.value)} placeholder="For example: the salary should be 3,400" autoFocus /></label>
+          <div className="mt-3 flex gap-2">
+            <button className="btn-danger" disabled={busy || !reason.trim()} onClick={() => decide("reject")}>Reject the contract</button>
+            <button className="btn-ghost" onClick={() => { setRejecting(false); setReason(""); }}>Back</button>
+          </div>
+        </div>
+      )}
+      {error && <div className="px-5 pb-4"><p role="alert" className="text-sm text-no">{error}</p></div>}
     </li>
   );
 }

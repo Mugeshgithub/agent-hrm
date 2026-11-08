@@ -100,10 +100,27 @@ export type OutboxMessage = {
   created_at: string; sent_at: string | null; sent_by_name: string | null;
 };
 
+// the employment contract: HR's view of a draft, the preview, and what a manager is asked to approve
+export type ContractStatus = "draft" | "pending_approval" | "approved" | "rejected" | "signed" | "cancelled";
+export type Contract = {
+  id: number; status: ContractStatus; label: string; stale: boolean; can_download: boolean;
+  fields: { salary_eur: number; weekly_hours: number; category?: string; trial?: number; end_date?: string; cdd_reason?: string };
+  person: { name: string; title: string; contract_type: string; start_date: string; manager_name: string | null };
+  trial_text: string; created_by: string | null; submitted_by: string | null; approver: string | null;
+  decided_by: string | null; decision_note: string | null; signed_by: string | null; signed_on: string | null;
+  downloads: { downloaded_at: string; viewer_name: string | null }[];
+};
+export type TrialLimit = { max?: number; unit?: "months" | "days"; cite?: string; explain?: string; error?: string };
+export type ContractPreview = { id: number; status: ContractStatus; title: string; paragraphs: { style: string; text: string }[]; placeholders: string[] };
+export type ContractApproval = {
+  draft_id: number; employee_id: string; employee_name: string; job_title: string; contract_type: string; start_date: string;
+  salary_eur: number; trial_text: string; weekly_hours: number; submitted_by: string; submitted_at: string; stale: boolean;
+};
+
 export type DocumentFlag = { document_id: number; employee_id: string; employee_name: string; label: string; reason: string };
 
 export type NeedsYou = {
-  role: Role; waiting_on_you: number; leave_requests: Pending[]; onboarding_steps: WaitingStep[]; document_flags: DocumentFlag[];
+  role: Role; waiting_on_you: number; leave_requests: Pending[]; onboarding_steps: WaitingStep[]; document_flags: DocumentFlag[]; contract_approvals: ContractApproval[];
   hr_requests: { id: number; ticket: string; employee_id: string; employee_name: string; question: string; summary: string; created_at: string }[];
   paid_leave_warnings: { employee_id: string; name: string; paid_days: number; message: string }[];
 };
