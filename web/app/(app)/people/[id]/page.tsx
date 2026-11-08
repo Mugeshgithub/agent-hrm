@@ -85,7 +85,7 @@ export default function ProfilePage({ params }: { params: { id: string } }) {
 
       <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_320px]">
         <div className="space-y-6">
-          {isHR && onboarding && !leftAlready && <OnboardingChecklist data={onboarding} />}
+          {isHR && onboarding && !leftAlready && <OnboardingChecklist data={onboarding} contractType={p.contract_type ?? "CDI"} />}
 
           <section aria-labelledby="details" className="panel">
             <h2 id="details" className="px-5 pt-5 font-medium">Details</h2>
@@ -191,13 +191,19 @@ function Item({ label, children }: { label: string; children: ReactNode }) {
   );
 }
 
+const CONTRACT_STATUS: Record<string, string> = {
+  draft: "draft", pending_approval: "waiting for approval", approved: "approved", rejected: "rejected", signed: "signed", cancelled: "cancelled",
+};
 const STEP_STATUS: Record<string, string> = { todo: "to do", done: "done", skipped: "skipped" };
 
 function describe(c: Change, nameOf: (id: string | null) => string) {
   if (c.field === "record") return "Record created";
   if (c.field === "onboarding") return `Onboarding ${c.new_value}`;
   if (c.field === "welcome link") return `Welcome link ${c.new_value}`;
+  if (c.field.startsWith("document: ")) return `${c.field.slice("document: ".length).replace(/^./, (x) => x.toUpperCase())}: ${c.new_value}`;
   if (c.field === "outbox") return `Outbox: email ${c.new_value}`;
+  if (c.field === "reminder") return `Daily check: ${({ chase: "reminder for missing items", before_day_one: "first-day information", first_week: "first-week check-in", trial_end: "trial period reminder to the manager" } as Record<string, string>)[c.new_value ?? ""] ?? c.new_value} prepared`;
+  if (c.field === "contract") return `Contract: ${(CONTRACT_STATUS[c.old_value ?? ""] ?? "new")} to ${CONTRACT_STATUS[c.new_value ?? ""] ?? c.new_value}`;
   if (c.field.startsWith("onboarding: ")) {
     return `Onboarding step "${c.field.slice("onboarding: ".length)}": ${STEP_STATUS[c.old_value ?? ""] ?? c.old_value} to ${STEP_STATUS[c.new_value ?? ""] ?? c.new_value}`;
   }

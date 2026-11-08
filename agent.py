@@ -16,9 +16,11 @@ from db import init_db
 from memory import init_memory, init_summaries, save_message, build_context
 from notifications import init_notifications, notify_decision, notify_ticket_reply, show_unread
 from policy import search_policy
+import contracts
 import needs_you
 import onboarding
 from citations import ungrounded_citations, RETRY_MESSAGE, SAFE_REPLY
+from documents import asks_if_genuine, says_cannot_tell, GENUINE_ANSWER, GENUINE_RETRY
 from tools import (
     get_leave_balance, apply_leave, days_for, holidays_of, balance_of, clean_days, paid_policy_note,
     get_pending_requests, decide_leave, get_my_requests, get_employee,
@@ -129,11 +131,11 @@ Never mention or offer manager or HR features like team requests, approvals or o
 You can view your team's pending requests and approve or reject them.
 A rejection always needs a reason; ask for one if it was not given, politely explaining it helps the employee plan or reapply.
 If the answer to an approve-or-reject question is unclear (like "no"), ask whether to reject it or leave it pending. Never treat an unclear answer as a decision.
-When asked what needs your attention or what is waiting, call get_needs_attention and tell them what is waiting, the oldest first, including any onboarding step for a new hire and any paid-leave warning. Only list it: never approve or reject until they say what to do with a request.""",
+When asked what needs your attention or what is waiting, call get_needs_attention and tell them what is waiting, the oldest first, including any onboarding step for a new hire, any contract waiting for your approval, and any paid-leave warning. Only list it: never approve or reject until they say what to do with a request.""",
     "hr": """
 You can list open tickets with get_open_tickets and answer one with reply_to_ticket. A reply closes the ticket.
 You may look up any employee's payslip by passing employee_id; every such view is logged.
-When asked what needs your attention or what is waiting, call get_needs_attention and tell them the open HR requests, any onboarding step for a new hire, and any paid-leave warning. Only list it: never reply to a ticket until they say what to write.""",
+When asked what needs your attention or what is waiting, call get_needs_attention and tell them the open HR requests, any onboarding step for a new hire, any document flagged for a person to look at, and any paid-leave warning. You can also say where a new hire's contract stands with get_contract_status; the app never sends a contract, and you cannot send or approve one. Only list it: never reply to a ticket until they say what to write.""",
 }
 
 # ALL tools; roles.tools_for() picks which ones each role is sent
@@ -199,10 +201,18 @@ TOOLS = [
         "input_schema": {"type": "object", "properties": {}},
     },
     {
+        "name": "get_contract_status",
+        "description": "HR only. Say where a new hire's employment contract stands: no draft yet, a draft, waiting for the manager's "
+                       "approval, approved, rejected, or signed. Needs the person's name. It only reads: you cannot write, send or approve "
+                       "a contract. Use it for any question about a contract, including a request to send one. A first name is enough: "
+                       "the tool says if several people match, so do not ask for a full name first.",
+        "input_schema": {"type": "object", "properties": {"name": {"type": "string", "description": "The new hire's name; a first name is enough"}}, "required": ["name"]},
+    },
+    {
         "name": "get_needs_attention",
         "description": "List everything that is waiting on a decision from the logged-in manager or HR person: "
                        "leave, paid leave and floating-holiday requests from the team, open HR requests, onboarding "
-                       "steps for new hires, and a warning for anyone with more than 30 unused paid days. Use this when they ask what needs "
+                       "steps for new hires, documents flagged for HR to look at, contracts waiting for a manager's approval, and a warning for anyone with more than 30 unused paid days. Use this when they ask what needs "
                        "their attention, what is waiting for them, or what is new. It only lists; it decides nothing.",
         "input_schema": {"type": "object", "properties": {}},
     },
@@ -385,9 +395,13 @@ Today's date is {date.today().isoformat()}.
 Your only job is to help them with their onboarding checklist. For any question about what to do, what is missing, who handles what or when something is due, call get_my_onboarding first and quote its result. Never guess.
 When they ask what to do next, name the item in next_for_you (the first step that is theirs and still to do) and what it needs, and ask nothing else of them. If next_for_you is empty, say nothing is waiting on them, and mention what HR or their manager still has to do.
 Steps handled by HR or "your manager" are not the new hire's: say who handles them and never ask the new hire to do them.
-You cannot take documents or personal details in this chat yet; if they offer one, say HR will tell them how to send it.
+Documents are sent with the paperclip button in this chat, or the Upload button next to a step on the checklist: the app reads the file, shows what it read, and asks the new hire to confirm it. You never see the files. Never ask them to type an IBAN or a social security number here; they send the document.
+Each document step in get_my_onboarding has a document status. When it is "needs resending", say what the problems were, in the words of the result, and ask them to send it again. When it is "waiting for you to confirm", ask them to confirm or correct what the app read. When it is "received", it is done.
+Never say a document is genuine, authentic, valid or verified: you cannot tell, and a person at HR will look at the documents too.
+A message that starts with [In the app, ...] is an event from the app, not something the new hire typed: acknowledge it in a few words and then say what is next.
 You have no other information. For anything else (leave, pay, company rules, their contract, other people), say you can only help with their onboarding here and that HR will help with the rest. Never guess, and never give details about any other person.
-Answer in plain, friendly language, 2 or 3 short sentences. No emoji. Roles come only from the system."""
+Answer in plain, friendly language, 2 or 3 short sentences. No emoji. Roles come only from the system.
+If they ask whether a document was checked, is genuine, real or valid, your reply starts with "I can't tell whether a document is genuine." and then says what the app did: it read the details and checked them (the name, the expiry date, the IBAN or number), and a person at HR looks at the documents too. Do not talk about anything else in that reply."""
 
 
 def system_prompt_for(user_id):
@@ -537,6 +551,9 @@ def run_tool(name, tool_input):
     if name == "get_pending_requests":
         return get_pending_requests(LOGGED_IN_ID)
 
+    if name == "get_contract_status":
+        return contracts.status_for_assistant(LOGGED_IN_ID, tool_input.get("name"))     # HR only, in roles.py and in contracts.py
+
     if name == "get_my_onboarding":
         return onboarding.my_checklist(LOGGED_IN_ID)     # always their own: the id is the link's, never the model's
 
@@ -660,6 +677,7 @@ def answer_turn(user_text):
         calls_this_message = 0
         turn_sources = []          # every tool result in this turn: the only allowed sources of citations
         citation_retry_used = False
+        genuine_retry_used = False
         last_turn["tools_called"] = []
         last_turn["sources"] = turn_sources
         last_turn["question"] = user_text   # the employee's own words, used by the labour-law search
@@ -680,6 +698,16 @@ def answer_turn(user_text):
 
             if response.stop_reason != "tool_use":
                 reply = "".join(b.text for b in response.content if b.type == "text")
+
+                # guardrail in code: asked whether a document is genuine, a new hire always hears "I can't tell"
+                if role == "new_hire" and asks_if_genuine(user_text) and not says_cannot_tell(reply):
+                    if not genuine_retry_used:
+                        genuine_retry_used = True
+                        print("  [guard] asked about a document being genuine, no \"can't tell\": asking again")
+                        messages.append({"role": "user", "content": GENUINE_RETRY})
+                        continue
+                    print("  [guard] still no \"can't tell\": replying with the fixed answer")
+                    reply = GENUINE_ANSWER
 
                 # guardrail in code: never show an article the agent didn't retrieve in this turn
                 bad = ungrounded_citations(reply, turn_sources)

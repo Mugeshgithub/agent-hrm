@@ -14,6 +14,7 @@ import hr_queries
 from tools import get_employee
 
 NEW_HIRE, HR, MANAGER = "new_hire", "hr", "manager"
+FIRST_WEEK_DAYS = 7
 TODO, DONE, SKIPPED = "todo", "done", "skipped"
 
 # key, title, owner, days before the start date it is due, what it means
@@ -30,7 +31,10 @@ TEMPLATE = [
     ("welcome", "Welcome message sent", MANAGER, 2, "A short message from the manager before the first day."),
     ("dpae", "DPAE filed", HR, 1,
      "File the déclaration préalable à l'embauche before day one (Code du travail, L1221-10)."),
+    # a negative number of days is AFTER the start date: the manager's first-week check-in, due a week into the job
+    ("checkin", "First-week check-in", MANAGER, -FIRST_WEEK_DAYS, "Meet the new hire in their first week and see how it is going."),
 ]
+LATE_STEPS = {"checkin"}       # steps that only wait on someone from their due date (a week after the start), not from the day of hiring
 
 
 def init_onboarding():
@@ -44,6 +48,8 @@ def init_onboarding():
                 created_by TEXT NOT NULL,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             )""")
+        for column in ("cancelled_at", "cancelled_by", "cancel_reason"):       # a hire who never started
+            db.add_column_if_missing(conn, "onboardings", column, "TEXT")
         conn.execute("""
             CREATE TABLE IF NOT EXISTS onboarding_steps (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -70,6 +76,8 @@ def _log(conn, emp_id, actor_id, field, old, new, reason):
 
 def _due(start, days_before, today):
     # counted back from the start date, but never in the past on the day the hire is entered
+    if days_before < 0:                                  # after the start date: a first-week step
+        return (start + timedelta(days=-days_before)).isoformat()
     return min(start, max(start - timedelta(days=days_before), today)).isoformat()
 
 
@@ -142,13 +150,89 @@ def my_checklist(emp_id, today=None):
     person = hr_queries.person(emp_id)
     if not steps or not person or not person["active"]:
         return {"error": "There is no onboarding checklist for you."}
-    mine = [{"step": s["title"], "what": s["detail"], "who": {NEW_HIRE: "you", HR: "HR", MANAGER: "your manager"}[s["owner"]],
-             "due_date": s["due_date"], "status": s["status"],
-             "overdue": s["status"] == TODO and s["due_date"] < today.isoformat()} for s in steps]
+    import documents                      # here, not at the top: documents.py imports this module
+    sent = documents.status_for(emp_id)
+    mine = []
+    for s in steps:
+        step = {"key": s["step_key"], "step": s["title"], "what": s["detail"],
+                "who": {NEW_HIRE: "you", HR: "HR", MANAGER: "your manager"}[s["owner"]],
+                "due_date": s["due_date"], "status": s["status"],
+                "overdue": s["status"] == TODO and s["due_date"] < today.isoformat()}
+        if s["owner"] == NEW_HIRE and s["step_key"] in documents.DOCUMENT_STEPS:      # a step that takes a document
+            step["document"] = sent.get(s["step_key"], {"status": "not sent yet"})
+        mine.append(step)
     next_for_you = next((s["step"] for s in mine if s["who"] == "you" and s["status"] == TODO), None)
     return {"name": person["name"], "job_title": person["title"], "start_date": person["start_date"],
             "manager": person["manager_name"], "steps": mine, "next_for_you": next_for_you,
             "done": sum(s["status"] != TODO for s in mine), "total": len(mine)}
+
+
+def complete_by_new_hire(emp_id, step_id, note="", conn=None):
+    # the new hire marks one of THEIR OWN steps done (their documents, once they confirmed what was read).
+    # Not part of the HR/manager rules above: the emp_id is the welcome link's, and the step must be theirs.
+    rows = _rows(STEP + " WHERE s.id = ? AND o.emp_id = ?", (step_id, emp_id))
+    if not rows or rows[0]["owner"] != NEW_HIRE:
+        return {"error": "That isn't one of your steps."}
+    if rows[0]["status"] != TODO:
+        return {"error": f"This step is already {rows[0]['status']}."}
+    hire = hr_queries.person(emp_id)
+    if not hire or not hire["active"]:
+        return {"error": "There is no onboarding for you."}
+    own = conn is None
+    conn = conn or db.get_conn()
+    try:
+        with conn if own else _Nothing():
+            conn.execute("""UPDATE onboarding_steps SET status = 'done', done_by = ?, done_at = CURRENT_TIMESTAMP, note = ?
+                            WHERE id = ?""", (emp_id, note, step_id))
+            _log(conn, emp_id, emp_id, f"onboarding: {rows[0]['title']}", TODO, DONE, note or "Done by the new hire")
+    finally:
+        if own:
+            conn.close()
+    return {"success": True, "step_id": step_id}
+
+
+class _Nothing:
+    # "with" that does nothing: when the caller owns the transaction, the caller saves it
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+def cancel(hr_id, emp_id, reason, today=None):
+    """HR cancels a hire who has not started: they lose access, the welcome links stop, and every file they
+    sent is deleted together with what was read from it. The change history keeps who did it and why."""
+    import documents, outbox, welcome         # here, not at the top: they import this module
+    today = today or date.today()
+    if not is_hr(hr_id):
+        return {"error": "Only HR can cancel a hire."}
+    if not (reason or "").strip():
+        return {"error": "Give a reason. It goes in the change history."}
+    rows = _rows("SELECT * FROM onboardings WHERE emp_id = ?", (emp_id,))
+    hire = hr_queries.person(emp_id)
+    if not rows or hire is None:
+        return {"error": "That person has no onboarding."}
+    if rows[0]["cancelled_at"]:
+        return {"error": f"{hire['name']}'s hire was already cancelled."}
+    if hire["start_date"] <= today.isoformat():
+        return {"error": f"{hire['name']} has already started. Use Record leaving instead."}
+    yesterday = (today - timedelta(days=1)).isoformat()
+    conn = db.get_conn()
+    try:
+        with conn:
+            conn.execute("""UPDATE onboardings SET cancelled_at = CURRENT_TIMESTAMP, cancelled_by = ?, cancel_reason = ?
+                            WHERE emp_id = ?""", (hr_id, reason.strip(), emp_id))
+            conn.execute("UPDATE profiles SET end_date = ? WHERE emp_id = ?", (yesterday, emp_id))   # never started: no access
+            welcome._revoke_active(conn, emp_id, welcome._now(None))
+            outbox.scrub_links(conn, emp_id)
+            names = documents.delete_for_person(conn, emp_id)
+            _log(conn, emp_id, hr_id, "onboarding", "started", "cancelled", reason.strip())
+            _log(conn, emp_id, hr_id, "end_date", None, yesterday, f"Hire cancelled: {reason.strip()}")
+    finally:
+        conn.close()
+    documents.remove_files(names)
+    return {"success": True, "files_deleted": len(names)}
 
 
 def open_steps(actor_id, today=None):
@@ -170,6 +254,8 @@ def open_steps(actor_id, today=None):
     for r in rows:
         hire = hr_queries.person(r["emp_id"])
         if not hire["active"]:
+            continue
+        if r["step_key"] in LATE_STEPS and r["due_date"] > today.isoformat():       # not yet: it is for the first week
             continue
         items.append({"step_id": r["id"], "employee_id": r["emp_id"], "employee_name": hire["name"],
                       "job_title": hire["title"], "start_date": r["start_date"], "step_title": r["title"],

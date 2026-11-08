@@ -6,9 +6,10 @@ import { FormEvent, useEffect, useState } from "react";
 import useSWR, { mutate } from "swr";
 import { api, ApiError, fetcher } from "@/lib/api";
 import { day, dayWithWeekday, relative } from "@/lib/format";
-import { WelcomeStep, WelcomeView } from "@/lib/types";
+import { Reminder, WelcomeStep, WelcomeView } from "@/lib/types";
 import { ErrorNote } from "@/components/PageHeader";
 import { WelcomeAssistant } from "@/components/WelcomeAssistant";
+import { FlowCard, useDocumentFlow } from "@/components/DocumentFlow";
 
 const STATE_NOTE: Record<string, string> = {
   expired: "This link has expired. Ask HR for a new one.",
@@ -90,24 +91,38 @@ function CodeForm({ token, state, onDone }: { token: string; state?: string; onD
   );
 }
 
+type Docs = ReturnType<typeof useDocumentFlow>;
+
 function Home({ view }: { view: WelcomeView }) {
   const first = view.name.split(" ")[0];
+  const [notice, setNotice] = useState<{ id: number; text: string } | null>(null);       // an app event for the assistant
+  const docs = useDocumentFlow((text) => setNotice({ id: Date.now(), text }));
+  const { data: reminders } = useSWR<Reminder[]>("/welcome-reminders", fetcher);
   return (
     <>
+      {docs.hidden}
       <h1 className="text-xl font-semibold tracking-[-0.01em]">Welcome, {first}</h1>
       <p className="mt-1 text-ink-soft">
         Your first day is {dayWithWeekday(view.start_date)} ({relative(view.start_date)}) as {view.job_title}
         {view.manager ? `, in ${view.manager}'s team` : ""}.
       </p>
+      {!!reminders?.length && (
+        <section aria-label="Reminders" className="mt-5 rounded border border-rule bg-surface px-4 py-3">
+          <div className="flex items-start justify-between gap-3">
+            <ul className="space-y-1">{reminders.map((r) => <li key={r.id}>{r.message}</li>)}</ul>
+            <button className="btn-ghost shrink-0" onClick={async () => { await api("/welcome-reminders/read", { body: {} }); mutate("/welcome-reminders"); }}>Dismiss</button>
+          </div>
+        </section>
+      )}
       <div className="mt-6 grid gap-6 lg:grid-cols-[minmax(0,1fr)_minmax(0,420px)] lg:items-start">
-        <Checklist view={view} />
-        <div className="lg:sticky lg:top-6"><WelcomeAssistant /></div>
+        <Checklist view={view} docs={docs} />
+        <div className="lg:sticky lg:top-6"><WelcomeAssistant steps={view.steps} docs={docs} notice={notice} /></div>
       </div>
     </>
   );
 }
 
-function Checklist({ view }: { view: WelcomeView }) {
+function Checklist({ view, docs }: { view: WelcomeView; docs: Docs }) {
   const next = view.steps.find((s) => s.who === "you" && s.status === "todo");
   return (
     <section aria-labelledby="list" className="panel">
@@ -121,6 +136,11 @@ function Checklist({ view }: { view: WelcomeView }) {
           <div className="h-full bg-dossier" style={{ width: `${(view.done / view.total) * 100}%` }} />
         </div>
       </div>
+      {docs.flow?.origin === "list" && (
+        <div className="mx-5 mt-4">
+          <FlowCard f={docs} answer={docs.answer} retry={() => docs.flow && docs.pick(docs.flow.step, docs.flow.origin)} dismiss={docs.dismiss} />
+        </div>
+      )}
       <div className="mx-5 mt-4 rounded border border-rule bg-paper px-4 py-3">
         {next ? (
           <>
@@ -133,13 +153,18 @@ function Checklist({ view }: { view: WelcomeView }) {
         )}
       </div>
       <ol className="mt-4 divide-y divide-rule border-t border-rule">
-        {view.steps.map((s) => <Row key={s.step} s={s} />)}
+        {view.steps.map((s) => <Row key={s.step} s={s} docs={docs} />)}
       </ol>
     </section>
   );
 }
 
-function Row({ s }: { s: WelcomeStep }) {
+const DOC_NOTE: Record<string, string> = {
+  "waiting for you to confirm": "You sent it: please confirm what I read.",
+  "received": "Received. HR will look at it too.",
+};
+
+function Row({ s, docs }: { s: WelcomeStep; docs: Docs }) {
   const [color, label] = s.status === "done" ? ["bg-ok", "Done"] : s.status === "skipped" ? ["bg-off", "Not needed"]
     : s.overdue ? ["bg-no", "Overdue"] : ["bg-wait", "To do"];
   return (
@@ -150,6 +175,21 @@ function Row({ s }: { s: WelcomeStep }) {
         <span>{s.who === "you" ? "For you" : s.who === "HR" ? "HR takes care of it" : "Your manager takes care of it"}</span>
         {s.status === "todo" && <span>Due {day(s.due_date)}</span>}
       </p>
+      {s.document && s.document.status !== "not sent yet" && (
+        <div className="mt-1 text-sm">
+          {s.document.status === "needs resending" ? (
+            <>
+              <p className="text-no">Needs sending again:</p>
+              <ul className="list-disc pl-5 text-ink-soft">{s.document.problems?.map((p) => <li key={p}>{p}</li>)}</ul>
+            </>
+          ) : <p className="text-ink-soft">{DOC_NOTE[s.document.status]}</p>}
+        </div>
+      )}
+      {s.document && s.status === "todo" && (
+        <button className="btn-quiet mt-2" onClick={() => docs.pick(s, "list")}>
+          {s.document.status === "needs resending" ? "Send it again" : s.document.status === "waiting for you to confirm" ? "Send a different file" : "Upload"}
+        </button>
+      )}
     </li>
   );
 }

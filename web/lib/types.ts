@@ -68,9 +68,22 @@ export type WaitingStep = {
 };
 
 // the new hire's welcome link: what they see, what HR sees about the link, and the outbox
+export type WelcomeDocument = {
+  status: "not sent yet" | "waiting for you to confirm" | "needs resending" | "received";
+  problems?: string[]; what_was_read?: Record<string, string>;
+};
 export type WelcomeStep = {
-  step: string; what: string; who: "you" | "HR" | "your manager"; due_date: string;
-  status: "todo" | "done" | "skipped"; overdue: boolean;
+  key: string; step: string; what: string; who: "you" | "HR" | "your manager"; due_date: string;
+  status: "todo" | "done" | "skipped"; overdue: boolean; document?: WelcomeDocument;    // document: a step that takes a file
+};
+// what the app read from an uploaded file, to show before the person confirms
+export type UploadResult =
+  | { accepted: true; document_id: number; read: { label: string; value: string }[]; flagged: boolean }
+  | { accepted: false; problems: string[]; document_id: number };
+export type HrDocument = {
+  id: number; step_key: string; label: string; status: "read" | "confirmed"; uploaded_at: string; confirmed_at: string | null;
+  read: Record<string, string>; flagged_reason: string | null; flag_reviewed_by: string | null; flag_reviewed_at: string | null;
+  views: { viewed_at: string; viewer_name: string | null }[];
 };
 export type WelcomeView = {
   name: string; job_title: string; start_date: string; manager: string | null;
@@ -81,14 +94,35 @@ export type WelcomeLinkStatus = {
   created_by: string | null; wrong_codes: number; max_wrong_codes: number; last_used_at: string | null;
   events: { event: string; at: string }[];
 } | null;
+export type Reminder = { id: number; message: string; created_at: string };
+export type DailyRun = { chase: string[]; before_day_one: string[]; first_week: string[]; trial_end: string[] };
 export type IssuedLink = { success: true; code: string; expires_at: string; outbox_id: number; to: string };
 export type OutboxMessage = {
-  id: number; emp_id: string; employee_name: string; to_email: string; subject: string; body: string; kind: string;
+  id: number; emp_id: string; employee_name: string; to_email: string; to_name: string | null; subject: string; body: string; kind: string;
   created_at: string; sent_at: string | null; sent_by_name: string | null;
 };
 
+// the employment contract: HR's view of a draft, the preview, and what a manager is asked to approve
+export type ContractStatus = "draft" | "pending_approval" | "approved" | "rejected" | "signed" | "cancelled";
+export type Contract = {
+  id: number; status: ContractStatus; label: string; stale: boolean; can_download: boolean;
+  fields: { salary_eur: number; weekly_hours: number; category?: string; trial?: number; end_date?: string; cdd_reason?: string };
+  person: { name: string; title: string; contract_type: string; start_date: string; manager_name: string | null };
+  trial_text: string; created_by: string | null; submitted_by: string | null; approver: string | null;
+  decided_by: string | null; decision_note: string | null; signed_by: string | null; signed_on: string | null;
+  downloads: { downloaded_at: string; viewer_name: string | null }[];
+};
+export type TrialLimit = { max?: number; unit?: "months" | "days"; cite?: string; explain?: string; error?: string };
+export type ContractPreview = { id: number; status: ContractStatus; title: string; paragraphs: { style: string; text: string }[]; placeholders: string[] };
+export type ContractApproval = {
+  draft_id: number; employee_id: string; employee_name: string; job_title: string; contract_type: string; start_date: string;
+  salary_eur: number; trial_text: string; weekly_hours: number; submitted_by: string; submitted_at: string; stale: boolean;
+};
+
+export type DocumentFlag = { document_id: number; employee_id: string; employee_name: string; label: string; reason: string };
+
 export type NeedsYou = {
-  role: Role; waiting_on_you: number; leave_requests: Pending[]; onboarding_steps: WaitingStep[];
+  role: Role; waiting_on_you: number; leave_requests: Pending[]; onboarding_steps: WaitingStep[]; document_flags: DocumentFlag[]; contract_approvals: ContractApproval[];
   hr_requests: { id: number; ticket: string; employee_id: string; employee_name: string; question: string; summary: string; created_at: string }[];
   paid_leave_warnings: { employee_id: string; name: string; paid_days: number; message: string }[];
 };

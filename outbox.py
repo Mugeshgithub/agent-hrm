@@ -32,14 +32,22 @@ def queue(conn, emp_id, to_email, subject, body, kind, created_by):
                            VALUES (?, ?, ?, ?, ?, ?)""", (emp_id, to_email, subject, body, kind, created_by)).lastrowid
 
 
+def scrub_links(conn, emp_id):
+    # a cancelled hire: no email of theirs keeps a working link
+    for row in conn.execute("SELECT id, body FROM outbox WHERE emp_id = ?", (emp_id,)).fetchall():
+        conn.execute("UPDATE outbox SET body = ? WHERE id = ?",
+                     (re.sub(r"(/welcome/)[A-Za-z0-9_-]+", r"\1[link removed after sending]", row["body"]), row["id"]))
+
+
 def messages(hr_id, unsent_only=False, limit=100):
     if not onboarding.is_hr(hr_id):
         return {"error": "Only HR can see the outbox."}
     where = "WHERE o.sent_at IS NULL" if unsent_only else ""
     conn = db.get_conn()
-    rows = conn.execute(f"""SELECT o.id, o.emp_id, e.name AS employee_name, o.to_email, o.subject, o.body, o.kind,
+    rows = conn.execute(f"""SELECT o.id, o.emp_id, e.name AS employee_name, o.to_email, r.name AS to_name, o.subject, o.body, o.kind,
                                    o.created_at, o.sent_at, s.name AS sent_by_name
                             FROM outbox o JOIN employees e ON e.id = o.emp_id
+                            LEFT JOIN employees r ON lower(r.email) = lower(o.to_email)
                             LEFT JOIN employees s ON s.id = o.sent_by
                             {where} ORDER BY o.id DESC LIMIT ?""", (limit,)).fetchall()
     conn.close()

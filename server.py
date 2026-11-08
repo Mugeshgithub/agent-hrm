@@ -10,10 +10,15 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel
+from starlette.concurrency import run_in_threadpool
 from starlette.middleware.sessions import SessionMiddleware
 
+import checkins
+import contracts
 import db
+import documents
 import employees
 import hr_queries
 import leave_admin
@@ -524,6 +529,171 @@ def welcome_ask(body: AskIn, request: Request):
         except Exception as e:
             raise HTTPException(503, f"The assistant isn't available right now ({type(e).__name__}).")
         return {"reply": reply}
+
+
+# ---------- the new hire's documents, and HR's side of them ----------
+# The rules are in documents.py: file checks first, then Claude reads, then code checks what it read. The file
+# is sent as the raw request body (not a form), the person is the one the welcome link was made for.
+class ReviewIn(BaseModel):
+    note: str
+
+
+async def read_capped(request: Request, limit: int):
+    if int(request.headers.get("content-length") or 0) > limit:
+        raise HTTPException(413, "That file is too big. The limit is 10 MB.")
+    chunks, total = [], 0
+    async for chunk in request.stream():
+        total += len(chunk)
+        if total > limit:
+            raise HTTPException(413, "That file is too big. The limit is 10 MB.")
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+def send_file(result):
+    if "error" in result:
+        raise HTTPException(404, result["error"])
+    return FileResponse(result["path"], media_type=result["media_type"], filename=result["filename"],
+                        content_disposition_type="inline")
+
+
+@app.post("/api/welcome-documents")
+async def welcome_upload(request: Request, step: str, name: str = ""):
+    emp = new_hire_me(request)
+    data = await read_capped(request, documents.MAX_BYTES)
+    return fail_on_error(await run_in_threadpool(documents.submit, emp["id"], step, data, name))
+
+
+@app.post("/api/welcome-documents/{doc_id}/confirm")
+def welcome_confirm_document(doc_id: int, request: Request):
+    return fail_on_error(documents.confirm(new_hire_me(request)["id"], doc_id))
+
+
+@app.post("/api/welcome-documents/{doc_id}/decline")
+def welcome_decline_document(doc_id: int, request: Request):
+    return fail_on_error(documents.decline(new_hire_me(request)["id"], doc_id))
+
+
+@app.get("/api/welcome-documents/{doc_id}/file")
+def welcome_document_file(doc_id: int, request: Request):
+    return send_file(documents.open_file(new_hire_me(request)["id"], doc_id))          # their own, and logged
+
+
+@app.get("/api/hr/people/{emp_id}/documents")
+def person_documents(emp_id: str, request: Request):
+    return fail_on_error(documents.hr_documents(need(request, "hr")["id"], emp_id))
+
+
+@app.get("/api/hr/documents/{doc_id}/file")
+def hr_document_file(doc_id: int, request: Request):
+    return send_file(documents.open_file(need(request, "hr")["id"], doc_id))           # logged: who opened it, when
+
+
+@app.post("/api/hr/documents/{doc_id}/reviewed")
+def document_reviewed(doc_id: int, body: ReviewIn, request: Request):
+    return fail_on_error(documents.mark_reviewed(need(request, "hr")["id"], doc_id, body.note))
+
+
+@app.post("/api/hr/people/{emp_id}/cancel-hire")
+def cancel_hire(emp_id: str, body: StepReasonIn, request: Request):
+    return fail_on_error(onboarding.cancel(need(request, "hr")["id"], emp_id, body.reason))
+
+
+# ---------- the daily check-ins (reminders, first-day information, first-week, trial period) ----------
+# onboarding_jobs.py runs them every day from cron; HR can run them by hand too. Nothing is emailed: messages go to the outbox.
+@app.post("/api/hr/onboarding/daily-run")
+def run_daily_checks(request: Request):
+    return checkins.run_daily(ran_by=need(request, "hr")["id"])
+
+
+@app.get("/api/welcome-reminders")
+def welcome_reminders(request: Request):
+    return checkins.reminders_for(new_hire_me(request)["id"])
+
+
+@app.post("/api/welcome-reminders/read")
+def welcome_reminders_read(request: Request):
+    checkins.mark_read(new_hire_me(request)["id"])
+    return {"ok": True}
+
+
+# ---------- the employment contract of a new hire ----------
+# HR drafts it, the new hire's manager approves it in Needs you, then HR downloads the PDF and has it signed outside
+# the app. The app never sends a contract. The rules (the trial period against the law, who approves) are in contracts.py.
+class ContractIn(BaseModel):
+    salary_eur: str | float | None = None
+    weekly_hours: str | float | int | None = 35
+    category: str | None = None
+    trial: str | int | None = 0
+    end_date: str | None = None
+    cdd_reason: str | None = None
+
+
+class DecisionContractIn(BaseModel):
+    decision: str
+    reason: str = ""
+
+
+class SignedIn(BaseModel):
+    signed_on: str
+    note: str = ""
+
+
+@app.get("/api/hr/people/{emp_id}/contract")
+def person_contract(emp_id: str, request: Request):
+    return fail_on_error(contracts.hr_view(need(request, "hr")["id"], emp_id))           # null when there is none
+
+
+@app.get("/api/hr/people/{emp_id}/contract-limits")
+def contract_limits(emp_id: str, request: Request, category: str | None = None, end_date: str | None = None):
+    return contracts.limit_for(need(request, "hr")["id"], emp_id, category, end_date)     # {"error": ...} is shown as is
+
+
+@app.post("/api/hr/people/{emp_id}/contract")
+def draft_contract(emp_id: str, body: ContractIn, request: Request):
+    return fail_on_error(contracts.create_draft(need(request, "hr")["id"], emp_id, body.model_dump()))
+
+
+@app.patch("/api/hr/contracts/{draft_id}")
+def change_contract(draft_id: int, body: ContractIn, request: Request):
+    return fail_on_error(contracts.update_draft(need(request, "hr")["id"], draft_id, body.model_dump()))
+
+
+@app.post("/api/hr/contracts/{draft_id}/submit")
+def submit_contract(draft_id: int, request: Request):
+    return fail_on_error(contracts.submit(need(request, "hr")["id"], draft_id))
+
+
+@app.post("/api/hr/contracts/{draft_id}/cancel")
+def cancel_contract(draft_id: int, body: StepReasonIn, request: Request):
+    return fail_on_error(contracts.cancel_draft(need(request, "hr")["id"], draft_id, body.reason))
+
+
+@app.post("/api/hr/contracts/{draft_id}/signed")
+def contract_signed(draft_id: int, body: SignedIn, request: Request):
+    return fail_on_error(contracts.mark_signed(need(request, "hr")["id"], draft_id, body.signed_on, body.note))
+
+
+@app.get("/api/hr/contracts/{draft_id}/pdf")
+def contract_pdf(draft_id: int, request: Request):
+    result = contracts.pdf_for(need(request, "hr")["id"], draft_id)                       # only once approved; logged
+    if "error" in result:
+        raise HTTPException(400, result["error"])
+    return Response(result["pdf"], media_type="application/pdf",
+                    headers={"Content-Disposition": f'attachment; filename="{result["filename"]}"'})
+
+
+@app.get("/api/contracts/{draft_id}/preview")
+def contract_preview(draft_id: int, request: Request):
+    result = contracts.preview(me(request)["id"], draft_id)                               # HR, or the approving manager
+    if "error" in result:
+        raise HTTPException(404, result["error"])
+    return result
+
+
+@app.post("/api/contracts/{draft_id}/decision")
+def decide_contract(draft_id: int, body: DecisionContractIn, request: Request):
+    return fail_on_error(contracts.decide(me(request)["id"], draft_id, body.decision, body.reason))
 
 
 # ---------- leave administration ----------
