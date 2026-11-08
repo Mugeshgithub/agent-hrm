@@ -5,6 +5,7 @@ from datetime import date, timedelta
 import db
 db.DB_PATH = "unit_test_hr.db"   # its own database, never the real hr.db
 
+import collective_agreement
 import contracts
 import document_answers
 import documents
@@ -259,7 +260,7 @@ def fake_tools():
              "get_payslip", "compare_payslips", "get_pay_summary",
              "get_pending_requests", "get_team_member_balance", "decide_leave",
              "get_open_tickets", "reply_to_ticket", "search_labour_code", "lookup_colleague", "get_balance_history", "get_holidays",
-             "get_needs_attention", "get_my_onboarding", "get_contract_status", "get_my_documents", "read_my_document"]
+             "get_needs_attention", "get_my_onboarding", "get_contract_status", "get_my_documents", "read_my_document", "search_collective_agreement"]
     tools = [{"name": n, "description": n, "input_schema": {"type": "object", "properties": {}}}
              for n in names]
     for t in tools:
@@ -289,21 +290,21 @@ def names_for(role):
 def employee_gets_no_manager_or_hr_tools():
     names = names_for("employee")
     assert not names & (MANAGER_ONLY | HR_ONLY | STAFF_ONLY), names
-    assert "apply_leave" in names and len(names) == 17, names
+    assert "apply_leave" in names and len(names) == 18, names
 
 
 @test
 def manager_gets_team_tools_but_not_hr_tools():
     names = names_for("manager")
     assert MANAGER_ONLY <= names and not names & HR_ONLY, names
-    assert len(names) == 21, names
+    assert len(names) == 22, names
 
 
 @test
 def hr_gets_ticket_tools_but_not_manager_tools():
     names = names_for("hr")
     assert HR_ONLY <= names and not names & MANAGER_ONLY, names
-    assert len(names) == 21 and "get_contract_status" in names, names
+    assert len(names) == 22 and "get_contract_status" in names, names
 
 
 @test
@@ -749,6 +750,91 @@ def a_question_is_kept_without_names_emails_or_numbers():
     assert s("emmanuel and Emma's car", {"Emma"}) == "emmanuel and [name]'s car"                          # a name inside another word is left alone
     assert s("  a   long   gap  ") == "a long gap" and len(s("x" * 500)) == policy_gaps.TOPIC_MAX
     assert s("Emma", {"Emma"}) == "[name]" and s(None) == ""
+
+
+@test
+def an_agreement_is_cut_into_articles_and_nothing_is_lost():
+    cut = collective_agreement.split_sections
+    text = "Préambule libre.\n\nArticle 1 – Champ\nTexte un.\n\nArt. 2 - Préavis\nTrois mois.\n\n# Annexe\nLe barème.\n\nAnnexe II\nAutre."
+    assert [(s["title"], s["text"]) for s in cut(text)] == [("Introduction", "Préambule libre."), ("Article 1 – Champ", "Texte un."),
+                                                            ("Art. 2 - Préavis", "Trois mois."), ("Annexe", "Le barème."), ("Annexe II", "Autre.")]
+    assert [s["title"] for s in cut("Article 3 – Les congés sont de 5 jours")] == ["Article 3 – Les congés sont de 5 jours"]       # a heading that is the whole text
+    assert [s["title"] for s in cut("Voir l'article 12 ci-dessus.\nTexte.")] == ["Part 1"]                                          # a mention is not a heading
+    assert cut("") == [] and cut("  \n \n") == [] and cut(None) == []
+    long = cut("Article 1 – Long\n" + ("mot " * 2000) + "\n\nArticle 2 – Court\nOk.")                                            # one huge paragraph
+    assert all(len(s["text"]) <= collective_agreement.MAX_SECTION_CHARS for s in long)
+    assert [s["title"] for s in long][:2] == ["Article 1 – Long (part 1)", "Article 1 – Long (part 2)"] and long[-1]["title"] == "Article 2 – Court"
+    assert " ".join(s["text"] for s in long[:-1]).split().count("mot") == 2000                                                       # no word lost
+    assert [len(s["text"]) for s in cut("Article 1 – A\n" + "x" * 5000)] == [1800, 1800, 1400]                                      # no space to cut at: cut anyway
+
+
+@test
+def only_a_pdf_or_a_text_file_of_a_sensible_size_is_accepted_as_an_agreement():
+    check = collective_agreement.check_upload
+    assert check(b"%PDF-1.4 ...") == ("pdf", None)
+    assert check("Article 1 – Préavis\nUn mois.".encode("utf-8")) == ("text", None)
+    assert check("Article 1 – Préavis\nUn mois.".encode("cp1252")) == ("text", None)                    # a Windows text file
+    assert check(b"")[1] == "That file is empty."
+    assert "10 MB" in check(b"a" * (documents.MAX_BYTES + 1))[1]
+    for refused in (b"MZ\x90\x00\x03\x00\x00\x00 a program", b"\x89PNG\r\n\x1a\n....", bytes(range(256)) * 20):
+        assert check(refused)[0] is None, refused[:6]
+    assert "PDF or a text file" in check(b"\x89PNG\r\n\x1a\n....")[1]
+
+
+@test
+def the_company_policy_is_searched_after_the_collective_agreement_never_before():
+    refuse, agreement = tool_guard.refusal, collective_agreement.TOOL
+    assert refuse("employee", "search_policy", [], True) == {"error": tool_guard.AGREEMENT_FIRST}                      # an agreement is on file, not searched yet
+    assert refuse("employee", "search_policy", [agreement], True) is None                                              # searched: the policy may follow
+    assert refuse("employee", "search_policy", ["get_my_documents"], False) is None and refuse("employee", "search_policy", []) is None   # no agreement: as before
+    assert refuse("employee", "search_labour_code", [], True) is None and refuse("employee", agreement, [], True) is None
+    assert refuse("new_hire", "search_policy", [], True) == {"error": tool_guard.ROLE_REFUSAL}                         # the role check still comes first
+    assert "search_collective_agreement" in tool_guard.AGREEMENT_FIRST and "company policy" in tool_guard.AGREEMENT_FIRST
+
+
+@test
+def an_answer_after_the_agreement_did_not_answer_says_so_once_and_one_that_stopped_there_goes_on_to_the_policy():
+    nudge, c = collective_agreement.nudge, collective_agreement
+    both = ["search_collective_agreement", "search_policy"]
+    assert nudge(both, "Yes, from the company policy: up to 5 days can be carried forward.") == c.SAY_AGREEMENT_SILENT        # said nothing of the agreement
+    assert nudge(both + ["search_labour_code"], "From the Code du travail: 16 weeks.") == c.SAY_AGREEMENT_SILENT
+    assert nudge(both, "The collective agreement doesn't specify it. From the company policy: 5 days.") is None             # the right shape
+    assert nudge(both, "Yes, you can carry over up to 5 unused casual days.") == c.SAY_AGREEMENT_SILENT                       # the policy's answer, unlabelled, no word of the agreement
+    assert nudge(both, "From the collective agreement (Convention X, Article 6): three days a week.") is None               # it answered
+    assert nudge(both, "Per Article 5 of the Convention X, you get 90 percent.") is None and nudge(both, "From the company policy: 5 days. The agreement has no rule on it.") is None   # mentioned: never told it is silent
+    assert nudge(["read_my_document"] + both, "Your contract says two months.") is None                                      # the contract answered alone
+    assert nudge(["search_collective_agreement"], "The collective agreement does not mention a company car.") == c.SEARCH_ON   # silent, and stopped
+    assert nudge(["search_collective_agreement"], "From the collective agreement (X, article 5): 90 percent for 60 days.") is None
+    assert nudge(["search_policy"], "From the company policy: 5 days.") is None and nudge([], "x") is None                    # no agreement searched: not our business
+    for yes in ("The collective agreement doesn't specify it.", "The convention collective does not mention remote work.", "That is not mentioned in the collective agreement.",
+                "The agreement says nothing about it.", "Nothing in the collective agreement covers this."):
+        assert c.says_agreement_silent(yes), yes
+    for no in ("From the collective agreement (X, Article 6): three days.", "The agreement gives 90 percent.", "", None):
+        assert not c.says_agreement_silent(no), no
+    assert "do not apologise" in c.SAY_AGREEMENT_SILENT and "do not apologise" in c.SEARCH_ON                              # the correction never reaches the person
+
+
+@test
+def the_agreement_counts_as_a_source_when_the_contract_is_silent():
+    nudge, d = document_answers.nudge, document_answers
+    read = ["get_my_documents", "read_my_document"]
+    assert nudge(read + ["search_collective_agreement"], "Your contract doesn't specify a trial period. From the collective agreement: two months.") is None
+    assert nudge(read + ["search_collective_agreement"], "From the collective agreement (X, Article 3): two months.") == d.SAY_SILENT_FIRST        # no word about the contract
+    assert nudge(read, "Your contract doesn't specify a trial period.") == d.SEARCH_NOW and "search_collective_agreement" in d.SEARCH_NOW
+
+
+@test
+def a_correction_opening_is_taken_off_a_reply_that_followed_a_retry_note_and_nothing_else():
+    strip = document_answers.strip_correction
+    assert strip("You're right. Let me correct that.\nThe collective agreement doesn't specify it.") == "The collective agreement doesn't specify it."
+    assert strip("You're right. Let me give you the correct answer:\nThe agreement doesn't specify it. From the company policy: 5 days.") == \
+        "The agreement doesn't specify it. From the company policy: 5 days."
+    assert strip("You\u2019re right, I apologize. The contract doesn't specify it.") == "The contract doesn't specify it."
+    assert strip("I apologize for the confusion.\n\nHere's the corrected reply:\nYour contract doesn't specify it.") == "Your contract doesn't specify it."
+    for untouched in ("Your contract doesn't specify it. You're right to ask.", "Sorry, I couldn't find that in the policy.", "From the company policy: you can carry 5 days.",
+                      "Let me know if you need anything else.", "", None):
+        assert strip(untouched) == (untouched or ""), untouched
+    assert strip("You're right.") == "You're right."                                              # never the whole reply
 
 
 if __name__ == "__main__":

@@ -2,6 +2,7 @@
 import useSWR from "swr";
 import { fetcher } from "@/lib/api";
 import { PageHeader } from "@/components/PageHeader";
+import { CollectiveAgreementCard } from "@/components/CollectiveAgreementCard";
 
 type Section = { title: string; text: string };
 const slug = (s: string) => s.toLowerCase().normalize("NFD").replace(/[^\w\s-]/g, "").trim().replace(/\s+/g, "-");
@@ -11,6 +12,7 @@ export default function Handbook() {
   return (
     <>
       <PageHeader title="Handbook" description="The company's HR policy. The assistant answers from this text, and from the Code du travail for legal questions." />
+      <CollectiveAgreementCard />
       <div className="grid gap-8 lg:grid-cols-[200px_minmax(0,1fr)]">
         <nav aria-label="Sections" className="hidden lg:block">
           <ul className="sticky top-20 space-y-1 text-sm">

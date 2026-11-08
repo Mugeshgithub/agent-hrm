@@ -19,6 +19,7 @@ import payslips
 import checkins
 import contracts
 import documents
+import collective_agreement
 import employee_files
 import employees
 import hr_queries
@@ -29,7 +30,7 @@ import policy_gaps
 import pdf_text
 import welcome
 from tracing import observe, propagate_attributes
-from demo_data import sample_contract
+from demo_data import sample_contract, SAMPLE_AGREEMENT, SAMPLE_AGREEMENT_NAME
 from eval_retry import run_with_retry, retry_report
 from tools import apply_leave, decide_leave, create_hr_ticket, count_working_days, count_ouvrable_days, days_for, holidays_of
 
@@ -182,6 +183,7 @@ def reset_memory():
     contracts.init_contracts()
     employee_files.init_files()
     policy_gaps.init_gaps()
+    collective_agreement.init_agreement()
     checkins.init_checkins()
     outbox.init_outbox()
     welcome.init_welcome()
@@ -192,6 +194,8 @@ def reset_memory():
         conn.execute("DELETE FROM employee_file_views")
         conn.execute("DELETE FROM employee_files")
         conn.execute("DELETE FROM policy_gaps")
+        conn.execute("DELETE FROM agreement_sections")
+        conn.execute("DELETE FROM collective_agreements")
         conn.execute("DELETE FROM onboarding_reminders")
         conn.execute("DELETE FROM contract_downloads")
         conn.execute("DELETE FROM contract_drafts")
@@ -520,10 +524,23 @@ def setup_emma_contract_not_read_yet():
     employee_files.add("H001", "E001", "contract", "Employment contract of Emma", pdf, "contrat.pdf")
 
 
+def setup_agreement():
+    # HR uploads the (fictional) collective agreement: the real upload, indexed with the real embeddings
+    result = collective_agreement.add("H001", SAMPLE_AGREEMENT_NAME, SAMPLE_AGREEMENT.encode("utf-8"), "convention-collective.txt")
+    assert result.get("success"), result
+
+
+def setup_emma_contract_and_agreement():
+    setup_emma_contract()
+    setup_agreement()
+
+
 # how a reply says that the document is silent, and how it labels the company policy (used by the "silent contract" evals)
 SAYS_SILENT = (r"(?:(?:contract|document)[^.\n]{0,60}?(?:doesn't|does not|don't|do not|not|no)\s+(?:say|mention|specify|state|include|cover|contain|address|provide|give|define)"
                r"|(?:isn't|is not|not)\s+(?:mentioned|specified|stated|addressed|covered)[^.\n]{0,40}(?:contract|document)|no mention)")
 LABELLED_POLICY = r"(?:company|HR)\s+policy|handbook"
+NAMES_THE_AGREEMENT = r"collective agreement|convention collective"
+AGREEMENT_SILENT = r"(?:agreement|convention)[^.\n]{0,80}?(?:doesn't|does not|don't|do not|not|no)\s+(?:say|mention|specify|state|include|cover|contain|address|provide|give|define)"
 def no_leaked_correction(reply):
     # a retry nudge must not show in the reply ("You're right, I apologize. Here's the corrected reply")
     return ["the reply talks about its own correction"] if re.search(r"(?i)\bapologi[sz]e|you're right|corrected (?:reply|version|answer)|my (?:previous|earlier) (?:reply|answer)", reply) else []
@@ -791,6 +808,89 @@ TEST_CASES = [
         "must_call": ["search_policy"],
         "reply_must_match": r"(?i)\b(2|two)\b",
         "reply_check": gap_problems(),
+        "expected_requests": 0,
+    },
+    {
+        # the contract does not hold it, the agreement does: answered from the agreement, with its name and the article
+        "name": "collective agreement: the agreement answers, named, with its article",
+        "user": "E001",
+        "auto_confirm": False,
+        "setup": setup_emma_contract_and_agreement,
+        "input": "How much of my salary am I paid if I am off sick for a long time?",
+        "must_call": ["search_collective_agreement"],
+        "reply_must_match": rf"(?is)(?=.*\b90\b)(?=.*(?:{NAMES_THE_AGREEMENT}))(?=.*\b(?:article|art\.?)\s*5\b)",
+        "reply_must_not_match": r"(?i)your contract (?:says|states|gives|provides)[^.]{0,60}\b90",
+        "expected_requests": 0,
+    },
+    {
+        # the agreement comes before the company policy: three days, not the policy's two
+        "name": "collective agreement: the agreement comes before the company policy",
+        "user": "E001",
+        "auto_confirm": False,
+        "setup": setup_emma_contract_and_agreement,
+        "input": "How many days a week can I work from home?",
+        "must_call": ["search_collective_agreement"],
+        "reply_must_match": rf"(?is)(?=.*\b(?:3|three)\b)(?=.*(?:{NAMES_THE_AGREEMENT}))",
+        "reply_must_not_match": r"(?i)\b(?:2|two)\s+days",
+        "expected_requests": 0,
+    },
+    {
+        # the contract answers: it alone, even though the agreement says something else (one month for employees)
+        "name": "collective agreement: the contract comes first and answers alone",
+        "user": "E001",
+        "auto_confirm": False,
+        "setup": setup_emma_contract_and_agreement,
+        "input": "What notice period does my contract give me if I resign?",
+        "must_call": ["read_my_document"],
+        "reply_must_match": r"(?i)two months|2 months|deux mois",
+        "reply_must_not_match": rf"(?i)\b(?:one|1|three|3|un|trois)\s+(?:month|mois)|30 days|{NAMES_THE_AGREEMENT}",
+        "expected_requests": 0,
+    },
+    {
+        # the contract is silent on the trial period; the agreement answers, after the silence is said
+        "name": "collective agreement: a silent contract is said to be silent, then the agreement answers",
+        "user": "E001",
+        "auto_confirm": False,
+        "setup": setup_emma_contract_and_agreement,
+        "input": "How long is my trial period?",
+        "must_call": ["read_my_document", "search_collective_agreement"],
+        "reply_must_match": rf"(?is)(?=.*{SAYS_SILENT}.*?(?:{NAMES_THE_AGREEMENT}))(?=.*(?:two months|2 months|deux mois))",
+        "reply_check": no_leaked_correction,
+        "expected_requests": 0,
+    },
+    {
+        # neither the agreement nor the contract says it: the agreement's silence is said, then the company policy answers, labelled
+        "name": "collective agreement: silent on it, so the company policy answers and is named",
+        "user": "E001",
+        "auto_confirm": False,
+        "setup": setup_emma_contract_and_agreement,
+        "input": "Can I carry unused casual leave over to next year?",
+        "must_call": ["search_collective_agreement", "search_policy"],
+        "reply_must_match": rf"(?is)(?=.*{AGREEMENT_SILENT}.*?(?:{LABELLED_POLICY}))(?=.*\b5\b)",
+        "reply_check": no_leaked_correction,
+        "expected_requests": 0,
+    },
+    {
+        # the rule depends on a category (employee, or cadre) that nothing on file tells the assistant: it gives both and sends her to HR, it does not guess from her job title
+        "name": "collective agreement: a rule that depends on the category is given for each, not guessed",
+        "user": "E003",
+        "auto_confirm": False,
+        "setup": setup_agreement,
+        "input": "How long is my notice period if I resign?",
+        "must_call": ["search_collective_agreement"],
+        "reply_must_match": r"(?is)(?=.*\b(?:one|1|un)\s+(?:month|mois))(?=.*\b(?:three|3|trois)\s+(?:months|mois))(?=.*(?:HR|confirm|depends|which (?:one )?applies|category))",
+        "reply_must_not_match": r"(?i)\byour notice period is (?:three|3|one|1|a|an)\b",
+        "expected_requests": 0,
+    },
+    {
+        # no agreement uploaded: the assistant has no such tool, says HR has not added it, and invents nothing
+        "name": "collective agreement: none uploaded, so it says so and invents nothing",
+        "user": "E001",
+        "auto_confirm": False,
+        "input": "What does our collective agreement say about sick pay?",
+        "must_not_call": ["search_collective_agreement"],
+        "reply_must_match": rf"(?is)(?=.*(?:{NAMES_THE_AGREEMENT}))(?=.*(?:not (?:been )?(?:added|uploaded|available|on file)|(?:hasn't|haven't|has not|have not) (?:been )?(?:added|uploaded)|don't have|do not have|no collective agreement|isn't (?:available|on file|added)))",
+        "reply_must_not_match": r"(?i)\d+\s?%|percent|\b90\b|\b60 days",
         "expected_requests": 0,
     },
     {

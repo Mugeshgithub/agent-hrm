@@ -5,11 +5,16 @@
 import roles
 
 ROLE_REFUSAL = "That action isn't available for your role."
+AGREEMENT_FIRST = ("The collective agreement comes before the company policy. Call search_collective_agreement first, then search_policy "
+                   "only if the agreement does not answer.")
 
 
-def refusal(role, name, called):
+def refusal(role, name, called, agreement_on_file=False):
     """The error to give back for a call the code refuses, or None when it may go ahead.
-    `called` is the tools already used in this answer (kept for rules that depend on it)."""
+    `called` is the tools already used in this answer. With a collective agreement on file, the company policy is searched
+    after it, never before (the model's own habit is to search the policy first, whatever the prompt says)."""
     if not roles.allowed(role, name):
         return {"error": ROLE_REFUSAL}
+    if agreement_on_file and name == "search_policy" and "search_collective_agreement" not in called:
+        return {"error": AGREEMENT_FIRST}
     return None

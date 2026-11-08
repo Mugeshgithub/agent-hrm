@@ -28,6 +28,7 @@ import outbox
 import payslips
 import welcome
 from demo_data import init_all
+import collective_agreement
 import needs_you
 import policy_gaps
 from notifications import notify_decision, notify_ticket_reply
@@ -669,6 +670,31 @@ async def file_for_person(emp_id: str, request: Request, kind: str, title: str, 
 @app.post("/api/hr/files/{file_id}/delete")
 def delete_person_file(file_id: int, body: FileDeleteIn, request: Request):
     return fail_on_error(employee_files.delete(need(request, "hr")["id"], file_id, body.reason))
+
+
+# ---------- the collective agreement (convention collective) ----------
+# HR uploads it once (text or PDF); everyone who works here can open it, and the assistant searches it. Rules in collective_agreement.py.
+@app.get("/api/collective-agreement")
+def collective_agreement_info(request: Request):
+    me(request)
+    return collective_agreement.summary()                   # null until HR has uploaded one
+
+
+@app.get("/api/collective-agreement/file")
+def collective_agreement_file(request: Request):
+    return send_file(collective_agreement.open_file(me(request)["id"]))
+
+
+@app.post("/api/hr/collective-agreement")
+async def upload_collective_agreement(request: Request, name: str, filename: str = ""):
+    hr = need(request, "hr")
+    data = await read_capped(request, documents.MAX_BYTES)
+    return fail_on_error(await run_in_threadpool(collective_agreement.add, hr["id"], name, data, filename))     # reads and indexes it: not on the event loop
+
+
+@app.post("/api/hr/collective-agreement/remove")
+def remove_collective_agreement(request: Request):
+    return fail_on_error(collective_agreement.remove(need(request, "hr")["id"]))
 
 
 # ---------- the employment contract of a new hire ----------
