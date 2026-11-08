@@ -22,6 +22,8 @@ import onboarding
 import pdf_text
 import outbox
 import policy_gaps
+import policy_store
+import tools
 import welcome
 
 TESTS = []
@@ -1408,6 +1410,100 @@ def the_assistant_only_gets_the_agreement_tool_and_the_order_of_sources_once_hr_
     assert silent["found"] is False and AGREEMENT_NAME in silent["message"] and "does not specify it" in silent["rules"]
     collective_agreement.remove("H001")
     assert [t["name"] for t in collective_agreement.available_tools(tools)] == ["search_policy", "search_labour_code"]
+
+
+REINDEXED = []
+
+
+def reset_policy():
+    fresh()
+    conn = db.get_conn()
+    with conn:
+        conn.execute("DELETE FROM policy_versions")
+        conn.execute("DELETE FROM sqlite_sequence WHERE name = 'policy_versions'")       # version ids start at 1 again
+    conn.close()
+    REINDEXED.clear()
+    policy_store.REINDEX = lambda: REINDEXED.append(policy_store.sections())              # no embedding service here: record that it was asked to
+
+
+WFH = "Work from home"
+
+
+@test
+def hr_edits_a_policy_section_and_every_save_is_a_logged_version_with_the_earlier_ones_kept():
+    reset_policy()
+    shipped = policy_store.default_sections()
+    assert policy_store.current()["version"] == 0 and policy_store.current()["original"] and policy_store.sections() == shipped
+    for who in ("E001", "M001", "C001", "nobody"):
+        assert "Only HR" in policy_store.save_section(who, 0, WFH, WFH, "Anything.")["error"], who
+    assert policy_store.current()["version"] == 0 and REINDEXED == []                                       # nothing happened
+    done = policy_store.save_section("H001", 0, WFH, WFH, "Employees may work from home up to 3 days per week with manager approval.", "after the 2024 agreement")
+    assert done == {"success": True, "version": 1, "change": "Edited \"Work from home\"", "indexed": True}
+    assert len(REINDEXED) == 1 and "3 days per week" in str(REINDEXED[0])                                   # re-indexed with the new text, at once
+    now = policy_store.current()
+    assert now["version"] == 1 and now["saved_by"] == "H001" and not now["original"] and now["saved_at"]
+    assert next(s for s in now["sections"] if s["title"] == WFH)["text"].startswith("Employees may work from home up to 3 days")
+    assert open(policy_store.DEFAULT_PATH, encoding="utf-8").read().count("up to 2 days per week") == 1         # the shipped file is never touched
+    assert [s["title"] for s in now["sections"]] == [s["title"] for s in shipped]                              # the order stays
+    # add, rename, remove: each one is a version
+    assert policy_store.save_section("H001", 1, "", "Company car", "A company car is available to managers after two years.")["version"] == 2
+    assert policy_store.save_section("H001", 2, "Company car", "Company vehicles", "A company car is available to managers after two years.")["change"] == \
+        "Renamed \"Company car\" to \"Company vehicles\""
+    assert policy_store.save_section("H001", 3, "Company vehicles", "Company cars", "Managers get a car after two years.")["change"] == \
+        "Renamed \"Company vehicles\" to \"Company cars\" and edited it"
+    assert policy_store.delete_section("H001", 4, "Company cars", "not offered after all")["change"] == "Removed \"Company cars\""
+    history = policy_store.versions()
+    assert [v["id"] for v in history] == [5, 4, 3, 2, 1, 0] and [v["current"] for v in history] == [True] + [False] * 5
+    assert history[0]["saved_by"] == "Narmadha" and history[0]["change"] == "Removed \"Company cars\"" and history[0]["note"] == "not offered after all"
+    assert history[-1]["change"] == "The policy as shipped" and history[-1]["saved_by"] is None
+    assert any(s["title"] == "Company car" for s in policy_store.get_version(2)) and policy_store.get_version(0) == shipped and policy_store.get_version(99) is None   # earlier versions are readable
+
+
+@test
+def a_save_on_top_of_a_newer_version_or_one_that_breaks_a_rule_the_app_enforces_is_refused():
+    reset_policy()
+    assert policy_store.save_section("H001", 0, WFH, WFH, "Up to 3 days.")["success"]
+    stale = policy_store.save_section("H001", 0, WFH, WFH, "Up to 4 days.")                                  # someone else saved first
+    assert "changed since you opened it" in stale["error"] and policy_store.current()["version"] == 1
+    assert "Nothing changed" in policy_store.save_section("H001", 1, WFH, WFH, "Up to 3 days.")["error"]
+    assert "no longer exists" in policy_store.save_section("H001", 1, "Gone", "Gone", "x")["error"] and "no longer exists" in policy_store.delete_section("H001", 1, "Gone")["error"]
+    casual = next(s for s in policy_store.sections() if s["title"] == "Casual leave")
+    refused = policy_store.save_section("H001", 1, "Casual leave", "Casual leave", casual["text"].replace("12 casual leave days", "15 casual leave days"))
+    assert "12 casual leave days per year" in refused["error"] and "ask a developer" in refused["error"]
+    assert "2.5 days of paid leave per month" in policy_store.delete_section("H001", 1, "Paid leave (congés payés)")["error"]       # the whole paid-leave section cannot go
+    assert "needs some text" in policy_store.save_section("H001", 1, "", "New", "   ")["error"] and policy_store.current()["version"] == 1   # nothing was saved by any refusal
+    assert len(REINDEXED) == 1                                                                                # and nothing was re-indexed
+
+
+@test
+def an_earlier_version_can_be_restored_as_a_new_version_and_a_failing_reindex_does_not_lose_the_save():
+    reset_policy()
+    policy_store.save_section("H001", 0, WFH, WFH, "Up to 3 days.")
+    policy_store.save_section("H001", 1, "", "Company car", "Managers get one.")
+    back = policy_store.restore("H001", 2, 1)
+    assert back["version"] == 3 and back["change"] == "Restored version 1" and not any(s["title"] == "Company car" for s in policy_store.sections())
+    assert policy_store.versions()[0]["restored_from"] == 1 and len(policy_store.versions()) == 4                  # the history only grows
+    assert policy_store.restore("H001", 3, 0)["change"] == "Restored the policy as shipped" and policy_store.sections() == policy_store.default_sections()
+    assert "Nothing changed" in policy_store.restore("H001", 4, 0)["error"] and "No such version" in policy_store.restore("H001", 4, 99)["error"]
+    assert "Only HR" in policy_store.restore("E001", 4, 1)["error"]
+    def down():
+        raise RuntimeError("the embedding service is down")
+    policy_store.REINDEX = down
+    saved = policy_store.save_section("H001", 4, WFH, WFH, "Up to 5 days.")
+    assert saved["success"] and saved["indexed"] is False and policy_store.current()["version"] == 5            # kept; the search embeds it on its next question
+
+
+@test
+def the_paid_leave_window_the_leave_rules_use_follows_the_policy_text_hr_saves():
+    reset_policy()
+    assert tools.paid_policy()[0] == ((5, 1), (10, 31)) and tools.paid_policy_note(date(2030, 6, 3), date(2030, 6, 5)) is None
+    paid = next(s for s in policy_store.sections() if s["title"].startswith("Paid leave"))
+    done = policy_store.save_section("H001", 0, paid["title"], paid["title"], paid["text"].replace("1 May and 31 October", "1 June and 30 September"))
+    assert done["success"]
+    assert tools.paid_policy()[0] == ((6, 1), (9, 30)) and "between 1 June and 30 September" in tools.paid_policy()[1]
+    assert tools.paid_policy_note(date(2030, 5, 20), date(2030, 5, 22)) == tools.paid_policy()[1]               # May is now outside the window
+    assert tools.paid_policy_note(date(2030, 6, 3), date(2030, 6, 5)) is None
+    assert tools.get_leave_balance("E001", "paid")["policy_note"] == tools.paid_policy()[1]
 
 
 if __name__ == "__main__":

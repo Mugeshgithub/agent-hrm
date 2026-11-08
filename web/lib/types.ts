@@ -127,6 +127,14 @@ export type ContractApproval = {
 
 export type DocumentFlag = { document_id: number; employee_id: string; employee_name: string; label: string; reason: string };
 
+// the policy as HR edits it (policy_store.py): the current version, and what each save did
+export type PolicyForEditing = {
+  version: number; sections: { title: string; text: string }[]; saved_by: string | null; saved_at: string | null; change: string; original: boolean;
+  kept: string[];       // the sentences the app's leave rules rely on: a save that removes one is refused
+};
+export type PolicyVersion = { id: number; saved_by: string | null; saved_at: string | null; change: string; note: string; restored_from: number | null; current: boolean };
+export type PolicySaved = { success: boolean; version: number; change: string; indexed: boolean };
+
 // the company's collective agreement, as the Handbook page shows it (never its text)
 export type CollectiveAgreement = {
   id: number; name: string; original_name: string; media_type: string; size_bytes: number; sections: number;

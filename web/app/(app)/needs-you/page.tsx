@@ -142,7 +142,8 @@ function PolicyGapRow({ g }: { g: PolicyGap }) {
         </p>
         {error && <p role="alert" className="mt-1 text-sm text-no">{error}</p>}
       </div>
-      <div className="flex shrink-0 gap-2">
+      <div className="flex shrink-0 flex-wrap gap-2">
+        <Link href={`/handbook?gap=${g.id}`} className="btn-quiet">Edit the policy</Link>
         <button className="btn-quiet" disabled={busy} onClick={() => close("dismiss")}>Dismiss</button>
         <button className="btn-primary" disabled={busy} onClick={() => close("fixed")}>Mark fixed</button>
       </div>

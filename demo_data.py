@@ -22,6 +22,7 @@ import employee_files
 import onboarding
 import outbox
 import policy_gaps
+import policy_store
 import welcome
 from memory import init_memory, init_summaries
 from notifications import init_notifications, notify_decision, notify_ticket_reply
@@ -45,6 +46,7 @@ def init_all(reset=False):
     checkins.init_checkins()
     employee_files.init_files()
     policy_gaps.init_gaps()
+    policy_store.init_policy()
     collective_agreement.init_agreement()
     leave_admin.init_leave_admin()   # public holidays and the balance history
     if reset:   # balances start again, so their history does too
@@ -55,6 +57,7 @@ def init_all(reset=False):
             conn.execute("DELETE FROM employee_file_views")
             conn.execute("DELETE FROM employee_files")
             conn.execute("DELETE FROM policy_gaps")
+            conn.execute("DELETE FROM policy_versions")
             conn.execute("DELETE FROM agreement_sections")
             conn.execute("DELETE FROM collective_agreements")
             conn.execute("DELETE FROM onboarding_reminders")

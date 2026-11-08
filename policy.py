@@ -6,23 +6,19 @@ import hashlib
 from dotenv import load_dotenv
 from openai import OpenAI
 
+import policy_store
+
 load_dotenv()
 client = OpenAI()
 
-POLICY_FILE = "hr_policy.md"
 CACHE_FILE = "policy_embeddings.json"   # so we only pay to embed each section once
 EMBED_MODEL = "text-embedding-3-small"
 MIN_SCORE = 0.30   # below this, a section is "not related"; tune it with the test below
 
 
 def load_sections():
-    # split the document into sections at each "## " heading
-    text = open(POLICY_FILE, encoding="utf-8").read()
-    sections = []
-    for part in text.split("\n## ")[1:]:
-        title, _, body = part.partition("\n")
-        sections.append({"title": title.strip(), "text": body.strip()})
-    return sections
+    # the current policy: what HR last saved in the Handbook, or hr_policy.md until then (policy_store.py)
+    return policy_store.sections()
 
 
 def embed(texts):
@@ -47,7 +43,10 @@ def section_vectors():
         vectors = embed([sections[i]["title"] + "\n" + sections[i]["text"] for i in missing])
         for i, v in zip(missing, vectors):
             cache[keys[i]] = v
-        json.dump(cache, open(CACHE_FILE, "w"))
+        tmp = f"{CACHE_FILE}.{os.getpid()}.tmp"                # written whole, then swapped in: two processes never leave a half-written file
+        with open(tmp, "w") as f:
+            json.dump(cache, f)
+        os.replace(tmp, CACHE_FILE)
 
     return [(s, cache[k]) for s, k in zip(sections, keys)]
 

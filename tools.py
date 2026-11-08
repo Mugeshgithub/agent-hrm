@@ -4,6 +4,7 @@ import os
 import re
 from datetime import date, timedelta
 from db import get_conn, init_db, ticket_number
+import policy_store
 
 # public holidays of the default plan; leave_admin.load_holidays() refills this set from the database
 HOLIDAYS = {date(2026, 11, 11), date(2026, 12, 25)}
@@ -14,22 +15,11 @@ FLOATER = "floater"                # a floating holiday the employee picks; coun
 PENDING = "pending_manager_approval"
 
 
-def _read_paid_policy():
-    # the paid-leave window and the note shown to the user are both read from hr_policy.md (Paid leave),
-    # so the policy text is the only place they are written; fails loudly if the wording changes
-    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "hr_policy.md")
-    text = open(path, encoding="utf-8").read()
-    m = re.search(r"Paid leave is normally taken between (\d+) (\w+) and (\d+) (\w+)\..*?your manager decides whether to approve it\.",
-                  text, re.S)
-    if not m:
-        raise RuntimeError("hr_policy.md: the Paid leave section no longer has the 'normally taken between ... "
-                           "your manager decides whether to approve it.' sentences that tools.py reads")
-    months = list(calendar.month_name)
-    window = ((months.index(m.group(2)), int(m.group(1))), (months.index(m.group(4)), int(m.group(3))))
-    return window, " ".join(m.group(0).split())
-
-
-PAID_WINDOW, PAID_POLICY_NOTE = _read_paid_policy()    # ((5, 1), (10, 31)): (month, day) of the first and last day
+def paid_policy():
+    """((month, day), (month, day)) of the usual paid-leave window, and the note shown with paid leave. Both come from the current policy
+    text (policy_store.py, which HR edits in the Handbook), so that text is the only place they are written. The editor refuses a save that
+    would leave no such sentences, so this cannot fail on an edited policy."""
+    return policy_store.paid_policy()
 
 
 
@@ -54,10 +44,11 @@ def balance_of(emp):
 
 def paid_policy_note(start, end):
     # the note to attach when paid leave falls, even partly, outside the usual window; None if inside it
+    window, note = paid_policy()
     def inside(d):
-        return PAID_WINDOW[0] <= (d.month, d.day) <= PAID_WINDOW[1]
+        return window[0] <= (d.month, d.day) <= window[1]
     if start.year != end.year or not (inside(start) and inside(end)):
-        return PAID_POLICY_NOTE
+        return note
     return None
 
 
@@ -70,7 +61,7 @@ def get_leave_balance(employee_id, leave_type=None):
         "leave_balance": balance_of(emp),
     }
     if leave_type == PAID:       # asked about paid leave: no dates yet, so always remind of the usual window
-        result["policy_note"] = PAID_POLICY_NOTE
+        result["policy_note"] = paid_policy()[1]
     return result
 
 
