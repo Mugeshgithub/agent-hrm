@@ -44,9 +44,10 @@ def messages(hr_id, unsent_only=False, limit=100):
         return {"error": "Only HR can see the outbox."}
     where = "WHERE o.sent_at IS NULL" if unsent_only else ""
     conn = db.get_conn()
-    rows = conn.execute(f"""SELECT o.id, o.emp_id, e.name AS employee_name, o.to_email, o.subject, o.body, o.kind,
+    rows = conn.execute(f"""SELECT o.id, o.emp_id, e.name AS employee_name, o.to_email, r.name AS to_name, o.subject, o.body, o.kind,
                                    o.created_at, o.sent_at, s.name AS sent_by_name
                             FROM outbox o JOIN employees e ON e.id = o.emp_id
+                            LEFT JOIN employees r ON lower(r.email) = lower(o.to_email)
                             LEFT JOIN employees s ON s.id = o.sent_by
                             {where} ORDER BY o.id DESC LIMIT ?""", (limit,)).fetchall()
     conn.close()

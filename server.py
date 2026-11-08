@@ -15,6 +15,7 @@ from pydantic import BaseModel
 from starlette.concurrency import run_in_threadpool
 from starlette.middleware.sessions import SessionMiddleware
 
+import checkins
 import contracts
 import db
 import documents
@@ -596,6 +597,24 @@ def document_reviewed(doc_id: int, body: ReviewIn, request: Request):
 @app.post("/api/hr/people/{emp_id}/cancel-hire")
 def cancel_hire(emp_id: str, body: StepReasonIn, request: Request):
     return fail_on_error(onboarding.cancel(need(request, "hr")["id"], emp_id, body.reason))
+
+
+# ---------- the daily check-ins (reminders, first-day information, first-week, trial period) ----------
+# onboarding_jobs.py runs them every day from cron; HR can run them by hand too. Nothing is emailed: messages go to the outbox.
+@app.post("/api/hr/onboarding/daily-run")
+def run_daily_checks(request: Request):
+    return checkins.run_daily(ran_by=need(request, "hr")["id"])
+
+
+@app.get("/api/welcome-reminders")
+def welcome_reminders(request: Request):
+    return checkins.reminders_for(new_hire_me(request)["id"])
+
+
+@app.post("/api/welcome-reminders/read")
+def welcome_reminders_read(request: Request):
+    checkins.mark_read(new_hire_me(request)["id"])
+    return {"ok": True}
 
 
 # ---------- the employment contract of a new hire ----------

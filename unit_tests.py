@@ -663,6 +663,16 @@ def the_legal_numbers_in_the_code_match_the_labour_code_when_that_file_is_availa
     assert (contracts.LEGAL_HOURS, contracts.MAX_HOURS, contracts.CDD_CAP_SHORT_DAYS) == (35, 48, 14)
 
 
+@test
+def the_last_day_of_a_trial_period_counts_months_for_a_cdi_and_days_for_a_cdd():
+    end = contracts.trial_end
+    assert end("CDI", date(2030, 3, 4), 2) == date(2030, 5, 3)                      # two months from the 4th: the day before the 4th
+    assert end("CDI", date(2030, 1, 31), 4) == date(2030, 5, 30)
+    assert end("CDI", date(2030, 12, 31), 2) == date(2031, 2, 27)                   # a short month: 28 February, minus the day
+    assert end("CDD", date(2030, 1, 7), 12) == date(2030, 1, 18) and end("CDD", date(2030, 1, 7), 1) == date(2030, 1, 7)
+    assert end("CDI", date(2030, 3, 4), 0) is None and end("CDD", date(2030, 3, 4), 0) is None and end("CDI", date(2030, 3, 4), None) is None
+
+
 if __name__ == "__main__":
     failed = 0
     for t in TESTS:

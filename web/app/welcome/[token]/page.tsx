@@ -6,7 +6,7 @@ import { FormEvent, useEffect, useState } from "react";
 import useSWR, { mutate } from "swr";
 import { api, ApiError, fetcher } from "@/lib/api";
 import { day, dayWithWeekday, relative } from "@/lib/format";
-import { WelcomeStep, WelcomeView } from "@/lib/types";
+import { Reminder, WelcomeStep, WelcomeView } from "@/lib/types";
 import { ErrorNote } from "@/components/PageHeader";
 import { WelcomeAssistant } from "@/components/WelcomeAssistant";
 import { FlowCard, useDocumentFlow } from "@/components/DocumentFlow";
@@ -97,6 +97,7 @@ function Home({ view }: { view: WelcomeView }) {
   const first = view.name.split(" ")[0];
   const [notice, setNotice] = useState<{ id: number; text: string } | null>(null);       // an app event for the assistant
   const docs = useDocumentFlow((text) => setNotice({ id: Date.now(), text }));
+  const { data: reminders } = useSWR<Reminder[]>("/welcome-reminders", fetcher);
   return (
     <>
       {docs.hidden}
@@ -105,6 +106,14 @@ function Home({ view }: { view: WelcomeView }) {
         Your first day is {dayWithWeekday(view.start_date)} ({relative(view.start_date)}) as {view.job_title}
         {view.manager ? `, in ${view.manager}'s team` : ""}.
       </p>
+      {!!reminders?.length && (
+        <section aria-label="Reminders" className="mt-5 rounded border border-rule bg-surface px-4 py-3">
+          <div className="flex items-start justify-between gap-3">
+            <ul className="space-y-1">{reminders.map((r) => <li key={r.id}>{r.message}</li>)}</ul>
+            <button className="btn-ghost shrink-0" onClick={async () => { await api("/welcome-reminders/read", { body: {} }); mutate("/welcome-reminders"); }}>Dismiss</button>
+          </div>
+        </section>
+      )}
       <div className="mt-6 grid gap-6 lg:grid-cols-[minmax(0,1fr)_minmax(0,420px)] lg:items-start">
         <Checklist view={view} docs={docs} />
         <div className="lg:sticky lg:top-6"><WelcomeAssistant steps={view.steps} docs={docs} notice={notice} /></div>

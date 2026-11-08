@@ -312,7 +312,7 @@ def onboarding_checklist_is_for_hr_and_the_steps_follow_the_rules_in_code():
     assert made.status_code == 200, made.text
     lea = made.json()["id"]
     box = hr.get(f"/api/hr/people/{lea}/onboarding").json()
-    assert box["progress"] == {"done": 0, "skipped": 0, "total": 8, "complete": False} and box["manager_name"] == "Lucas"
+    assert box["progress"] == {"done": 0, "skipped": 0, "total": 9, "complete": False} and box["manager_name"] == "Lucas"
     assert hr.get("/api/hr/people/E001/onboarding").json() is None                 # started long ago: no checklist
     for who in ("E001", "M001"):
         assert as_person(who).get(f"/api/hr/people/{lea}/onboarding").status_code == 403, who
@@ -337,9 +337,9 @@ def onboarding_checklist_is_for_hr_and_the_steps_follow_the_rules_in_code():
     assert TestClient(server.app).post(f"/api/onboarding/steps/{equipment}/complete", json={}).status_code == 401
 
 
-def make_hire(hr, email, name="Mia Roy"):
+def make_hire(hr, email, name="Mia Roy", days=25):
     r = hr.post("/api/hr/people", json={"name": name, "email": email, "role": "employee", "title": "Designer",
-                                        "department": "Engineering", "location": "Paris", "start_date": in_days(25),
+                                        "department": "Engineering", "location": "Paris", "start_date": in_days(days),
                                         "manager_id": "M001"})
     assert r.status_code == 200, r.text
     return r.json()["id"]
@@ -392,7 +392,7 @@ def a_welcome_link_needs_the_right_code_and_the_session_can_only_read_its_own_ch
     ok = anon.post("/api/welcome/login", json={"token": token, "code": code})
     assert ok.status_code == 200 and ok.json()["name"] == "Noa Berg" and ok.json()["next_for_you"] == "Identity document"
     mine = anon.get("/api/welcome-me").json()
-    assert mine["total"] == 8 and "emp_id" not in mine and "E001" not in str(mine)         # nobody else's data
+    assert mine["total"] == 9 and "emp_id" not in mine and "E001" not in str(mine)         # nobody else's data
     # an ordinary signed-in person is not a new hire, and a new hire is not an ordinary signed-in person
     assert as_person("E001").get("/api/welcome-me").status_code == 401
     assert as_person("H001").post("/api/welcome-assistant", json={"message": "hi"}).status_code == 401
@@ -618,6 +618,33 @@ def a_rejected_contract_goes_back_to_hr_and_a_cancelled_one_has_no_pdf():
     assert c.post("/api/welcome/login", json={"token": link, "code": code}).status_code == 200
     for path in (f"/api/contracts/{draft}/preview", f"/api/hr/people/{emp_id}/contract", f"/api/hr/contracts/{draft}/pdf"):
         assert c.get(path).status_code == 403, path
+
+
+@test
+def hr_runs_the_daily_check_by_hand_and_the_new_hire_reads_and_dismisses_the_reminder():
+    hr = as_person("H001")
+    emp_id = make_hire(hr, "oli@cognivexai.eu", "Oli Hart", days=2)                      # starts in 2 days: the first-day information is due
+    for who in ("E001", "M001"):
+        assert as_person(who).post("/api/hr/onboarding/daily-run").status_code == 403, who
+    assert TestClient(server.app).post("/api/hr/onboarding/daily-run").status_code == 401
+    done = hr.post("/api/hr/onboarding/daily-run")
+    assert done.status_code == 200 and "Oli Hart" in done.json()["before_day_one"] and set(done.json()) == {"chase", "before_day_one", "first_week", "trial_end"}
+    assert "Oli Hart" in done.json()["chase"]            # entered 2 days before the start, so the documents are already due too
+    again = hr.post("/api/hr/onboarding/daily-run").json()
+    assert "Oli Hart" not in again["before_day_one"]                                       # never twice
+    mail = next(m for m in hr.get("/api/hr/outbox").json() if m["kind"] == "before_day_one" and m["emp_id"] == emp_id)
+    assert mail["to_email"] == "oli@cognivexai.eu" and mail["to_name"] == "Oli Hart" and "Your first day" in mail["subject"] and mail["sent_at"] is None
+    history = hr.get(f"/api/people/{emp_id}/history").json()["changes"]
+    assert any(c["field"] == "reminder" and c["new_value"] == "before_day_one" and c["changed_by"] == "Narmadha" for c in history)   # run by hand: HR's name
+    token, code = open_welcome(hr, emp_id)
+    c = TestClient(server.app)
+    assert c.get("/api/welcome-reminders").status_code == 401
+    assert c.post("/api/welcome/login", json={"token": token, "code": code}).status_code == 200
+    mine = [r["message"] for r in c.get("/api/welcome-reminders").json()]
+    assert len(mine) == 2 and any(m.startswith("Your first day is") for m in mine) and any(m.startswith("Reminder: we still need") for m in mine)
+    assert as_person("E001").get("/api/welcome-reminders").status_code == 401             # an ordinary session is not a new hire
+    assert c.post("/api/welcome-reminders/read").json() == {"ok": True} and c.get("/api/welcome-reminders").json() == []
+    assert c.post("/api/hr/onboarding/daily-run").status_code == 403                        # and a link session can't run it
 
 
 if __name__ == "__main__":

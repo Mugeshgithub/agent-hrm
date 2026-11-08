@@ -12,6 +12,7 @@ os.environ["HRM_FILES_DIR"] = tempfile.mkdtemp()                       # and a t
 os.environ["HRM_DB"] = db.DB_PATH          # so demo_data.py can't switch back to web_demo.db
 import demo_data
 import employees as e
+import checkins
 import contracts
 import documents
 import needs_you
@@ -34,6 +35,7 @@ def fresh():
     conn = db.get_conn()
     with conn:
         conn.execute("DELETE FROM employee_changes")
+        conn.execute("DELETE FROM notifications")
         conn.execute("DELETE FROM profiles")
     conn.close()
     demo_data.hr_queries.init_profiles()     # the 6 original profiles again, unchanged
@@ -54,7 +56,7 @@ def hr_can_hire_and_it_is_logged():
     assert r == {"success": True, "id": "E004", "name": "Anu"}, r
     assert e.directory_entry("E004")["manager"] == "Lucas"
     log = e.history("H001", "E004")["changes"]
-    assert sorted(c["new_value"] for c in log) == ["created", "started with 8 steps"]   # the record, then the checklist
+    assert sorted(c["new_value"] for c in log) == ["created", "started with 9 steps"]   # the record, then the checklist
 
 
 @test
@@ -144,13 +146,14 @@ def a_hire_who_starts_in_the_future_gets_the_checklist_from_the_template():
     assert [(s["step_key"], s["owner"], s["status"]) for s in box["steps"]] == [
         ("contract", "hr", "todo"), ("id", "new_hire", "todo"), ("iban", "new_hire", "todo"),
         ("social_security", "new_hire", "todo"), ("equipment", "manager", "todo"), ("accounts", "hr", "todo"),
-        ("welcome", "manager", "todo"), ("dpae", "hr", "todo")]
-    assert box["progress"] == {"done": 0, "skipped": 0, "total": 8, "complete": False}
+        ("welcome", "manager", "todo"), ("dpae", "hr", "todo"), ("checkin", "manager", "todo")]
+    assert box["progress"] == {"done": 0, "skipped": 0, "total": 9, "complete": False}
     assert box["name"] == "Anu" and box["start_date"] == in_days(30) and box["manager_name"] == "Lucas"
     # due dates count back from the start date; the DPAE is the last thing before day one
     assert step(emp_id, "id")["due_date"] == (start - timedelta(days=7)).isoformat()
     assert step(emp_id, "dpae")["due_date"] == (start - timedelta(days=1)).isoformat()
-    assert all(s["due_date"] < in_days(30) for s in box["steps"]) and not any(s["overdue"] for s in box["steps"])
+    assert all(s["due_date"] < in_days(30) for s in box["steps"] if s["step_key"] != "checkin") and not any(s["overdue"] for s in box["steps"])
+    assert step(emp_id, "checkin")["due_date"] == (start + timedelta(days=7)).isoformat()      # a week into the job: the first-week check-in
     assert "L1221-10" in step(emp_id, "dpae")["detail"]            # the legal reason is written on the step
 
 
@@ -170,17 +173,18 @@ def due_dates_are_never_in_the_past_on_the_day_the_hire_is_entered():
     dues = {s["step_key"]: s["due_date"] for s in onboarding.checklist("H001", emp_id)["steps"]}
     assert dues["id"] == dues["contract"] == in_days(0)             # as early as possible: today
     assert dues["dpae"] == in_days(2) and dues["equipment"] == in_days(1)
-    assert all(in_days(0) <= d < in_days(3) for d in dues.values())
+    assert all(in_days(0) <= d < in_days(3) for k, d in dues.items() if k != "checkin") and dues["checkin"] == in_days(10)
     assert not any(s["overdue"] for s in onboarding.checklist("H001", emp_id)["steps"])
 
 
 @test
 def the_template_covers_what_a_new_hire_needs():
     keys = [t[0] for t in onboarding.TEMPLATE]
-    assert keys == ["contract", "id", "iban", "social_security", "equipment", "accounts", "welcome", "dpae"]
+    assert keys == ["contract", "id", "iban", "social_security", "equipment", "accounts", "welcome", "dpae", "checkin"]
     assert len(set(keys)) == len(keys)
     assert {t[2] for t in onboarding.TEMPLATE} == {"new_hire", "hr", "manager"}
-    assert all(t[3] >= 1 for t in onboarding.TEMPLATE)             # everything is due before day one
+    assert all(t[3] >= 1 for t in onboarding.TEMPLATE if t[0] != "checkin")      # everything is due before day one...
+    assert [t[3] for t in onboarding.TEMPLATE if t[0] == "checkin"] == [-7]       # ...except the first-week check-in, a week after
 
 
 @test
@@ -205,7 +209,7 @@ def hr_can_complete_skip_and_reopen_and_every_change_is_logged():
     assert onboarding.skip_step("H001", accounts, "Uses a personal laptop, no account yet")["status"] == "skipped"
     assert "reason" in onboarding.reopen_step("H001", contract, "")["error"]
     assert "not done" in onboarding.reopen_step("H001", iban, "oops")["error"]               # only done or skipped steps
-    assert onboarding.checklist("H001", emp_id)["progress"] == {"done": 1, "skipped": 1, "total": 8, "complete": False}
+    assert onboarding.checklist("H001", emp_id)["progress"] == {"done": 1, "skipped": 1, "total": 9, "complete": False}
     assert onboarding.reopen_step("H001", contract, "Wrong person's contract")["status"] == "todo"
     reopened = step(emp_id, "contract")
     assert reopened["status"] == "todo" and reopened["done_by_name"] is None and reopened["note"] == ""
@@ -223,7 +227,7 @@ def the_checklist_is_complete_when_nothing_is_left_to_do():
     emp_id = hire()
     for i, s in enumerate(onboarding.checklist("H001", emp_id)["steps"]):
         (onboarding.skip_step("H001", s["id"], "Not needed") if i % 2 else onboarding.complete_step("H001", s["id"]))
-    assert onboarding.checklist("H001", emp_id)["progress"] == {"done": 4, "skipped": 4, "total": 8, "complete": True}
+    assert onboarding.checklist("H001", emp_id)["progress"] == {"done": 5, "skipped": 4, "total": 9, "complete": True}
     assert needs_you.waiting_count("H001") == 0 and needs_you.inbox("M001")["onboarding_steps"] == []
 
 
@@ -431,7 +435,7 @@ def a_new_hire_sees_only_their_own_checklist_without_notes_or_names():
     fresh()
     emp_id = hire()
     box = onboarding.my_checklist(emp_id)
-    assert box["name"] == "Anu" and box["manager"] == "Lucas" and box["total"] == 8 and box["done"] == 0
+    assert box["name"] == "Anu" and box["manager"] == "Lucas" and box["total"] == 9 and box["done"] == 0
     assert box["next_for_you"] == "Identity document"
     assert {s["who"] for s in box["steps"]} == {"you", "HR", "your manager"}
     base = {"key", "step", "what", "who", "due_date", "status", "overdue"}
@@ -821,6 +825,148 @@ def the_assistant_tool_only_reports_where_a_contract_stands_and_only_to_hr():
     hire(email="anya@cognivexai.eu", name="Anya Ng")
     assert status("H001", "Anu")["employee"] == "Anu"
     assert status("H001", "An")["several"] == ["Anu", "Anya Ng"] and "error" in status("H001", "A")        # a name that fits two people asks which
+
+
+# ---------- the daily check-ins (checkins.py): what is due, when, and never twice ----------
+
+def mails(kind=None):
+    return [m for m in outbox.messages("H001") if kind in (None, m["kind"])]
+
+
+def day_of(offset, emp_id):
+    return date.fromisoformat(hr_start(emp_id)) + timedelta(days=offset)
+
+
+def hr_start(emp_id):
+    return onboarding.checklist("H001", emp_id)["start_date"]
+
+
+def finish_new_hire_steps(emp_id):
+    for key in ("id", "iban", "social_security"):
+        onboarding.complete_step("H001", step(emp_id, key)["id"], "done")
+
+
+@test
+def a_new_hire_is_chased_for_their_own_items_once_they_are_due_and_at_most_every_two_days():
+    fresh()
+    emp_id = hire(30)
+    due = day_of(-7, emp_id)                                                        # the three documents are due a week before the start
+    assert checkins.run_daily(today=due - timedelta(days=1))["chase"] == [] and mails() == []
+    assert checkins.run_daily(today=due)["chase"] == ["Anu"]
+    mail = mails("chase")[0]
+    assert mail["to_email"] == "anu@cognivexai.eu" and mail["sent_at"] is None and mail["to_name"] == "Anu"
+    for wanted in ("Identity document", "Bank details (IBAN)", "Social security number"):
+        assert wanted in mail["body"], wanted
+    for not_theirs in ("Employment contract signed", "Laptop and equipment ready", "DPAE filed"):
+        assert not_theirs not in mail["body"], not_theirs                          # HR's and the manager's steps are not chased
+    assert [n["message"] for n in checkins.reminders_for(emp_id)] == [
+        "Reminder: we still need your identity document, bank details (IBAN), social security number. Your checklist shows what to send."]
+    assert checkins.run_daily(today=due)["chase"] == [] and len(mails("chase")) == 1                  # not twice the same day
+    assert checkins.run_daily(today=due + timedelta(days=1))["chase"] == []                            # one day later: too soon
+    assert checkins.run_daily(today=due + timedelta(days=2))["chase"] == ["Anu"] and len(mails("chase")) == 2
+    onboarding.complete_step("H001", step(emp_id, "id")["id"], "Passport received")
+    assert checkins.run_daily(today=due + timedelta(days=4))["chase"] == ["Anu"]
+    assert "Identity document" not in mails("chase")[0]["body"] and "Bank details (IBAN)" in mails("chase")[0]["body"]   # only what is still missing
+    finish_new_hire_steps(emp_id)
+    assert checkins.run_daily(today=due + timedelta(days=9))["chase"] == [] and len(mails("chase")) == 3     # nothing missing: nothing sent
+    log = [(c["new_value"], c["changed_by"]) for c in e.history("H001", emp_id)["changes"] if c["field"] == "reminder"]
+    assert log.count(("chase", "system")) == 3                                                         # in the history, as "system"
+
+
+@test
+def nobody_is_chased_or_told_anything_for_a_cancelled_hire_or_someone_who_left():
+    fresh()
+    cancelled, left = hire(30), hire(30, email="bea@cognivexai.eu", name="Bea Roy")
+    onboarding.cancel("H001", cancelled, "Offer withdrawn")
+    conn = db.get_conn()
+    with conn:
+        conn.execute("UPDATE profiles SET end_date = ? WHERE emp_id = ?", (in_days(-1), left))      # the offer fell through
+    conn.close()
+    done = checkins.run_daily(today=date.fromisoformat(in_days(40)))
+    assert done == {"chase": [], "before_day_one": [], "first_week": [], "trial_end": []} and mails() == []
+
+
+@test
+def the_first_day_information_goes_out_once_three_days_before_the_start_with_what_is_still_missing():
+    fresh()
+    emp_id = hire(30)
+    start = day_of(0, emp_id)
+    assert checkins.run_daily(today=start - timedelta(days=4))["before_day_one"] == []
+    assert checkins.run_daily(today=start - timedelta(days=3))["before_day_one"] == ["Anu"]
+    mail = mails("before_day_one")[0]
+    assert mail["subject"].startswith("Your first day at CognivexAI") and f"{start:%A %d %B}" in mail["subject"]
+    assert "QA Engineer in our Paris office" in mail["body"] and "Lucas will welcome you" in mail["body"]
+    assert "Narmadha (narmadha@cognivexai.eu)" in mail["body"] and "Identity document" in mail["body"]       # what is still missing
+    assert checkins.run_daily(today=start - timedelta(days=2))["before_day_one"] == [] and len(mails("before_day_one")) == 1
+    soon = hire(2, email="cy@cognivexai.eu", name="Cy Doe")                          # hired with less than 3 days to go: the first run sends it
+    assert checkins.run_daily(today=date.today())["before_day_one"] == ["Cy Doe"]
+    finish_new_hire_steps(soon)
+    assert checkins.run_daily(today=date.today())["before_day_one"] == []
+    third = hire(3, email="di@cognivexai.eu", name="Di Fox")
+    finish_new_hire_steps(third)
+    assert checkins.run_daily(today=date.today())["before_day_one"] == ["Di Fox"]
+    assert "Everything we asked for is in" in next(m for m in mails("before_day_one") if m["employee_name"] == "Di Fox")["body"]
+    assert checkins.run_daily(today=start + timedelta(days=1))["before_day_one"] == []              # never after the start
+
+
+@test
+def the_first_week_check_in_goes_to_the_hire_and_the_manager_each_with_their_own_line():
+    fresh()
+    emp_id = hire(30)
+    finish_new_hire_steps(emp_id)                                                    # nothing missing, so no chase muddies the messages
+    start = day_of(0, emp_id)
+    assert "First-week check-in" not in [s["step_title"] for s in onboarding.open_steps("M001")]                    # not at hiring
+    assert "First-week check-in" not in [s["step_title"] for s in onboarding.open_steps("M001", today=start + timedelta(days=6))]
+    assert checkins.run_daily(today=start + timedelta(days=6))["first_week"] == []
+    assert checkins.run_daily(today=start + timedelta(days=7))["first_week"] == ["Anu"]
+    assert [s["step_title"] for s in onboarding.open_steps("M001", today=start + timedelta(days=7))][-1] == "First-week check-in"   # now it waits
+    mine = [n["message"] for n in checkins.reminders_for(emp_id)]
+    lucas = [n["message"] for n in checkins.reminders_for("M001")]
+    assert mine == ["It has been a week: how is it going? Lucas will check in with you."]
+    assert lucas == ["Anu started a week ago: time for the first-week check-in."]                                 # not the hire's line
+    mail = mails("first_week")[0]
+    assert mail["to_email"] == "anu@cognivexai.eu" and "How is it going" in mail["body"] and "Narmadha" in mail["body"]
+    assert checkins.run_daily(today=start + timedelta(days=8))["first_week"] == [] and len(mails("first_week")) == 1
+    late = hire(30, email="eve@cognivexai.eu", name="Eve Ash")
+    assert checkins.run_daily(today=day_of(40, late))["first_week"] == []                                           # never months late
+
+
+@test
+def the_manager_is_reminded_two_weeks_before_the_trial_period_of_an_approved_contract_ends():
+    fresh()
+    emp_id = hire(30)
+    finish_new_hire_steps(emp_id)
+    start = date.fromisoformat(hr_start(emp_id))
+    draft = contracts.create_draft("H001", emp_id, {**TERMS, "trial": 2})["draft_id"]
+    end = contracts.trial_end("CDI", start, 2)
+    assert checkins.run_daily(today=end - timedelta(days=14))["trial_end"] == []                                    # nothing: still a draft
+    contracts.submit("H001", draft)
+    assert checkins.run_daily(today=end - timedelta(days=14))["trial_end"] == []                                    # nor while waiting
+    contracts.decide("M001", draft, "approve")
+    assert checkins.run_daily(today=end - timedelta(days=15))["trial_end"] == []
+    assert checkins.run_daily(today=end - timedelta(days=14))["trial_end"] == ["Anu"]
+    mail = mails("trial_end")[0]
+    assert mail["to_email"] == "lucas@cognivexai.eu" and mail["to_name"] == "Lucas" and mail["employee_name"] == "Anu"       # to the manager
+    assert f"ends on {end:%d %B}" in mail["subject"] and "L1221-25" in mail["body"] and "in 14 days" in mail["body"]
+    assert [n["message"] for n in checkins.reminders_for("M001")][0].startswith("Anu's trial period ends on") and checkins.reminders_for(emp_id) == []
+    assert checkins.run_daily(today=end - timedelta(days=13))["trial_end"] == [] and len(mails("trial_end")) == 1       # once
+    assert checkins.run_daily(today=end + timedelta(days=1))["trial_end"] == []                                      # not after it ended
+    none = hire(30, email="fay@cognivexai.eu", name="Fay Lo")
+    none_draft = contracts.create_draft("H001", none, {**TERMS, "trial": 0})["draft_id"]
+    contracts.submit("H001", none_draft); contracts.decide("M001", none_draft, "approve")
+    assert checkins.run_daily(today=date.fromisoformat(hr_start(none)) + timedelta(days=30))["trial_end"] == []      # no trial period: no reminder
+
+
+@test
+def a_new_hire_reads_and_dismisses_their_own_reminders_and_the_outbox_shows_who_each_is_to():
+    fresh()
+    emp_id, other = hire(30), hire(30, email="gus@cognivexai.eu", name="Gus Pei")
+    checkins.run_daily(today=day_of(-7, emp_id))
+    assert len(checkins.reminders_for(emp_id)) == 1 and len(checkins.reminders_for(other)) == 1 and checkins.reminders_for("E001") == []
+    checkins.mark_read(emp_id)
+    assert checkins.reminders_for(emp_id) == [] and len(checkins.reminders_for(other)) == 1                         # only their own
+    assert {m["to_name"] for m in mails("chase")} == {"Anu", "Gus Pei"}
+    assert "Only HR" in outbox.messages("M001")["error"]
 
 
 if __name__ == "__main__":

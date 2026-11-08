@@ -267,7 +267,7 @@ def history(viewer_id, emp_id):
         return {"error": "Only HR or the person themselves can see this history."}
     conn = db.get_conn()
     rows = conn.execute("""SELECT c.field, c.old_value, c.new_value, c.reason, c.changed_at,
-                                  e.name AS changed_by
+                                  COALESCE(e.name, c.changed_by) AS changed_by
                            FROM employee_changes c LEFT JOIN employees e ON e.id = c.changed_by
                            WHERE c.emp_id = ? ORDER BY c.id DESC""", (emp_id,)).fetchall()
     conn.close()
