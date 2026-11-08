@@ -2,11 +2,11 @@
 // What happens when a new hire sends a document, from the file chosen to "yes, that's right". The server does the
 // work (documents.py): it checks the file, has Claude read it, and checks what was read. This only picks the
 // file, shows what the app read and asks the person to confirm, or says what to fix and asks for another file.
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { mutate } from "swr";
 import { Paperclip } from "lucide-react";
 import { api, ApiError } from "@/lib/api";
-import { UploadResult, WelcomeStep } from "@/lib/types";
+import { UploadResult, WaitingDoc, WelcomeStep } from "@/lib/types";
 import { ErrorNote } from "@/components/PageHeader";
 
 type Flow =
@@ -22,10 +22,18 @@ const LABEL: Record<string, string> = { id: "identity document", iban: "bank det
 // the steps that take a file, and are still the person's to do
 export const sendable = (steps: WelcomeStep[]) => steps.filter((s) => s.document && s.status === "todo");
 
-export function useDocumentFlow(onEvent: (text: string) => void) {
+export function useDocumentFlow(onEvent: (text: string) => void, steps: WelcomeStep[], waiting?: WaitingDoc[]) {
   const [flow, setFlow] = useState<Flow | null>(null);
   const input = useRef<HTMLInputElement>(null);
   const target = useRef<{ step: WelcomeStep; origin: Origin } | null>(null);
+
+  // a document that was sent earlier and still waits for "yes, that's right" (the page was reloaded, or they came back later)
+  useEffect(() => {
+    if (flow || !waiting?.length) return;
+    const w = waiting[0];
+    const step = steps.find((s) => s.key === w.step_key && s.status === "todo");
+    if (step) setFlow({ phase: "review", step, origin: "list", docId: w.document_id, read: w.read });
+  }, [flow, waiting, steps]);
 
   function pick(step: WelcomeStep, origin: Origin) {
     target.current = { step, origin };
@@ -46,6 +54,7 @@ export function useDocumentFlow(onEvent: (text: string) => void) {
       const r = data as UploadResult;
       setFlow(r.accepted ? { phase: "review", ...t, docId: r.document_id, read: r.read } : { phase: "refused", ...t, problems: r.problems });
       mutate("/welcome-me");
+      mutate("/welcome-documents/waiting");
     } catch (e) { setFlow({ phase: "error", ...t, message: (e as Error).message }); }
   }
 
@@ -54,8 +63,8 @@ export function useDocumentFlow(onEvent: (text: string) => void) {
     const { step, docId } = flow;
     try {
       await api(`/welcome-documents/${docId}/${accept ? "confirm" : "decline"}`, { body: {} });
+      await Promise.all([mutate("/welcome-me"), mutate("/welcome-documents/waiting")]);     // refresh first, so the old card can't come back
       setFlow(null);
-      await mutate("/welcome-me");
       onEvent(accept ? `[In the app, I confirmed my ${LABEL[step.key]}. What is next?]`
                      : `[In the app, I said what was read from my ${LABEL[step.key]} is not right, so I will send another.]`);
     } catch (e) { setFlow({ phase: "error", step, origin: flow.origin, message: (e as Error).message }); }

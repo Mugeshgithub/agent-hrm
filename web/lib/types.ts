@@ -80,6 +80,7 @@ export type WelcomeStep = {
 export type UploadResult =
   | { accepted: true; document_id: number; read: { label: string; value: string }[]; flagged: boolean }
   | { accepted: false; problems: string[]; document_id: number };
+export type WaitingDoc = { document_id: number; step_key: string; read: { label: string; value: string }[] };
 export type HrDocument = {
   id: number; step_key: string; label: string; status: "read" | "confirmed"; uploaded_at: string; confirmed_at: string | null;
   read: Record<string, string>; flagged_reason: string | null; flag_reviewed_by: string | null; flag_reviewed_at: string | null;
