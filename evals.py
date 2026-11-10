@@ -1396,6 +1396,39 @@ TEST_CASES = [
         "expected_requests": 1,
     },
     {
+        # real, 10 Nov: "i want to take leave on saturday ?" -> "Which Saturday would you like? The next ones are November 28th and December 5th."
+        # (wrong dates, and the weekend rule never applied). Nothing needs counting, so the answer is fixed: nothing to book, no date asked, no date named.
+        "name": "booking: leave asked for on a Saturday with no date is answered at once, with no date question and no card",
+        "user": "E001",
+        "auto_confirm": agent.AWAITING_CONFIRMATION,
+        "setup": lambda: agent.pending_action.clear(),
+        "input": "i want to take leave on saturday ?",
+        "reply_must_match": r"(?i)nothing to book",
+        "reply_must_not_match": r"(?i)which saturday|what date|which date|\d",
+        "expected_requests": 0,
+        "check": lambda: not agent.pending_action,
+    },
+    {
+        "name": "booking: leave asked for on a Sunday with no date is answered at once: no kind of leave counts a Sunday",
+        "user": "E001",
+        "auto_confirm": agent.AWAITING_CONFIRMATION,
+        "setup": lambda: agent.pending_action.clear(),
+        "input": "I want to take leave on sunday",
+        "reply_must_match": r"(?i)nothing to book",
+        "reply_must_not_match": r"(?i)which sunday|what date|which date|paid leave counts|\d",
+        "expected_requests": 0,
+        "check": lambda: not agent.pending_action,
+    },
+    {
+        # the exception must stay: paid leave counts Saturdays, so a dated request for paid leave on a Saturday is booked
+        "name": "booking: paid leave on a Saturday is still booked (paid leave counts Saturdays)",
+        "user": "E001",
+        "auto_confirm": True,
+        "input": f"Please book paid leave on {say_no_year(SATURDAY)}.",
+        "must_call": ["apply_leave"],
+        "expected_requests": 1,
+    },
+    {
         "name": "paid leave: more days than the paid balance is refused",
         "user": "E003",
         "auto_confirm": True,

@@ -126,6 +126,12 @@ def _day_label(d):
     return f"{d:%A} {d.day} {d:%B}"          # Saturday 21 November
 
 
+def today_line(today=None):
+    """The date line of the prompt, built on every call: the weekday is part of it (the model gets it wrong when it has to work it out from 2026-11-10)."""
+    today = today or date.today()
+    return f"Today is {today:%A} {today.isoformat()}."
+
+
 def no_days_reason(leave_type, start, end, holidays=None):
     """Why these dates use no days of this leave, worded for the person, or None when they use some. Weekend days and public holidays are not
     counted (paid leave counts Saturdays), so a request for only those is impossible: it is refused BEFORE the confirmation card is shown."""
