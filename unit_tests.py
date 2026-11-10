@@ -1260,6 +1260,36 @@ def a_request_to_book_is_booked_not_asked_about_and_dates_with_no_days_are_never
     assert "not from the person" in booking_first.BOOK_NOW and "apply_leave" in booking_first.BOOK_NOW and "confirmation card" in booking_first.BOOK_NOW
 
 
+@test
+def leave_asked_for_on_a_weekend_with_no_date_gets_a_fixed_answer_and_everything_else_goes_to_the_model():
+    answer = booking_first.weekend_answer
+    for q in ["i want to take leave on saturday ?", "I want leave on Saturday", "Can I take Saturday off?", "book leave for this weekend", "I need a day off on sat",
+              "I want to take leave on saturday and sunday", "apply for leave on the weekend please", "i want to take sick leave on saturday"]:
+        assert answer("employee", q) == booking_first.WEEKEND_EN, q                                          # Saturdays count for paid leave only: said in the answer
+    for q in ["I want leave on sunday", "can i take sunday off", "I want to book a holiday on a sunday"]:
+        assert answer("manager", q) == booking_first.SUNDAY_EN, q                                            # nothing counts a Sunday
+    assert answer("employee", "je veux poser un congé samedi") == booking_first.WEEKEND_FR and answer("hr", "Je voudrais prendre un congé dimanche") == booking_first.SUNDAY_FR
+    assert answer("employee", "Je veux poser un congé ce week-end") == booking_first.WEEKEND_FR
+    for q in ["I want leave on saturday 28 november",                    # a date: the model counts it, and the tools say it cannot be booked
+              "I want to book paid leave on saturday", "Je veux poser des congés payés samedi",           # paid leave counts Saturdays: the model books it
+              "I want leave from friday to sunday", "I want leave on monday and saturday", "I want to take leave tomorrow, it is a saturday",
+              "What does the policy say about leave on saturdays?", "Why can't I take leave on a weekend?", "Do we work on saturdays?",
+              "I worked on saturday, how many days off do I get?", "I want leave", "yes saturday", "", None]:
+        assert answer("employee", q) is None, q
+    assert answer("new_hire", "i want to take leave on saturday") is None                                    # a new hire has no leave tool
+    for text in (booking_first.WEEKEND_EN, booking_first.SUNDAY_EN, booking_first.WEEKEND_FR, booking_first.SUNDAY_FR):
+        assert not any(c.isdigit() for c in text)                                                           # a fixed answer names no date, so none can be wrong
+    assert "Paid leave counts Saturdays" in booking_first.WEEKEND_EN and "never Sundays" in booking_first.WEEKEND_EN
+
+
+@test
+def the_prompt_date_line_names_the_weekday_and_is_built_from_the_date_it_is_given():
+    assert tools.today_line(date(2026, 11, 10)) == "Today is Tuesday 2026-11-10."
+    assert tools.today_line(date(2026, 11, 28)) == "Today is Saturday 2026-11-28."                         # 15 November 2026 is a Sunday, 14 is the Saturday
+    assert date(2026, 11, 14).strftime("%A") == "Saturday" and date(2026, 11, 15).strftime("%A") == "Sunday"
+    assert tools.today_line().startswith("Today is ") and date.today().isoformat() in tools.today_line()
+
+
 if __name__ == "__main__":
     failed = 0
     for t in TESTS:

@@ -75,3 +75,43 @@ def nudge(role, user_text, reply, called, sources):
     if asks_to_book(user_text) and asks_before_booking(reply):
         return BOOK_NOW
     return None
+
+
+# ---------- leave asked for on a Saturday, a Sunday or a weekend, with no date ----------
+# Nothing needs counting here, so the model is not called: the answer is fixed (as in recruitment_guard.py). Measured on main (10 Nov): the model asked
+# "Which Saturday would you like?" and listed Saturdays, wrongly ("this Saturday (15 November)" when 15 November 2026 is a Sunday), and never said
+# that a weekend cannot be booked. A request with a date, a weekday, or "paid" still goes through the model and the tools: paid leave counts Saturdays.
+_LEAVE_WORD = re.compile(r"\b(?:leave|time off|days? off|day off|off|holidays?|vacation|cong[ée]s?|poser)\b", re.I)
+_WANTS = re.compile(r"\b(?:take|taking|book|apply|want|need|wish|would like|like to|request|put me|can i|could i|may i|je veux|je voudrais|puis-je|"
+                    r"prendre|poser|r[ée]server)\b", re.I)
+_SATURDAY = re.compile(r"\b(?:sat|saturdays?|samedis?)\b", re.I)
+_SUNDAY = re.compile(r"\b(?:sun|sundays?|dimanches?)\b", re.I)
+_WEEKEND = re.compile(r"\bweek[- ]?ends?\b", re.I)
+# anything that means the model has to look at it: a weekday or a day word, a date, paid leave (Saturdays count), a question about the rules
+_NEEDS_THE_MODEL = re.compile(
+    r"\b(?:mon(?:day)?|tue(?:s(?:day)?)?|wed(?:nesday)?|thu(?:r(?:s(?:day)?)?)?|fri(?:day)?|lundi|mardi|mercredi|jeudi|vendredi|today|tomorrow|"
+    r"demain|aujourd'hui|paid|cong[ée]s? pay[ée]s?|cp|policy|rules?|law|legal|code du travail|why|explain|pourquoi|politique|r[eè]gles?)\b|\d", re.I)
+_FRENCH = re.compile(r"\b(?:samedis?|dimanches?|je veux|je voudrais|cong[ée]s?|puis-je|week-end|poser|prendre)\b", re.I)
+
+WEEKEND_EN = ("Casual and sick leave don't count Saturdays or Sundays, so there is nothing to book on a weekend. Paid leave counts Saturdays (never "
+              "Sundays): if you mean paid leave on a Saturday, tell me which one. Otherwise, which weekday would you like?")
+SUNDAY_EN = "No kind of leave counts Sundays, so there is nothing to book on a Sunday. Which weekday would you like instead?"
+WEEKEND_FR = ("Les congés ordinaires et maladie ne comptent ni les samedis ni les dimanches : il n'y a rien à poser un week-end. Les congés payés comptent "
+              "les samedis (jamais les dimanches) : si c'est un congé payé un samedi, dites-moi lequel. Sinon, quel jour de la semaine souhaitez-vous ?")
+SUNDAY_FR = "Aucun type de congé ne compte les dimanches : il n'y a rien à poser un dimanche. Quel jour de la semaine souhaitez-vous ?"
+
+
+def weekend_answer(role, text):
+    """The fixed answer to a request for leave on a Saturday, a Sunday or a weekend with no date, or None when the model has to answer."""
+    text = str(text or "")
+    if not roles.allowed(role, TOOL):
+        return None
+    saturday, sunday, weekend = _SATURDAY.search(text), _SUNDAY.search(text), _WEEKEND.search(text)
+    if not (saturday or sunday or weekend):
+        return None
+    if not (_LEAVE_WORD.search(text) and _WANTS.search(text)) or _NEEDS_THE_MODEL.search(text):
+        return None
+    sunday_only = bool(sunday and not (saturday or weekend))
+    if _FRENCH.search(text):
+        return SUNDAY_FR if sunday_only else WEEKEND_FR
+    return SUNDAY_EN if sunday_only else WEEKEND_EN

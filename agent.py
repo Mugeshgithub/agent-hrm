@@ -33,7 +33,7 @@ import policy_gaps
 from citations import ungrounded_citations, RETRY_MESSAGE, SAFE_REPLY
 from documents import asks_if_genuine, says_cannot_tell, GENUINE_ANSWER, GENUINE_RETRY
 from tools import (
-    get_leave_balance, apply_leave, days_for, days_figures, no_days_reason, holidays_of, balance_of, clean_days, paid_policy_note,
+    get_leave_balance, apply_leave, days_for, days_figures, no_days_reason, today_line, holidays_of, balance_of, clean_days, paid_policy_note,
     get_pending_requests, decide_leave, get_my_requests, get_employee,
     get_team_member_balance, cancel_leave,
     create_hr_ticket, get_my_tickets, get_open_tickets, reply_to_ticket,
@@ -102,8 +102,10 @@ state = {"messages": [], "summary": None}
 last_turn = {"tools_called": [], "sources": [], "refused": [], "policy_searches": []}      # refused: calls the code refused (not counted as called)
 EXTRA_TAGS = []   # extra Langfuse tags, e.g. ["eval"] when the evals drive the agent
 
+TODAY = "@@TODAY@@"   # replaced by tools.today_line() on every call: the date in an f-string is fixed when the server starts, and goes stale after midnight
+
 SYSTEM_PROMPT = f"""You are an HR assistant for employees, managers and HR staff.
-Today's date is {date.today().isoformat()}. When a user gives a date without a year, use the next upcoming date.
+@@TODAY@@ When a user gives a date without a year, use the next upcoming date.
 Answer in plain, friendly language. Keep replies to 2 or 3 short sentences. No emoji. Do not repeat options already given.
 After submitting a leave request, always tell the employee their current balance and what it will be once approved.
 Only use the tools to get data. Never guess balances or numbers.
@@ -442,7 +444,7 @@ TOOLS = [
 
 
 NEW_HIRE_PROMPT = f"""You are the welcome assistant of CognivexAI, talking to a new hire who has not started yet.
-Today's date is {date.today().isoformat()}.
+@@TODAY@@
 Your only job is to help them with their onboarding checklist. For any question about what to do, what is missing, who handles what or when something is due, call get_my_onboarding first and quote its result. Never guess.
 When they ask what to do next, name the item in next_for_you (the first step that is theirs and still to do) and what it needs, and ask nothing else of them. If next_for_you is empty, say nothing is waiting on them, and mention what HR or their manager still has to do.
 Steps handled by HR or "your manager" are not the new hire's: say who handles them and never ask the new hire to do them.
@@ -461,14 +463,14 @@ def system_prompt_for(user_id):
     role = current_role()
     if role == "new_hire":
         return [
-            {"type": "text", "text": NEW_HIRE_PROMPT, "cache_control": {"type": "ephemeral"}},
+            {"type": "text", "text": NEW_HIRE_PROMPT.replace(TODAY, today_line()), "cache_control": {"type": "ephemeral"}},
             {"type": "text", "text": f"The person is {user['name']}, a new hire. Earlier messages may be reloaded from "
                                      "saved history without their tool calls: call get_my_onboarding again in this turn."},
         ]
     role_rules = ROLE_RULES.get(role, ROLE_RULES["employee"])
     return [
         # block 1: same for everyone with this role, so it can be cached
-        {"type": "text", "text": SYSTEM_PROMPT + role_rules, "cache_control": {"type": "ephemeral"}},
+        {"type": "text", "text": SYSTEM_PROMPT.replace(TODAY, today_line()) + role_rules, "cache_control": {"type": "ephemeral"}},
         # block 2: only once HR has uploaded the collective agreement: the order of sources. It replaces the earlier "search_policy first" rules.
         *([{"type": "text", "text": order + " While the agreement is on file, this order replaces any earlier instruction about which of "
                                             "search_policy and search_labour_code to call first, or together."}]
@@ -741,6 +743,15 @@ def run_tool(name, tool_input):
     return {"error": f"Unknown tool {name}"}
 
 
+def fixed_reply(reply, messages, user_text):
+    """Answer without calling the model: a guard in code decided the answer. It is part of the conversation and saved like any other."""
+    last_turn.update(tools_called=[], refused=[], policy_searches=[], sources=[], question=user_text)
+    messages.append({"role": "assistant", "content": reply})
+    save_message(LOGGED_IN_ID, "assistant", reply)
+    print(f"\nAgent: {reply}")
+    return reply
+
+
 @observe(name="hr-agent-turn")   # one trace per user question, with every Claude call and tool inside
 def answer_turn(user_text):
     user = get_employee(LOGGED_IN_ID)
@@ -754,11 +765,12 @@ def answer_turn(user_text):
         # The model is not called at all: the answer is fixed.
         if (fixed := recruitment_guard.refusal(role, user_text, jobs.candidate_names(LOGGED_IN_ID))):
             print("  [guard] asked to rank or choose between candidates: the fixed refusal")
-            last_turn.update(tools_called=[], refused=[], policy_searches=[], sources=[], question=user_text)
-            messages.append({"role": "assistant", "content": fixed})
-            save_message(LOGGED_IN_ID, "assistant", fixed)
-            print(f"\nAgent: {fixed}")
-            return fixed
+            return fixed_reply(fixed, messages, user_text)
+
+        # guardrail in code: leave asked for on a Saturday, a Sunday or a weekend, with no date, has nothing to count: the answer is fixed (booking_first.py).
+        if (fixed := booking_first.weekend_answer(role, user_text)):
+            print("  [guard] leave asked for on a weekend, no date: the fixed answer")
+            return fixed_reply(fixed, messages, user_text)
 
         # the agent loop, limited so one question can't loop forever
         calls_this_message = 0
