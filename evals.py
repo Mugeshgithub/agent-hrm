@@ -75,6 +75,9 @@ COUNT_EXPECTED = count_working_days(COUNT_START, COUNT_END)
 PAID_START, PAID_END = day(3, 0), day(3, 5)
 PAID_EXPECTED = count_ouvrable_days(PAID_START, PAID_END)
 
+# casual leave skips weekends: a Saturday uses no days and cannot be booked; the Monday of the same week is an ordinary booking
+SATURDAY, MONDAY = day(2, 5), day(2, 0)
+
 # Monday to Thursday never contain a holiday, so this is always 4 working days
 POISON_START, POISON_END = day(2, 0), day(2, 3)
 POISON_QUESTION = f"How many working days from {say_no_year(POISON_START)} to {say_no_year(POISON_END)}?"
@@ -326,6 +329,15 @@ def setup_priya_poisoned_history():
         memory.save_message("E001", "assistant",
                             f"From {say_no_year(POISON_START)} to {say_no_year(POISON_END)}, "
                             f"there are **2 working days**.")
+
+
+def setup_saturday_offered_anyway():
+    # the real bug (10 Nov): asked to check a Saturday, the assistant offered to book it anyway; then "book it" showed a confirmation card
+    # that could never pass, and the refusal came after Confirm
+    agent.pending_action.clear()
+    memory.save_message("E001", "user", f"check for {say_no_year(SATURDAY)}")
+    memory.save_message("E001", "assistant", f"{say_no_year(SATURDAY)} is a Saturday, so it doesn't use any casual leave days. "
+                                             f"Would you like me to book it anyway, or did you mean a weekday?")
 
 
 def setup_priya_labour_history():
@@ -1349,6 +1361,39 @@ TEST_CASES = [
         "reply_must_match": rf"\b{PAID_EXPECTED}\b",
         "expected_requests": 1,
         "check": lambda: paid_request_days() == [PAID_EXPECTED],
+    },
+    {
+        # real, 10 Nov: "I want leave on 21 Nov" (a Saturday). The assistant offered to book it anyway, the confirmation card appeared, and the
+        # refusal only came after Confirm. Now it says there is nothing to book, shows no card, and offers nothing.
+        "name": "booking: casual leave asked for on a Saturday is not offered, no card is shown and nothing is created",
+        "user": "E001",
+        "auto_confirm": agent.AWAITING_CONFIRMATION,         # as in the web app: a card would be parked, and pending_action says whether one was shown
+        "setup": lambda: agent.pending_action.clear(),
+        "input": f"I want casual leave on {say_no_year(SATURDAY)}.",
+        "reply_must_match": r"(?i)saturday|weekend",
+        "reply_must_not_match": r"(?i)anyway|shall i|(would you like|do you want|want) me to (book|submit|proceed|go ahead)|confirmation (screen|card)",
+        "expected_requests": 0,
+        "check": lambda: not agent.pending_action,
+    },
+    {
+        "name": "booking: after a Saturday was offered anyway, 'book it' still shows no card and creates nothing",
+        "user": "E001",
+        "auto_confirm": agent.AWAITING_CONFIRMATION,
+        "setup": setup_saturday_offered_anyway,
+        "input": f"Book it on {say_no_year(SATURDAY)}.",
+        "reply_must_match": r"(?i)saturday|weekend|not a working day|no (leave )?days",
+        "reply_must_not_match": r"(?i)anyway|shall i|(would you like|do you want|want) me to (book|submit|proceed|go ahead)|confirmation (screen|card)",
+        "expected_requests": 0,
+        "check": lambda: not agent.pending_action,
+    },
+    {
+        # real, 10 Nov: "Shall I submit this request?" before booking. apply_leave shows the card, and that card is where the person confirms.
+        "name": "booking: a weekday request is booked straight away, without asking first",
+        "user": "E001",
+        "auto_confirm": True,
+        "input": f"I want casual leave on {say_no_year(MONDAY)}.",
+        "must_call": ["apply_leave"],
+        "expected_requests": 1,
     },
     {
         "name": "paid leave: more days than the paid balance is refused",

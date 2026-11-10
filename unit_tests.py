@@ -6,6 +6,7 @@ from datetime import date, timedelta
 import db
 db.DB_PATH = "unit_test_hr.db"   # its own database, never the real hr.db
 
+import booking_first
 import collective_agreement
 import contract_first
 import contracts
@@ -99,7 +100,8 @@ def not_enough_paid_leave_is_blocked_and_pending_paid_days_count():
     assert apply_leave("E003", "paid", d(MON), d(MON + timedelta(days=1))).get("success")
     assert "error" in apply_leave("E003", "paid", d(SAT), d(SAT))   # 0.5 left, one more day is too much
     # a Sunday-only request has no days to take
-    assert "No days" in apply_leave("E001", "paid", d(SUN), d(SUN))["error"]
+    sunday_only = apply_leave("E001", "paid", d(SUN), d(SUN))["error"]
+    assert "Sunday" in sunday_only and "uses no days" in sunday_only and "Nothing was submitted" in sunday_only
 
 
 # ---------- paid leave: the usual 1 May to 31 October window ----------
@@ -1199,6 +1201,63 @@ def a_contract_question_to_hr_answered_without_checking_the_contract_is_sent_bac
     assert nudge("new_hire", "Where does my contract stand?", []) is None
     note = contract_first.CONTRACT_FIRST
     assert "do not apologise" in note and "not from the person" in note and "get_contract_status" in note and "never sends a contract" in note and "ignore this note" in note
+
+
+@test
+def dates_that_use_no_days_say_why_and_a_day_that_counts_says_nothing():
+    sat, sun, mon, holiday = date(2026, 11, 21), date(2026, 11, 22), date(2026, 11, 23), date(2026, 11, 11)      # 11 November is a public holiday (a Wednesday)
+    why = tools.no_days_reason("casual", sat, sat)
+    assert "Saturday 21 November" in why and "Monday to Friday" in why and "cannot be booked" in why and "casual leave" in why
+    assert tools.no_days_reason("sick", sun, sun) and tools.no_days_reason("casual", sat, sun).startswith("every day from Saturday 21 November to Sunday 22 November")
+    assert tools.no_days_reason("paid", sat, sat) is None                                                          # paid leave counts Saturdays
+    assert "Sunday 22 November" in tools.no_days_reason("paid", sun, sun) and "Monday to Saturday" in tools.no_days_reason("paid", sun, sun)
+    assert "public holiday" in tools.no_days_reason("casual", holiday, holiday)
+    assert tools.no_days_reason("casual", mon, mon) is None and tools.no_days_reason("casual", sat, mon) is None   # a range with a working day in it is fine
+    # the request itself is refused with the same reason, and nothing is created (a Saturday that is still to come, whatever day this runs)
+    next_saturday = date.today() + timedelta(days=(5 - date.today().weekday()) % 7 or 7)
+    refused = apply_leave("E001", "casual", next_saturday.isoformat(), next_saturday.isoformat())
+    assert "Saturday" in refused["error"] and "cannot be booked" in refused["error"] and "Nothing was submitted" in refused["error"], refused
+    assert tools.get_my_requests("E001")["my_requests"] == []
+
+
+@test
+def a_request_to_book_is_booked_not_asked_about_and_dates_with_no_days_are_never_offered():
+    nudge = booking_first.nudge
+    count_ok = [json.dumps({"working_days": 6, "available": 12.5, "available_after": 6.5})]
+    count_none = [json.dumps({"working_days": 0, "available": 7, "available_after": 7,
+                              "cannot_be_booked": "Saturday 21 November is not a working day (casual leave counts Monday to Friday), so it uses no days and cannot be booked."})]
+    asked = ["Please book paid leave from 30 November 2026 to 5 December 2026.", "Apply leave on nov 23rd", "I want leave on 21st nov", "I want casual leave on 23 November.",
+             "Can you book the 23rd for me?", "Je voudrais poser un congé le 23 novembre"]
+    for q in asked:
+        assert booking_first.asks_to_book(q), q
+    for q in ["How many days if I book 5 to 8 December?", "Can I take leave on 5 December?", "check for 21st nov", "yes", "sure go for it", "What if I apply for 3 days?", "", None]:
+        assert not booking_first.asks_to_book(q), q
+    for r in ["You have 12.5 paid days. Note: paid leave is normally taken between 1 May and 31 October.\n\nShall I submit this request?", "Shall I proceed with the booking?",
+              "That uses 6 days. Shall I go ahead and submit it?", "Would you like me to book it anyway, or did you mean a weekday?",
+              "You have 8 casual days available. A one-day leave on 23 November would use 1 day, leaving you with 7 days. Ready to submit?",
+              "That's 1 casual leave day. You'd have 7 days left after it's approved. Ready for me to apply it?"]:
+        assert booking_first.asks_before_booking(r), r
+    for r in ["A confirmation screen has appeared. Please review it and press Confirm.", "Which kind of leave do you want: casual or paid?", "You have 7 casual days.", ""]:
+        assert not booking_first.asks_before_booking(r), r
+    for q in asked[:4]:                                                                                           # asked to book, asked back instead: booked now, once
+        assert nudge("employee", q, "That uses 6 days. Shall I submit this request?", ["get_leave_balance", "count_leave_days"], count_ok) == booking_first.BOOK_NOW, q
+        assert nudge("employee", q, "That uses 6 days. Shall I submit this request?", ["count_leave_days", "apply_leave"], count_ok) is None        # it did call the tool
+    assert nudge("employee", asked[0], "A confirmation screen has appeared. Please review it and press Confirm.", ["apply_leave"], count_ok) is None
+    assert nudge("employee", asked[0], "Which kind of leave do you want: casual or paid?", [], []) is None        # a real question is not nudged
+    assert nudge("employee", "How many days if I book 5 to 8 December?", "That is 4 days. Shall I submit it?", ["count_leave_days"], count_ok) is None   # only asked how many
+    assert nudge("employee", "yes", "Shall I submit it?", [], []) is None
+    assert nudge("new_hire", asked[0], "Shall I submit this request?", [], []) is None                           # a new hire has no leave tool
+    # dates that use no days: the offer is sent back, whatever the person asked (even only "check for 21st nov")
+    why = "Saturday 21 November is not a working day"
+    for q in ["check for 21st nov", "I want leave on 21st nov", "book it on 21st"]:
+        for r in ["November 21st is a Saturday, so it doesn't use any days. Would you like me to book it anyway, or did you mean a weekday?",
+                  "I can book it anyway if you like.", "That date uses no days. Shall I submit it?"]:
+            fix = nudge("employee", q, r, ["count_leave_days"], count_none)
+            assert fix and why in fix and "do not offer to book them" in fix, (q, r)
+    assert nudge("employee", "check for 21st nov", "21 November is a Saturday, so nothing can be booked. Which working day would you like instead?", ["count_leave_days"], count_none) is None
+    assert nudge("employee", "check for 21st nov", "Would you like me to book it anyway?", ["count_leave_days", "apply_leave"], count_none) is None
+    assert booking_first.unbookable(count_ok + ["not json", "[1, 2]"]) is None and "Saturday 21 November" in booking_first.unbookable(["not json"] + count_none)
+    assert "not from the person" in booking_first.BOOK_NOW and "apply_leave" in booking_first.BOOK_NOW and "confirmation card" in booking_first.BOOK_NOW
 
 
 if __name__ == "__main__":
