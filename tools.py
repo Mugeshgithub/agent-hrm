@@ -122,6 +122,25 @@ def days_for(leave_type, start, end, holidays=None):
     return counter(start, end, holidays)
 
 
+def _day_label(d):
+    return f"{d:%A} {d.day} {d:%B}"          # Saturday 21 November
+
+
+def no_days_reason(leave_type, start, end, holidays=None):
+    """Why these dates use no days of this leave, worded for the person, or None when they use some. Weekend days and public holidays are not
+    counted (paid leave counts Saturdays), so a request for only those is impossible: it is refused BEFORE the confirmation card is shown."""
+    holidays = HOLIDAYS if holidays is None else holidays
+    if days_for(leave_type, start, end, holidays):
+        return None
+    counts = "Monday to Saturday" if leave_type == PAID else "Monday to Friday"
+    if start == end:
+        what = (f"{_day_label(start)} is a public holiday" if start in holidays
+                else f"{_day_label(start)} is not a working day ({leave_type} leave counts {counts})")
+    else:
+        what = f"every day from {_day_label(start)} to {_day_label(end)} is a weekend day or a public holiday ({leave_type} leave counts {counts})"
+    return f"{what}, so it uses no days and cannot be booked."
+
+
 def apply_leave(employee_id, leave_type, start_date, end_date):
     emp = get_employee(employee_id)
     if emp is None:
@@ -154,7 +173,7 @@ def apply_leave(employee_id, leave_type, start_date, end_date):
 
         days = days_for(leave_type, start, end, holidays_of(employee_id))
         if days == 0:
-            return {"error": "No days to take leave on in that range"}
+            return {"error": f"{no_days_reason(leave_type, start, end, holidays_of(employee_id))} Nothing was submitted."}
 
         # days already requested but not yet approved also count against the balance
         pending_days = conn.execute(

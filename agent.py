@@ -16,6 +16,7 @@ from db import init_db
 from memory import init_memory, init_summaries, save_message, build_context
 from notifications import init_notifications, notify_decision, notify_ticket_reply, show_unread
 from policy import search_policy, embed as embed_texts
+import booking_first
 import collective_agreement
 import contract_first
 import contracts
@@ -32,7 +33,7 @@ import policy_gaps
 from citations import ungrounded_citations, RETRY_MESSAGE, SAFE_REPLY
 from documents import asks_if_genuine, says_cannot_tell, GENUINE_ANSWER, GENUINE_RETRY
 from tools import (
-    get_leave_balance, apply_leave, days_for, days_figures, holidays_of, balance_of, clean_days, paid_policy_note,
+    get_leave_balance, apply_leave, days_for, days_figures, no_days_reason, holidays_of, balance_of, clean_days, paid_policy_note,
     get_pending_requests, decide_leave, get_my_requests, get_employee,
     get_team_member_balance, cancel_leave,
     create_hr_ticket, get_my_tickets, get_open_tickets, reply_to_ticket,
@@ -554,6 +555,8 @@ def run_tool(name, tool_input):
         if kind not in LEAVE_TYPES:
             return {"error": f"Unknown leave type '{kind}'"}
         result = {"working_days": days_for(kind, start, end, holidays_of(LOGGED_IN_ID))}
+        if not result["working_days"]:
+            result["cannot_be_booked"] = no_days_reason(kind, start, end, holidays_of(LOGGED_IN_ID))      # a Saturday, a Sunday, a public holiday: nothing to book
         result.update(days_figures(LOGGED_IN_ID, kind, result["working_days"]))       # what is left after these days, or how short: the reply never works it out
         if kind == PAID:
             result["counted"] = "Monday to Saturday (jours ouvrables); Sundays and public holidays are not counted"
@@ -570,6 +573,11 @@ def run_tool(name, tool_input):
             return {"error": "Dates must be in YYYY-MM-DD format"}
         if start < date.today():
             return {"error": f"Leave cannot start in the past. Today is {date.today()}."}
+        if end < start:
+            return {"error": "End date is before start date"}
+        # refuse BEFORE asking: a request for no days (a Saturday, a Sunday, a public holiday) never gets a confirmation card it could not pass
+        if (why := no_days_reason(tool_input["leave_type"], start, end, holidays_of(LOGGED_IN_ID))):
+            return {"error": f"{why} Nothing was submitted and no confirmation was shown."}
         days = days_for(tool_input["leave_type"], start, end, holidays_of(LOGGED_IN_ID))
         # available = saved balance minus days already waiting for approval (same rule as apply_leave),
         # so the confirmation never shows a "balance after" that ignores pending requests
@@ -761,6 +769,7 @@ def answer_turn(user_text):
         agreement_retry_used = False
         search_retry_used = False
         contract_retry_used = False
+        booking_retry_used = False
         number_retry_used = False
         last_turn["tools_called"] = []
         last_turn["refused"] = []
@@ -809,6 +818,14 @@ def answer_turn(user_text):
                     messages.append({"role": "user", "content": fix})
                     continue
 
+                # guardrail in code: asked to book leave, the assistant books it (the confirmation card is the confirmation), and it never offers to
+                # book dates that use no days (booking_first.py). One retry.
+                if not booking_retry_used and (fix := booking_first.nudge(role, user_text, reply, last_turn["tools_called"], turn_sources)):
+                    booking_retry_used = True
+                    print("  [guard] asked before booking, or offered to book dates that use no days: asking again")
+                    messages.append({"role": "user", "content": fix})
+                    continue
+
                 # guardrail in code: an answer about the person's own document says when the document is silent, and only then
                 # gives the policy or the law, labelled (see document_answers.py). One retry.
                 if not document_retry_used and (fix := document_answers.nudge(last_turn["tools_called"], reply)):
@@ -848,7 +865,7 @@ def answer_turn(user_text):
                 if action == "replaced":
                     print("  [guard] still not from a tool: replacing it with the tools' figures")
                     reply = shown
-                if document_retry_used or agreement_retry_used or search_retry_used or contract_retry_used or number_retry_used:       # a retry note was sent: the reply must not talk about it
+                if document_retry_used or agreement_retry_used or search_retry_used or contract_retry_used or booking_retry_used or number_retry_used:       # a retry note was sent: the reply must not talk about it
                     reply = document_answers.strip_correction(reply)
 
                 # the policy does not answer it: keep the question, without a name, for HR (policy_gaps.py)
