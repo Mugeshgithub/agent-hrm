@@ -8,6 +8,7 @@ db.DB_PATH = "unit_test_hr.db"   # its own database, never the real hr.db
 
 import booking_first
 import collective_agreement
+import confirm_batch
 import contract_first
 import contracts
 import document_answers
@@ -1288,6 +1289,150 @@ def the_prompt_date_line_names_the_weekday_and_is_built_from_the_date_it_is_give
     assert tools.today_line(date(2026, 11, 28)) == "Today is Saturday 2026-11-28."                         # 15 November 2026 is a Sunday, 14 is the Saturday
     assert date(2026, 11, 14).strftime("%A") == "Saturday" and date(2026, 11, 15).strftime("%A") == "Sunday"
     assert tools.today_line().startswith("Today is ") and date.today().isoformat() in tools.today_line()
+
+
+# ---------- one confirmation card for several actions (confirm_batch.py) ----------
+
+def _insert_request(employee_id, manager_id, start, status, leave_type="casual", days=1):
+    conn = db.get_conn()
+    with conn:
+        cur = conn.execute("INSERT INTO leave_requests (employee_id, manager_id, leave_type, start_date, end_date, days, status) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                           (employee_id, manager_id, leave_type, d(start), d(start), days, status))
+    conn.close()
+    return cur.lastrowid
+
+
+@test
+def dates_on_a_card_come_with_their_weekday():
+    assert tools.when_label(date(2026, 11, 20)) == "Fri 20 Nov 2026"
+    assert tools.when_label(date(2026, 11, 23), date(2026, 11, 24)) == "Mon 23 Nov to Tue 24 Nov 2026"
+    assert tools.when_label("2026-12-30", "2027-01-04") == "Wed 30 Dec 2026 to Mon 4 Jan 2027"
+    assert tools.when_label("2026-11-21") == "Sat 21 Nov 2026"
+    rid = _insert_request("E001", "M001", MON, "approved", days=1)
+    s = tools.request_summary(rid)
+    assert s["when"] == "Mon 4 Mar 2030" and s["leave_type"] == "casual" and s["days"] == 1 and s["employee_name"] and s["status"] == "approved"
+    assert tools.request_summary(9999) is None
+
+
+@test
+def a_cancellation_is_checked_before_the_card_with_the_same_rules_as_the_cancellation():
+    pending = _insert_request("E001", "M001", MON, "pending_manager_approval")
+    approved = _insert_request("E001", "M001", MON + timedelta(days=1), "approved")
+    started = _insert_request("E001", "M001", date.today(), "approved")
+    cancelled = _insert_request("E001", "M001", MON + timedelta(days=2), "cancelled")
+    rejected = _insert_request("E001", "M001", MON + timedelta(days=3), "rejected")
+    hers = _insert_request("E003", "M001", MON, "approved")
+    cases = [(pending, True), (approved, True), (started, False), (cancelled, False), (rejected, False), (hers, False), (99999, False)]
+    for rid, can in cases:
+        problem = tools.cancel_problem("E001", rid)
+        assert (problem is None) == can, (rid, problem)                                                        # the check says what the cancellation will do
+        assert bool(tools.cancel_leave("E001", rid)["cancelled"]) == can, rid
+    assert tools.cancel_problem("E001", started) == "This leave has already started. Please contact your manager or HR."
+    assert tools.cancel_problem("E001", cancelled) == "This request is already cancelled." and tools.cancel_problem("E001", hers) == "No such request found for you."
+
+
+@test
+def a_decision_is_checked_before_the_card_with_the_same_rules_as_the_decision():
+    def fresh(owner="E001", manager="M001", status="pending_manager_approval", days=1):
+        return _insert_request(owner, manager, MON, status, days=days)
+    conn = db.get_conn()
+    with conn:
+        conn.execute("UPDATE employees SET casual_balance = 0 WHERE id = 'E003'")
+    conn.close()
+    cases = [(fresh(), "M001", "approve", "", True), (fresh(), "M001", "reject", "clashes with a deadline", True), (fresh(), "M001", "reject", "", False),
+             (fresh(), "C001", "approve", "", False), (fresh(status="approved"), "M001", "approve", "", False), (fresh(), "M001", "maybe", "", False),
+             (99999, "M001", "approve", "", False), (fresh(owner="E003"), "M001", "approve", "", False)]       # E003 has no casual days left to give
+    for rid, manager, decision, reason, can in cases:
+        problem = tools.decide_problem(manager, rid, decision, reason)
+        assert (problem is None) == can, (rid, decision, problem)
+        assert ("error" not in tools.decide_leave(manager, rid, decision, reason)) == can, (rid, decision)
+    assert tools.decide_problem("M001", 99999, "approve") == "Request 99999 not found"
+
+
+@test
+def one_card_holds_up_to_five_actions_of_one_kind_and_nothing_replaces_another_silently():
+    cb = confirm_batch
+    card = {}
+    cancel = lambda n: {"request_id": n}
+    det = lambda n: {"request_id": n, "when": f"Fri {n} Nov 2026", "leave_type": "casual", "days": 1}
+    assert cb.add(card, "cancel_leave", cancel(1), det(1)) == ("started", 1)
+    assert cb.add(card, "cancel_leave", cancel(2), det(2)) == ("added", 2) and cb.add(card, "cancel_leave", cancel(2), det(2)) == ("duplicate", 2)
+    for n in (3, 4, 5):
+        assert cb.add(card, "cancel_leave", cancel(n), det(n)) == ("added", n)
+    assert cb.add(card, "cancel_leave", cancel(6), det(6)) == ("full", 5) and [i["input"]["request_id"] for i in card["items"]] == [1, 2, 3, 4, 5]
+    assert card["tool"] == "cancel_leave" and card["input"] == cancel(1) and card["details"] == det(1) and card["kind"] == "cancel_leave"   # the first item, as before
+    assert cb.add(card, "decide_leave", {"request_id": 7, "decision": "approve"}, {}) == ("other_kind", 5) and len(card["items"]) == 5
+    approvals = {}
+    assert cb.add(approvals, "decide_leave", {"request_id": 1, "decision": "approve"}, {})[0] == "started"
+    assert cb.add(approvals, "decide_leave", {"request_id": 2, "decision": "approve"}, {})[0] == "added"
+    assert cb.add(approvals, "decide_leave", {"request_id": 3, "decision": "reject", "reason": "x"}, {}) == ("other_kind", 2)      # approvals and rejections do not mix
+    assert cb.kind_of("decide_leave", {"decision": "reject"}) == "decide_leave:reject" and cb.kind_of("cancel_leave", {"request_id": 1}) == "cancel_leave"
+    booking = {}
+    assert cb.add(booking, "apply_leave", {"leave_type": "casual", "start_date": "a", "end_date": "a"}, {})[0] == "started"
+    assert cb.add(booking, "apply_leave", {"leave_type": "casual", "start_date": "b", "end_date": "b"}, {}) == ("other_kind", 1)   # bookings are not batched
+    assert len(booking["items"]) == 1 and booking["input"]["start_date"] == "a"
+
+
+@test
+def what_the_assistant_is_told_about_the_card_is_true_and_says_there_is_one():
+    cb = confirm_batch
+    card = {}
+    det = lambda n: {"request_id": n, "when": f"Fri {n} Nov 2026", "leave_type": "casual", "days": 1}
+    first = cb.tool_result(*cb.add(card, "cancel_leave", {"request_id": 1}, det(1)), card, "cancel_leave", det(1))
+    assert first["awaiting_confirmation"] and first["card_items"] == 1 and "ONE confirmation card" in first["message"] and first["card"] == det(1)
+    assert first["on_the_card"] == ["Fri 1 Nov 2026 (casual, 1 day)"]
+    second = cb.tool_result(*cb.add(card, "cancel_leave", {"request_id": 2}, det(2)), card, "cancel_leave", det(2))
+    assert second["card_items"] == 2 and "still only ONE card" in second["message"] and "Never say there are several cards" in second["message"]
+    assert len(second["on_the_card"]) == 2
+    for n in (3, 4, 5):
+        cb.add(card, "cancel_leave", {"request_id": n}, det(n))
+    full = cb.tool_result(*cb.add(card, "cancel_leave", {"request_id": 6}, det(6)), card, "cancel_leave", det(6))
+    assert "error" in full and "at most 5" in full["error"] and "NOT on the card" in full["error"] and full["card_items"] == 5 and "awaiting_confirmation" not in full
+    other = cb.tool_result(*cb.add(card, "decide_leave", {"request_id": 9, "decision": "approve"}, {}), card, "decide_leave", {})
+    assert "error" in other and "one kind of action only" in other["error"] and "NOT on the card" in other["error"]
+    single = {}
+    cb.add(single, "apply_leave", {"x": 1}, {})
+    again = cb.tool_result(*cb.add(single, "apply_leave", {"x": 2}, {}), single, "apply_leave", {})
+    assert "Only one of these" in again["error"] and "NOT on the card" in again["error"]
+
+
+@test
+def confirm_reports_each_item_separately_and_failures_are_not_hidden():
+    cb = confirm_batch
+    items = [{"input": {"request_id": n}, "details": {"when": f"Fri {n} Nov 2026", "leave_type": "casual", "days": 1}} for n in (20, 23, 24)]
+    ok = lambda r: cb.outcome("cancel_leave", r[0], r[1])
+    good = {"cancelled": True, "days_returned": 1, "balance_after": 8}
+    bad = {"cancelled": False, "message": "This leave has already started. Please contact your manager or HR."}
+    all_ok = [ok((i, good)) for i in items]
+    mixed = [ok((items[0], good)), ok((items[1], bad)), ok((items[2], good))]
+    none_ok = [ok((i, bad)) for i in items]
+    assert cb.note("cancel_leave", all_ok).startswith("Done: all 3 cancellations.\n\n- Cancelled Fri 20 Nov 2026 (casual, 1 day), 1 day returned to your balance.")
+    text = cb.note("cancel_leave", mixed)
+    assert text.startswith("2 of 3 cancellations done, 1 not.") and "- Not cancelled, Fri 23 Nov 2026 (casual, 1 day): This leave has already started." in text
+    assert text.count("- ") == 3 and cb.note("cancel_leave", none_ok).startswith("None of the 3 cancellations could be done.")
+    assert cb.note("cancel_leave", all_ok[:1]) == "Done."                                                          # one item: as before
+    assert cb.note("cancel_leave", mixed[1:2]) == "Couldn't complete it: This leave has already started. Please contact your manager or HR."
+    approve = [{"input": {"request_id": 1, "decision": "approve"}, "details": {"employee_name": "Emma", "when": "Mon 23 Nov 2026", "leave_type": "casual", "days": 1}},
+               {"input": {"request_id": 2, "decision": "approve"}, "details": {"employee_name": "Hugo", "when": "Tue 24 Nov to Wed 25 Nov 2026", "leave_type": "paid", "days": 2}}]
+    outs = [cb.outcome("decide_leave", approve[0], {"success": True}), cb.outcome("decide_leave", approve[1], {"error": "Employee no longer has enough paid leave"})]
+    text = cb.note("decide_leave:approve", outs)
+    assert text.startswith("1 of 2 approvals done, 1 not.") and "- Approved Emma: Mon 23 Nov 2026 (casual, 1 day)." in text
+    assert "- Not approved, Hugo: Tue 24 Nov to Wed 25 Nov 2026 (paid, 2 days): Employee no longer has enough paid leave" in text
+    assert cb.outcome("apply_leave", {}, {"success": True})[0] and not cb.outcome("apply_leave", {}, {"error": "x"})[0] and not cb.outcome("cancel_leave", items[0], {})[0]
+
+
+@test
+def the_reply_never_talks_about_several_cards_while_the_app_shows_one():
+    cb = confirm_batch
+    card = {"items": [{}, {}, {}]}
+    for reply in ["The app is showing you confirmation cards for all three cancellations.", "Please review each card and press Confirm.", "Review the three cards.",
+                  "Two confirmation screens have appeared.", "Les cartes de confirmation sont affichées."]:
+        fix = cb.nudge(card, reply)
+        assert fix and "exactly ONE confirmation card" in fix and "3 items" in fix, reply
+    assert "1 item." in cb.nudge({"items": [{}]}, "I opened the cards.")
+    for reply in ["A confirmation card lists all three. Please review it and press Confirm once.", "I'll cancel those three.", "", None]:
+        assert cb.nudge(card, reply) is None, reply
+    assert cb.nudge({}, "Here are your cards") is None                                                             # no card, nothing to correct
 
 
 if __name__ == "__main__":

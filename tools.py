@@ -147,6 +147,32 @@ def no_days_reason(leave_type, start, end, holidays=None):
     return f"{what}, so it uses no days and cannot be booked."
 
 
+def when_label(start, end=None):
+    """Dates with their weekdays, for a card or a reply: 'Fri 20 Nov 2026', or 'Mon 23 Nov to Tue 24 Nov 2026' for a range."""
+    start = date.fromisoformat(start) if isinstance(start, str) else start
+    end = start if end is None else (date.fromisoformat(end) if isinstance(end, str) else end)
+
+    def one(d, year=True):
+        return f"{d:%a} {d.day} {d:%b}" + (f" {d.year}" if year else "")
+    if start == end:
+        return one(start)
+    return f"{one(start, year=start.year != end.year)} to {one(end)}"
+
+
+def request_summary(request_id):
+    """One leave request as a card or a reply shows it: who, which kind of leave, the dates with their weekdays, the days. None if it does not exist."""
+    conn = get_conn()
+    try:
+        row = conn.execute("""SELECT r.*, e.name AS employee_name FROM leave_requests r
+                              JOIN employees e ON e.id = r.employee_id WHERE r.id = ?""", (request_id,)).fetchone()
+    finally:
+        conn.close()
+    if row is None:
+        return None
+    return {"request_id": row["id"], "employee_name": row["employee_name"], "leave_type": row["leave_type"], "start_date": row["start_date"],
+            "end_date": row["end_date"], "days": clean_days(row["days"]), "status": row["status"], "when": when_label(row["start_date"], row["end_date"])}
+
+
 def apply_leave(employee_id, leave_type, start_date, end_date):
     emp = get_employee(employee_id)
     if emp is None:
@@ -350,6 +376,47 @@ def cancel_leave(employee_id, request_id):
         return {"cancelled": False, "message": f"This request is already {req['status']}."}
     finally:
         conn.close()
+
+
+def cancel_problem(employee_id, request_id):
+    """Why this person cannot cancel this request, or None when they can: the same rules as cancel_leave, without changing anything. The
+    confirmation card is checked with it BEFORE it is shown, so a request that would fail is never on a card (a test keeps the two in step)."""
+    conn = get_conn()
+    try:
+        req = conn.execute("SELECT * FROM leave_requests WHERE id = ?", (request_id,)).fetchone()
+    finally:
+        conn.close()
+    if req is None or req["employee_id"] != employee_id:
+        return "No such request found for you."
+    if req["status"] == PENDING:
+        return None
+    if req["status"] == "approved":
+        return "This leave has already started. Please contact your manager or HR." if date.fromisoformat(req["start_date"]) <= date.today() else None
+    return f"This request is already {req['status']}."
+
+
+def decide_problem(manager_id, request_id, decision, reason=""):
+    """Why this manager cannot make this decision, or None when they can: the same rules as decide_leave, without changing anything."""
+    if decision not in ("approve", "reject"):
+        return "Decision must be 'approve' or 'reject'"
+    if decision == "reject" and not reason:
+        return "A reason is required to reject a request"
+    conn = get_conn()
+    try:
+        req = conn.execute("SELECT * FROM leave_requests WHERE id = ?", (request_id,)).fetchone()
+        if req is None:
+            return f"Request {request_id} not found"
+        if req["manager_id"] != manager_id:
+            return "You are not the manager for this request"
+        if req["status"] != PENDING:
+            return f"Request is already {req['status']}"
+        if decision == "approve" and req["leave_type"] != FLOATER:
+            column = f"{req['leave_type']}_balance"
+            if conn.execute(f"SELECT {column} FROM employees WHERE id = ?", (req["employee_id"],)).fetchone()[0] < req["days"]:
+                return f"Employee no longer has enough {req['leave_type']} leave"
+    finally:
+        conn.close()
+    return None
 
 
 # ---------- NEW: HR tickets ----------

@@ -331,6 +331,53 @@ def setup_priya_poisoned_history():
                             f"there are **2 working days**.")
 
 
+def future_weekdays(n):
+    # the next n working days from week 2 on (no weekend, no public holiday), so a setup always ends with exactly n whatever holiday falls there
+    d, days = day(2, 0), []
+    while len(days) < n:
+        if count_working_days(d, d) == 1:
+            days.append(d)
+        d += timedelta(days=1)
+    return days
+
+
+def dates_in_words(days):
+    words = [say_no_year(d) for d in days]
+    return ", ".join(words[:-1]) + " and " + words[-1]
+
+
+def statuses():
+    conn = db.get_conn()
+    rows = conn.execute("SELECT status FROM leave_requests ORDER BY id").fetchall()
+    conn.close()
+    return [r[0] for r in rows]
+
+
+def setup_approved_leave(n):
+    # Emma has n approved one-day casual leaves in the coming weeks (and no card is waiting from an earlier test)
+    agent.pending_action.clear()
+    for d in future_weekdays(n):
+        decide_leave("M001", apply_leave("E001", "casual", iso(d), iso(d))["request"]["id"], "approve")
+
+
+def setup_two_approved_and_one_started():
+    setup_approved_leave(2)
+    conn = db.get_conn()
+    with conn:       # an approved leave that began today: it can no longer be cancelled here
+        conn.execute("INSERT INTO leave_requests (employee_id, manager_id, leave_type, start_date, end_date, days, status) "
+                     "VALUES ('E001', 'M001', 'casual', ?, ?, 1, 'approved')", (iso(date.today()), iso(date.today())))
+    conn.close()
+
+
+def setup_two_pending_for_lucas():
+    agent.pending_action.clear()
+    for d in future_weekdays(2):
+        apply_leave("E001", "casual", iso(d), iso(d))
+
+
+CARDS = r"(?i)\b(cards|screens)\b"        # the app shows ONE card, however many items it lists
+
+
 def setup_saturday_offered_anyway():
     # the real bug (10 Nov): asked to check a Saturday, the assistant offered to book it anyway; then "book it" showed a confirmation card
     # that could never pass, and the refusal came after Confirm
@@ -1430,6 +1477,59 @@ TEST_CASES = [
         "expected_requests": 1,
     },
     {
+        # real, 10 Nov: "cancel my approved leave on 20, 23 and 24" -> three cancel calls, ONE parked action: only the last date was cancelled, and the
+        # assistant said there were "confirmation cards for all three". Now ONE card lists all three, and Confirm cancels all three.
+        "name": "card: cancelling three dates puts all three on one card, and Confirm cancels all three",
+        "user": "E001",
+        "auto_confirm": agent.AWAITING_CONFIRMATION,         # as in the web app: the action is parked on the card
+        "setup": lambda: setup_approved_leave(3),
+        "input": f"Please cancel my approved leave on {dates_in_words(future_weekdays(3))}.",
+        "must_call": ["cancel_leave"],
+        "expected_card_items": 3,
+        "then_confirm": True,                                # the person presses Confirm
+        "note_must_match": r"^Done: all 3 cancellations\.",
+        "reply_must_match": r"(?i)confirm",
+        "reply_must_not_match": CARDS,
+        "check": lambda: statuses() == ["cancelled"] * 3,
+    },
+    {
+        "name": "card: approving two requests puts both on one card, and Confirm approves both",
+        "user": "M001",
+        "auto_confirm": agent.AWAITING_CONFIRMATION,
+        "setup": setup_two_pending_for_lucas,
+        "input": "Please approve both of Emma's pending requests.",
+        "must_call": ["decide_leave"],
+        "expected_card_items": 2,
+        "then_confirm": True,
+        "note_must_match": r"^Done: all 2 approvals\.",
+        "reply_must_not_match": CARDS,
+        "check": lambda: statuses() == ["approved"] * 2,
+    },
+    {
+        "name": "card: a request that would fail is left off the card, and the reply says why",
+        "user": "E001",
+        "auto_confirm": agent.AWAITING_CONFIRMATION,
+        "setup": setup_two_approved_and_one_started,
+        "input": f"Please cancel my approved leave on {say_no_year(date.today())}, {dates_in_words(future_weekdays(2))}.",
+        "expected_card_items": 2,
+        "then_confirm": True,
+        "reply_must_match": r"(?i)already started|has started|already begun|can'?t be cancelled|cannot be cancelled|left off|not on the card|can'?t cancel|cannot cancel",
+        "reply_must_not_match": CARDS,
+        "check": lambda: statuses() == ["cancelled", "cancelled", "approved"],
+    },
+    {
+        "name": "card: six cancellations are split, five go on the card and the reply says so",
+        "user": "E001",
+        "auto_confirm": agent.AWAITING_CONFIRMATION,
+        "setup": lambda: setup_approved_leave(6),
+        "input": "Please cancel all my approved leave.",
+        "expected_card_items": 5,
+        "then_confirm": True,
+        "reply_must_match": r"(?i)\b(five|5|at most|maximum|limit)\b",
+        "reply_must_not_match": CARDS,
+        "check": lambda: sorted(statuses()) == ["approved"] + ["cancelled"] * 5,
+    },
+    {
         "name": "paid leave: more days than the paid balance is refused",
         "user": "E003",
         "auto_confirm": True,
@@ -1815,7 +1915,17 @@ def attempt(case):
 
     reply, tools_called, trace_id = run_agent(case["input"], test_name=case["name"], session_role=case.get("role"))
 
+    # a card left waiting, as in the web app: how many actions it lists, and then the person presses Confirm
+    card_items = len(agent.pending_action.get("items", []))
+    confirm_note = ""
+    if case.get("then_confirm") and agent.pending_action:
+        confirm_note, _ = agent.run_pending(True)
+
     problems = []
+    if "expected_card_items" in case and card_items != case["expected_card_items"]:
+        problems.append(f"the card lists {card_items} items, expected {case['expected_card_items']}")
+    if "note_must_match" in case and not re.search(case["note_must_match"], confirm_note):
+        problems.append("the message after Confirm did not match expected wording")
     for tool in case.get("must_call", []):
         if tool not in tools_called:
             problems.append(f"did not call {tool}")
@@ -1850,13 +1960,16 @@ def attempt(case):
     # send the result to Langfuse: passed = 1 or 0, with the reasons as a comment
     print("trace id:", trace_id)
     tracing.score_trace(trace_id, passed=not problems, comment=", ".join(problems))
-    return problems, {"reply": reply, "tools": tools_called, "refused": list(agent.last_turn["refused"])}
+    return problems, {"reply": reply, "tools": tools_called, "refused": list(agent.last_turn["refused"]), "confirm": confirm_note, "card_items": card_items}
 
 
 def show_failure(label, name, problems, info):
     print(f"{label} {name}: {', '.join(problems)}")
     print(f"     tools: {info['tools']}" + (f"   (refused by the code, not counted: {info['refused']})" if info.get("refused") else ""))
-    print(f"     reply: {info['reply']}\n")
+    print(f"     reply: {info['reply']}")
+    if info.get("confirm"):
+        print(f"     after Confirm ({info['card_items']} items on the card): {info['confirm']}")
+    print()
 
 
 def run_cases(cases):

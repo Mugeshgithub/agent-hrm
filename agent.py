@@ -18,6 +18,7 @@ from notifications import init_notifications, notify_decision, notify_ticket_rep
 from policy import search_policy, embed as embed_texts
 import booking_first
 import collective_agreement
+import confirm_batch
 import contract_first
 import contracts
 import document_answers
@@ -35,7 +36,7 @@ from documents import asks_if_genuine, says_cannot_tell, GENUINE_ANSWER, GENUINE
 from tools import (
     get_leave_balance, apply_leave, days_for, days_figures, no_days_reason, today_line, holidays_of, balance_of, clean_days, paid_policy_note,
     get_pending_requests, decide_leave, get_my_requests, get_employee,
-    get_team_member_balance, cancel_leave,
+    get_team_member_balance, cancel_leave, cancel_problem, decide_problem, request_summary,
     create_hr_ticket, get_my_tickets, get_open_tickets, reply_to_ticket,
     PAID, LEAVE_TYPES,
 )
@@ -270,7 +271,8 @@ TOOLS = [
     {
         "name": "decide_leave",
         "description": "Approve or reject a pending leave request from your team by its request ID. "
-                       "The system will ask you to confirm before saving.",
+                       "The system will ask you to confirm before saving. To decide several requests the same way (all approved, or all rejected), "
+                       "call it once per request in the same turn, up to 5: they all go on ONE confirmation card and the person presses Confirm once.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -286,7 +288,8 @@ TOOLS = [
         "description": "Cancel one of the logged-in user's OWN leave requests. "
                        "Works for pending requests, and for approved leave that has not started yet. "
                        "If you don't know the request ID, call get_my_requests first to find it. "
-                       "The system will ask the user to confirm before cancelling.",
+                       "The system will ask the user to confirm before cancelling. To cancel several requests, call it once per request in the same "
+                       "turn, up to 5: they all go on ONE confirmation card and the person presses Confirm once.",
         "input_schema": {
             "type": "object",
             "properties": {"request_id": {"type": "integer"}},
@@ -515,18 +518,35 @@ def confirm_with_human(tool_input):
 # The web server sets confirm_with_human to return AWAITING_CONFIRMATION; when the person clicks
 # Confirm, the server runs the parked action through run_tool again with confirmation = yes.
 AWAITING_CONFIRMATION = "awaiting_confirmation"
-pending_action = {}
-CARD_SHOWN = {"awaiting_confirmation": True,
-              "message": "Nothing has been done yet. The app is showing the user a confirmation card for "
-                         "this action; tell them to review it and press Confirm."}
+pending_action = {}       # the card: the first item's tool, input and details, plus `kind` and `items` (every action on it): see confirm_batch.py
 
 
 def confirmed(name, tool_input, details):
+    """True or False in the terminal and in the tests. In the web app the action goes on the card instead, and what comes back is a dict, the tool
+    result the assistant is shown: the card (and how many items it lists), or why this action could not join it. Never a silent replacement."""
     answer = confirm_with_human(details)
-    if answer == AWAITING_CONFIRMATION:
-        pending_action.clear()
-        pending_action.update(tool=name, input=dict(tool_input), details=details)
-    return answer
+    if answer != AWAITING_CONFIRMATION:
+        return answer
+    status, count = confirm_batch.add(pending_action, name, tool_input, details)
+    return confirm_batch.tool_result(status, count, pending_action, name, details)
+
+
+def run_pending(accept):
+    """The person pressed Confirm (or Cancel) on the card. Confirm runs every item on it, one by one in the order they were added, through the SAME
+    tool path again with confirmation = yes, and reports each result separately. Returns (the message for the person, the results)."""
+    global confirm_with_human
+    action = dict(pending_action)
+    pending_action.clear()
+    if not accept:
+        return "Cancelled. Nothing was changed.", [{"cancelled_by_user": True}]
+    previous = confirm_with_human
+    confirm_with_human = lambda details: True
+    try:
+        results = [run_tool(action["tool"], item["input"]) for item in action["items"]]
+    finally:
+        confirm_with_human = previous
+    outcomes = [confirm_batch.outcome(action["tool"], item, result) for item, result in zip(action["items"], results)]
+    return confirm_batch.note(action["kind"], outcomes), results
 
 
 @observe()   # each tool call shows up as a step inside the trace
@@ -597,17 +617,21 @@ def run_tool(name, tool_input):
                    "all_balances": balance_of(emp),
                    "balance_after_approval": clean_days(balance - days)}
         answer = confirmed(name, tool_input, details)
-        if answer == AWAITING_CONFIRMATION:
-            return {**CARD_SHOWN, "card": details}       # the figures on the card: the reply may quote them, nothing else
+        if isinstance(answer, dict):
+            return answer       # the card, with its figures (the reply may quote them, nothing else), or why this booking is not on it
         if not answer:
             return {"submitted": False, "working_days": days,
                     "message": f"The employee chose not to submit this {days}-day request. No request exists."}
         return apply_leave(LOGGED_IN_ID, **tool_input)
 
     if name == "cancel_leave":
-        answer = confirmed(name, tool_input, {"cancel_request_id": tool_input["request_id"]})
-        if answer == AWAITING_CONFIRMATION:
-            return CARD_SHOWN
+        # refuse BEFORE the card, as for a booking: a request that would fail is left off it, and the reply says why
+        if (problem := cancel_problem(LOGGED_IN_ID, tool_input["request_id"])):
+            return {"cancelled": False, "message": problem,
+                    "left_off_the_card": "This request is NOT on the card and nothing was cancelled for it: tell the person why, in these words."}
+        answer = confirmed(name, tool_input, request_summary(tool_input["request_id"]))
+        if isinstance(answer, dict):
+            return answer
         if not answer:
             return {"cancelled": False, "message": "The user chose not to cancel. The request is unchanged."}
         return cancel_leave(LOGGED_IN_ID, tool_input["request_id"])
@@ -636,9 +660,13 @@ def run_tool(name, tool_input):
         return needs_you.for_assistant(LOGGED_IN_ID)     # the role check is in roles.py and in needs_you.py
 
     if name == "decide_leave":
-        answer = confirmed(name, tool_input, tool_input)
-        if answer == AWAITING_CONFIRMATION:
-            return CARD_SHOWN
+        # refuse BEFORE the card: a decision that would fail is left off it, and the reply says why
+        if (problem := decide_problem(LOGGED_IN_ID, tool_input["request_id"], tool_input["decision"], tool_input.get("reason", ""))):
+            return {"error": problem, "left_off_the_card": "This decision is NOT on the card and nothing was saved for it: tell the person why, in these words."}
+        answer = confirmed(name, tool_input, {**request_summary(tool_input["request_id"]), "decision": tool_input["decision"],
+                                              "reason": tool_input.get("reason", "")})
+        if isinstance(answer, dict):
+            return answer
         if not answer:
             return {"saved": False, "message": "The manager chose not to save this decision. Nothing changed."}
         result = decide_leave(LOGGED_IN_ID, **tool_input)
@@ -701,8 +729,8 @@ def run_tool(name, tool_input):
 
     if name == "create_hr_ticket":
         answer = confirmed(name, tool_input, {"send_to_HR": tool_input.get("summary", "")})
-        if answer == AWAITING_CONFIRMATION:
-            return CARD_SHOWN
+        if isinstance(answer, dict):
+            return answer
         if not answer:
             return {"created": False, "message": "The user chose not to raise a ticket. Nothing was sent."}
         return create_hr_ticket(LOGGED_IN_ID, tool_input.get("question"), tool_input.get("summary"))
@@ -715,8 +743,8 @@ def run_tool(name, tool_input):
 
     if name == "reply_to_ticket":
         answer = confirmed(name, tool_input, tool_input)
-        if answer == AWAITING_CONFIRMATION:
-            return CARD_SHOWN
+        if isinstance(answer, dict):
+            return answer
         if not answer:
             return {"sent": False, "message": "HR chose not to send this reply. The ticket is still open."}
         result = reply_to_ticket(LOGGED_IN_ID, tool_input["ticket_id"], tool_input.get("reply"))
@@ -782,6 +810,7 @@ def answer_turn(user_text):
         search_retry_used = False
         contract_retry_used = False
         booking_retry_used = False
+        card_retry_used = False
         number_retry_used = False
         last_turn["tools_called"] = []
         last_turn["refused"] = []
@@ -838,6 +867,13 @@ def answer_turn(user_text):
                     messages.append({"role": "user", "content": fix})
                     continue
 
+                # guardrail in code: the app shows ONE card, however many items it lists: the reply never talks about several cards (confirm_batch.py). One retry.
+                if not card_retry_used and (fix := confirm_batch.nudge(pending_action, reply)):
+                    card_retry_used = True
+                    print("  [guard] the reply talks about several cards and the app shows one: asking again")
+                    messages.append({"role": "user", "content": fix})
+                    continue
+
                 # guardrail in code: an answer about the person's own document says when the document is silent, and only then
                 # gives the policy or the law, labelled (see document_answers.py). One retry.
                 if not document_retry_used and (fix := document_answers.nudge(last_turn["tools_called"], reply)):
@@ -877,7 +913,7 @@ def answer_turn(user_text):
                 if action == "replaced":
                     print("  [guard] still not from a tool: replacing it with the tools' figures")
                     reply = shown
-                if document_retry_used or agreement_retry_used or search_retry_used or contract_retry_used or booking_retry_used or number_retry_used:       # a retry note was sent: the reply must not talk about it
+                if document_retry_used or agreement_retry_used or search_retry_used or contract_retry_used or booking_retry_used or card_retry_used or number_retry_used:       # a retry note was sent: the reply must not talk about it
                     reply = document_answers.strip_correction(reply)
 
                 # the policy does not answer it: keep the question, without a name, for HR (policy_gaps.py)

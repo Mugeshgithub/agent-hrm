@@ -1232,7 +1232,8 @@ def _card(agent):
     if not agent.pending_action:
         return None
     a = agent.pending_action
-    return {"tool": a["tool"], "details": a["details"], "input": a["input"]}
+    # one card, however many actions it lists: `details` and `input` are the first item's (as before), `items` is every one, in order
+    return {"tool": a["tool"], "details": a["details"], "input": a["input"], "items": a["items"]}
 
 
 @app.get("/api/assistant/history")
@@ -1261,21 +1262,13 @@ def confirm(body: ConfirmIn, request: Request):
     emp = me(request)
     with agent_lock:
         agent = _agent_for(emp["id"])
-        action = dict(agent.pending_action)
-        agent.pending_action.clear()
-        if not action:
+        if not agent.pending_action:
             raise HTTPException(400, "There's nothing waiting for confirmation.")
+        action = dict(agent.pending_action)        # run_pending takes the card off the shelf: keep what the conversation note needs
         from memory import save_message
-        if not body.accept:
-            note = "Cancelled. Nothing was changed."
-            result = {"cancelled_by_user": True}
-        else:
-            # run the SAME tool path again, this time with confirmation = yes
-            agent.confirm_with_human = lambda details: True
-            result = agent.run_tool(action["tool"], action["input"])
-            agent.confirm_with_human = lambda details: agent.AWAITING_CONFIRMATION
-            note = (f"Couldn't complete it: {result['error']}" if isinstance(result, dict) and "error" in result
-                    else "Done.")
+        # Confirm runs every item on the card, one by one, and reports each result (agent.run_pending); Cancel changes nothing
+        note, results = agent.run_pending(body.accept)
+        result = results[0] if len(results) == 1 else results
         # keep the conversation consistent for the next question (user turn, then assistant turn)
         decision = "confirmed" if body.accept else "declined"
         agent.state["messages"].append({"role": "user", "content": f"[In the app, I {decision} the {action['tool']} card.]"})
