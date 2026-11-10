@@ -857,6 +857,18 @@ def shipped():
 
 
 @test
+def the_sick_allowance_sentence_is_accepted_per_year_or_per_calendar_year_and_nothing_else():
+    ok = policy_store.problem_with
+    for wording, accepted in (("6 sick leave days per calendar year (1 January to 31 December)", True),
+                              ("6 sick leave days per year", True),
+                              ("6 sick leave days per month", False),
+                              ("8 sick leave days per calendar year", False)):
+        edited = [dict(s, text=s["text"].replace("6 sick leave days per calendar year (1 January to 31 December)", wording)) for s in shipped()]
+        assert (ok(edited) is None) == accepted, wording
+    assert "per calendar year" in next(s for s in shipped() if s["title"] == "Sick leave")["text"]
+
+
+@test
 def a_policy_must_keep_the_sentences_the_leave_rules_enforce_and_the_paid_leave_window_the_rules_read():
     ok = policy_store.problem_with
     assert ok(shipped()) is None

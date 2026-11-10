@@ -28,7 +28,7 @@ REINDEX = None          # called after a save to embed the new text; None means 
 # what the leave rules in code say, as the sentences that must stay somewhere in the policy: (pattern, what to tell HR)
 ENFORCED = [
     (r"12 casual leave days per year", "\"12 casual leave days per year\" (the casual allowance the app gives every January)"),
-    (r"6 sick leave days per year", "\"6 sick leave days per year\" (the sick allowance the app gives every January)"),
+    (r"6 sick leave days per (?:calendar )?year", "\"6 sick leave days per calendar year\" (the sick allowance the app gives every January)"),
     (r"Up to 5 unused casual leave days", "\"Up to 5 unused casual leave days\" (the carry-forward cap the app applies on 1 January)"),
     (r"2\.5 days of paid leave per month", "\"2.5 days of paid leave per month\" (the monthly accrual the app credits)"),
     (r"from Monday to Saturday", "\"from Monday to Saturday\" (how the app counts paid leave days)"),
