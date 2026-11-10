@@ -19,7 +19,7 @@ POLICY_HOLIDAYS = json.dumps({"found": True, "sections": [{"title": "Public holi
     "The company follows the published public holiday calendar. If a public holiday falls during approved leave, "
     "that day is not counted as leave."}]}, ensure_ascii=False)
 POLICY_SICK = json.dumps({"found": True, "sections": [{"title": "Sick leave", "text":
-    "Employees get 6 sick leave days per year. Sick leave of more than 2 consecutive days requires a medical "
+    "Employees get 6 sick leave days per calendar year (1 January to 31 December). Sick leave of more than 2 consecutive days requires a medical "
     "certificate, uploaded within 3 days of returning to work."}]}, ensure_ascii=False)
 POLICY_WINDOW = json.dumps({"found": True, "sections": [{"title": "Paid leave (congés payés)", "text":
     "Paid leave is normally taken between 1 May and 31 October. Outside this period, paid leave can still be "
@@ -27,7 +27,7 @@ POLICY_WINDOW = json.dumps({"found": True, "sections": [{"title": "Paid leave (c
     ensure_ascii=False)
 # what search_policy really returns for "doctor's note": the sick leave section, and a section about something else
 POLICY_SICK_SEARCH = json.dumps({"found": True, "sections": [
-    {"title": "Sick leave", "text": "Employees get 6 sick leave days per year. Sick leave of more than 2 consecutive days requires a medical "
+    {"title": "Sick leave", "text": "Employees get 6 sick leave days per calendar year (1 January to 31 December). Sick leave of more than 2 consecutive days requires a medical "
                                     "certificate, uploaded within 3 days of returning to work."},
     {"title": "Notice period", "text": "The notice period is 30 days for employees and 60 days for managers. Leave cannot be taken during the "
                                         "notice period without HR approval."}]}, ensure_ascii=False)
