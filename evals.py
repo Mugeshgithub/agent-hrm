@@ -1381,7 +1381,8 @@ TEST_CASES = [
         "auto_confirm": agent.AWAITING_CONFIRMATION,
         "setup": setup_saturday_offered_anyway,
         "input": f"Book it on {say_no_year(SATURDAY)}.",
-        "reply_must_match": r"(?i)saturday|weekend|not a working day|no (leave )?days",
+        # either it says a Saturday cannot be booked, or it asks which kind of leave (only paid leave counts a Saturday): no card and no request either way
+        "reply_must_match": r"(?i)saturday|weekend|not a working day|no (leave )?days|(which|what) (type|kind) of leave|casual, sick",
         "reply_must_not_match": r"(?i)anyway|shall i|(would you like|do you want|want) me to (book|submit|proceed|go ahead)|confirmation (screen|card)",
         "expected_requests": 0,
         "check": lambda: not agent.pending_action,
