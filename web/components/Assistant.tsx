@@ -6,7 +6,9 @@ import { api, fetcher } from "@/lib/api";
 import { leaveLabel, range } from "@/lib/format";
 import { useMe } from "./Me";
 
-type Card = { tool: string; details: Record<string, any>; input: Record<string, any> };
+type Item = { input: Record<string, any>; details: Record<string, any> };
+// one card, however many actions it lists: `details` and `input` are the first item's, `items` is every one, in order
+type Card = { tool: string; details: Record<string, any>; input: Record<string, any>; items?: Item[] };
 type Msg = { role: "user" | "assistant" | "note"; text: string; card?: Card; resolved?: boolean };
 type History = { id: number; role: string; content: string }[];
 
@@ -97,7 +99,9 @@ export function Assistant({ open, onClose }: { open: boolean; onClose: () => voi
           <Fragment key={i}>
             {m.role === "user" && <p className="ml-auto max-w-[85%] w-fit rounded-lg bg-dossier-tint px-3 py-2">{m.text}</p>}
             {m.role === "assistant" && <div className="max-w-[95%] space-y-2 leading-relaxed"><Rich text={m.text} /></div>}
-            {m.role === "note" && <p className="text-center text-xs text-ink-soft">{m.text}</p>}
+            {m.role === "note" && (
+              <p className={`text-xs text-ink-soft ${m.text.includes("\n") ? "whitespace-pre-line text-left" : "text-center"}`}>{m.text}</p>
+            )}
             {m.card && !m.resolved && <ConfirmCard card={m.card} busy={busy} onDecide={(a) => decide(i, a)} />}
           </Fragment>
         ))}
@@ -120,32 +124,48 @@ export function Assistant({ open, onClose }: { open: boolean; onClose: () => voi
 // what the assistant wants to do, in plain words; nothing happens until "Confirm"
 function ConfirmCard({ card, busy, onDecide }: { card: Card; busy: boolean; onDecide: (accept: boolean) => void }) {
   const d = card.details, i = card.input;
+  const items = card.items ?? [{ input: i, details: d }];
+  const listed = card.tool === "cancel_leave" || card.tool === "decide_leave";      // one card can list several of these, each with its date and weekday
+  const many = items.length > 1;
   const rows: [string, ReactNode][] =
     card.tool === "apply_leave" ? [
       ["Type", leaveLabel(d.leave_type)], ["Dates", range(d.start_date, d.end_date)],
       [d.leave_type === "paid" ? "Days (Mon–Sat)" : "Working days", d.working_days], ["Left after approval", `${d.balance_after_approval} days`]]
-    : card.tool === "cancel_leave" ? [["Request", `#${i.request_id}`]]
-    : card.tool === "decide_leave" ? [["Request", `#${i.request_id}`], ["Decision", i.decision === "approve" ? "Approve" : "Reject"],
-      ...(i.reason ? [["Reason", i.reason] as [string, ReactNode]] : [])]
     : card.tool === "create_hr_ticket" ? [["Sent to HR", d.send_to_HR]]
     : card.tool === "reply_to_ticket" ? [["Ticket", `HR-${String(i.ticket_id).padStart(4, "0")}`], ["Reply", i.reply]]
     : Object.entries(d).map(([k, v]) => [k, String(v)]);
   const title: Record<string, string> = {
-    apply_leave: "Send this leave request?", cancel_leave: "Withdraw this request?", decide_leave: "Save this decision?",
+    apply_leave: "Send this leave request?",
+    cancel_leave: many ? `Withdraw these ${items.length} requests?` : "Withdraw this request?",
+    decide_leave: many ? `Save these ${items.length} decisions?` : "Save this decision?",
     create_hr_ticket: "Send this to HR?", reply_to_ticket: "Send this reply and close the ticket?",
   };
   return (
     <div className="rounded-lg border border-dossier/40 bg-dossier-tint/60 p-3">
       <p className="font-medium">{title[card.tool] ?? "Confirm this action?"}</p>
-      <dl className="mt-2 grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-sm">
-        {rows.map(([k, v]) => (<Fragment key={k}><dt className="text-ink-soft">{k}</dt><dd>{v}</dd></Fragment>))}
-      </dl>
+      {listed ? (
+        <ul className="mt-2 space-y-1.5 text-sm">
+          {items.map((it, n) => <li key={n} className="break-words">{itemLine(card.tool, it)}</li>)}
+        </ul>
+      ) : (
+        <dl className="mt-2 grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-sm">
+          {rows.map(([k, v]) => (<Fragment key={k}><dt className="text-ink-soft">{k}</dt><dd>{v}</dd></Fragment>))}
+        </dl>
+      )}
       <div className="mt-3 flex gap-2">
         <button className="btn-primary h-8" disabled={busy} onClick={() => onDecide(true)}>Confirm</button>
         <button className="btn-quiet h-8" disabled={busy} onClick={() => onDecide(false)}>Cancel</button>
       </div>
     </div>
   );
+}
+
+// one item of a card: its date with the weekday (built by the server: "Fri 20 Nov 2026"), the kind of leave and the days
+function itemLine(tool: string, { input, details: d }: Item): ReactNode {
+  if (!d.when) return `Request #${input.request_id}`;
+  const what = (<><span className="font-medium">{d.when}</span><span className="text-ink-soft"> · {leaveLabel(d.leave_type)} · {d.days} {d.days === 1 ? "day" : "days"}</span></>);
+  if (tool === "cancel_leave") return what;
+  return (<>{d.employee_name}: {what}<br /><span className="text-ink-soft">{input.decision === "approve" ? "Approve" : `Reject: ${input.reason}`}</span></>);
 }
 
 // light formatting: paragraphs, bullet lists, **bold**, and law articles shown as references
