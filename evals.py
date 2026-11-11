@@ -34,7 +34,7 @@ import welcome
 from tracing import observe, propagate_attributes
 from demo_data import sample_contract, SAMPLE_AGREEMENT, SAMPLE_AGREEMENT_NAME
 from eval_retry import run_with_retry, retry_report
-from tools import apply_leave, decide_leave, create_hr_ticket, count_working_days, count_ouvrable_days, days_for, holidays_of
+from tools import apply_leave, cancel_leave, decide_leave, create_hr_ticket, count_working_days, count_ouvrable_days, days_for, holidays_of, when_label
 
 # tests use their own database, never the real hr.db
 db.DB_PATH = "test_hr.db"
@@ -373,6 +373,35 @@ def setup_two_pending_for_lucas():
     agent.pending_action.clear()
     for d in future_weekdays(2):
         apply_leave("E001", "casual", iso(d), iso(d))
+
+
+def setup_emma_asks_again_for_a_day_approved_before():
+    # the real bug (11 Nov), rebuilt from the live database and chat: the manager approved Emma's request for a day ("Done." is in the chat); it was
+    # cancelled afterwards and Emma asked again for the SAME day. Emma has another request, approved in a second exchange; Hugo and Clara wait too.
+    # The assistant answered "already approved" from the chat, not from the tool.
+    agent.pending_action.clear()
+    again, other, hugo_day, clara_day = future_weekdays(4)
+    apply_leave("E002", "casual", iso(hugo_day), iso(hugo_day))        # Hugo's and Clara's are the oldest requests, so the tool lists them first, as in the live data
+    apply_leave("E003", "sick", iso(clara_day), iso(clara_day))
+    old = apply_leave("E001", "casual", iso(again), iso(again))["request"]["id"]
+    decide_leave("M001", old, "approve")
+    cancel_leave("E001", old)
+    decide_leave("M001", apply_leave("E001", "casual", iso(other), iso(other))["request"]["id"], "approve")
+    apply_leave("E001", "casual", iso(again), iso(again))
+    for role, text in [
+            ("user", "emma"),
+            ("assistant", f"Emma's approval is ready to confirm in the app: {when_label(again)}, casual, 1 day. Press Confirm when you're ready."),
+            ("user", "[In the app, I confirmed the decide_leave card.]"),
+            ("assistant", "Done."),
+            ("user", "any pending request"),
+            ("assistant", f"Three pending requests:\n\n- **Hugo** ({say_no_year(hugo_day)}): 1 casual day, balance 2 \u2192 1 after\n"
+                          f"- **Clara** ({say_no_year(clara_day)}): 1 sick day, balance 1 \u2192 0 after\n"
+                          f"- **Emma** ({say_no_year(other)}): 1 casual day, balance 8 \u2192 7 after"),
+            ("user", "approve only emma's leave request"),
+            ("assistant", f"Emma's approval ({say_no_year(other)}, 1 casual day) is ready\u2014press Confirm in the app."),
+            ("user", "[In the app, I confirmed the decide_leave card.]"),
+            ("assistant", "Done.")]:
+        memory.save_message("M001", role, text)
 
 
 CARDS = r"(?i)\b(cards|screens)\b"        # the app shows ONE card, however many items it lists
@@ -1504,6 +1533,33 @@ TEST_CASES = [
         "note_must_match": r"^Done: all 2 approvals\.",
         "reply_must_not_match": CARDS,
         "check": lambda: statuses() == ["approved"] * 2,
+    },
+    {
+        # real, 11 Nov: "approve emma's leave request" -> "Emma's leave request (23 Nov, casual) is already approved. The three pending requests now are
+        # Hugo, Clara, and Emma's new one for 23 Nov", from a chat saying "Done." for an earlier request on that day (since cancelled). 7 of 10 on main.
+        "name": "approve: the request pending now gets the card, even when the chat says an earlier request for the same day was approved",
+        "user": "M001",
+        "auto_confirm": agent.AWAITING_CONFIRMATION,
+        "setup": setup_emma_asks_again_for_a_day_approved_before,
+        "input": "approve emma's leave request",
+        "must_call": ["get_pending_requests", "decide_leave"],
+        "expected_card_items": 1,
+        "then_confirm": True,
+        "reply_must_not_match": r"(?i)already (?:been )?(?:approved|decided|processed)",
+        "check": lambda: statuses() == ["pending_manager_approval", "pending_manager_approval", "cancelled", "approved", "approved"],
+    },
+    {
+        # same chat and data, asked what is pending: "Two pending requests" (Hugo, Clara) and Emma's new request left out, 8 of 8 on main, or Emma called
+        # "already approved". Every request the tool returned is listed.
+        "name": "approve: asked what is pending, every request waiting is listed, even one for a day approved before",
+        "user": "M001",
+        "auto_confirm": agent.AWAITING_CONFIRMATION,
+        "setup": setup_emma_asks_again_for_a_day_approved_before,
+        "input": "any pending request",
+        "must_call": ["get_pending_requests"],
+        "reply_must_match": r"(?is)^(?=.*emma)(?=.*hugo)(?=.*clara)",
+        "reply_must_not_match": r"(?i)\b(?:two|2) pending|(?:already|has been|is) approved",
+        "check": lambda: not agent.pending_action,
     },
     {
         "name": "card: a request that would fail is left off the card, and the reply says why",
