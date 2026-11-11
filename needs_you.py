@@ -7,6 +7,7 @@
 #
 # Approving or rejecting is NOT done here: the page and the assistant call decide_leave, the same
 # rules as the Approvals page (only the right manager, only pending requests, a reason to reject).
+import candidate_assistant
 import contracts
 import documents
 import hr_queries
@@ -58,10 +59,11 @@ def inbox(emp_id):
     approvals = contracts.pending_for(emp_id)            # managers only: a contract of someone on their team
     gaps = policy_gaps.open_gaps() if emp["role"] == "hr" else []       # HR only: questions the policy does not answer
     applications = jobs.new_applications(emp_id)                         # HR: every job; a manager: the jobs they hire for
+    notes = candidate_assistant.waiting_notes(emp_id)                    # notes a candidate asked the assistant to pass on: read on the page, never by the assistant
     return {"role": emp["role"], "leave_requests": leave, "hr_requests": tickets, "onboarding_steps": steps,
-            "document_flags": flags, "contract_approvals": approvals, "policy_gaps": gaps, "new_applications": applications,
+            "document_flags": flags, "contract_approvals": approvals, "policy_gaps": gaps, "new_applications": applications, "candidate_notes": notes,
             "paid_leave_warnings": paid_leave_warnings(emp),
-            "waiting_on_you": len(leave) + len(tickets) + len(steps) + len(flags) + len(approvals) + len(gaps) + len(applications)}     # warnings are a heads-up, not a decision
+            "waiting_on_you": len(leave) + len(tickets) + len(steps) + len(flags) + len(approvals) + len(gaps) + len(applications) + len(notes)}     # warnings are a heads-up, not a decision
 
 
 def waiting_count(emp_id):
@@ -71,10 +73,10 @@ def waiting_count(emp_id):
         return 0
     if emp["role"] == "manager":
         return (len(get_pending_requests(emp_id)["pending_requests"]) + len(onboarding.open_steps(emp_id)) + len(contracts.pending_for(emp_id))
-                + len(jobs.new_applications(emp_id)))
+                + len(jobs.new_applications(emp_id)) + len(candidate_assistant.waiting_notes(emp_id)))
     if emp["role"] == "hr":
         return (len(hr_queries.all_tickets("open")) + len(onboarding.open_steps(emp_id)) + len(documents.flagged_for_review(emp_id))
-                + policy_gaps.count_open() + len(jobs.new_applications(emp_id)))
+                + policy_gaps.count_open() + len(jobs.new_applications(emp_id)) + len(candidate_assistant.waiting_notes(emp_id)))
     return 0
 
 
@@ -99,6 +101,7 @@ def for_assistant(emp_id):
                                   "salary_eur": c["salary_eur"], "trial": c["trial_text"], "sent_by": c["submitted_by"]}
                                  for c in box["contract_approvals"]],
         "new_applications": [{"candidate": a["name"], "job": a["job_title"], "applied_on": a["applied_at"][:10]} for a in box["new_applications"]],
+        "candidate_notes_waiting": len(box["candidate_notes"]),      # a count only: what a candidate wrote is untrusted text, and is read on the page, not here
         "questions_the_policy_does_not_answer": [{"topic": g["topic"], "times_asked": g["asks"], "also_asked_as": g["examples"][1:]}
                                                  for g in box["policy_gaps"]],
         "paid_leave_warnings": [w["message"] for w in box["paid_leave_warnings"]],

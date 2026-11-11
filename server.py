@@ -16,6 +16,7 @@ from pydantic import BaseModel
 from starlette.concurrency import run_in_threadpool
 from starlette.middleware.sessions import SessionMiddleware
 
+import candidate_assistant
 import careers
 import checkins
 import contracts
@@ -954,6 +955,16 @@ def recruitment_cv(application_id: int, request: Request):
                         headers={"X-Content-Type-Options": "nosniff", "Content-Security-Policy": "sandbox"})
 
 
+@app.get("/api/recruitment/candidates/{application_id}/notes")
+def recruitment_notes(application_id: int, request: Request):
+    return recruitment_result(candidate_assistant.notes(recruiter(request)["id"], application_id))          # what the candidate asked the assistant to pass on
+
+
+@app.post("/api/recruitment/notes/{note_id}/handled")
+def recruitment_note_handled(note_id: int, request: Request):
+    return recruitment_result(candidate_assistant.handle_note(recruiter(request)["id"], note_id))
+
+
 @app.post("/api/recruitment/candidates/{application_id}/tracking-link")
 def recruitment_new_link(application_id: int, request: Request):
     result = recruitment_result(careers.new_tracking_token(need(request, "hr")["id"], application_id))
@@ -1032,6 +1043,30 @@ async def careers_apply(job_id: int, request: Request):
 @app.get("/api/careers/track/{token}")
 def careers_tracking(token: str):
     return careers_result(careers.tracking(token))
+
+
+ASK_BY_LINK = careers.Throttle(20, 600)                # the assistant calls a paid model: 20 messages per 10 minutes for one link, 60 an hour for one address
+ASK_BY_ADDRESS = careers.Throttle(60, 3600)
+
+
+@app.get("/api/careers/track/{token}/assistant")
+def careers_assistant_history(token: str):
+    return careers_result(candidate_assistant.conversation(token))
+
+
+@app.post("/api/careers/track/{token}/assistant")
+def careers_assistant_ask(token: str, body: AskIn, request: Request):
+    address = (request.headers.get("x-forwarded-for") or (request.client.host if request.client else "?")).split(",")[0].strip()
+    if not ASK_BY_ADDRESS.allow(address) or not ASK_BY_LINK.allow(token):
+        raise HTTPException(429, "That is a lot of messages in a short time. Please wait a little and try again.")
+    import agent                                         # the assistant's model call (candidate_assistant.py holds every rule; agent.py only calls the model)
+    try:
+        result = careers_result(agent.candidate_answer(token, body.message))
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(503, f"The assistant isn't available right now ({type(e).__name__}).")
+    return {"reply": result["reply"], "noted": result["noted"]}
 
 
 @app.post("/api/careers/track/{token}/withdraw")

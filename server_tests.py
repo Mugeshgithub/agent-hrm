@@ -13,6 +13,7 @@ db.DB_PATH = os.environ["HRM_DB"]
 
 from fastapi.testclient import TestClient
 import base64
+import candidate_assistant
 import demo_data
 import documents
 import employee_files
@@ -1089,6 +1090,78 @@ def only_hr_changes_the_retention_runs_it_and_gives_a_new_link_and_it_never_goes
     assert lucas.post(f"/api/recruitment/candidates/{cid}/tracking-link").status_code == 403
     new = hr.post(f"/api/recruitment/candidates/{cid}/tracking-link").json()["link"].rsplit("/", 1)[1]
     assert public.get(f"/api/careers/track/{token}").status_code == 404 and public.get(f"/api/careers/track/{new}").status_code == 200
+
+
+# ---------- the assistant on a candidate's tracking page ----------
+
+def with_a_stand_in_agent(run):
+    """The web job installs no Anthropic package, so the assistant's model call is replaced by one that fails if it is ever reached: these are the
+    endpoints' rules (who may read, the limits, the fixed answers), not the model's answers (the evals cover those)."""
+    def no_model(system, messages, tools):
+        raise AssertionError("the model must not be called here")
+    saved = sys.modules.get("agent")
+    sys.modules["agent"] = type(sys)("agent")
+    sys.modules["agent"].candidate_answer = lambda token, text: candidate_assistant.answer(token, text, no_model)
+    try:
+        run()
+    finally:
+        if saved is None:
+            del sys.modules["agent"]
+        else:
+            sys.modules["agent"] = saved
+
+
+@test
+def a_candidate_talks_to_the_assistant_with_their_private_link_and_nobody_else_can_read_what_they_asked_it_to_pass_on():
+    def run():
+        fresh_throttles()
+        server.ASK_BY_LINK.seen.clear()
+        server.ASK_BY_ADDRESS.seen.clear()
+        hr, lucas, public = as_person("H001"), as_person("M001"), TestClient(server.app)
+        job = an_open_careers_job(hr, "Chat Job")
+        token = public.post(f"/api/careers/jobs/{job}/apply", json=apply_form()).json()["link"].rsplit("/", 1)[1]
+        seen = public.get(f"/api/careers/track/{token}/assistant").json()
+        assert seen["messages"] == [] and seen["assistant"]["available"] is True and "AI assistant, not a person" in seen["assistant"]["intro"]
+        asked = public.post(f"/api/careers/track/{token}/assistant", json={"message": "Am I talking to a person?"})
+        assert asked.status_code == 200 and "AI assistant, not a person" in asked.json()["reply"] and asked.json()["noted"] is False
+        assert [m["role"] for m in public.get(f"/api/careers/track/{token}/assistant").json()["messages"]] == ["user", "assistant"]
+        assert public.post(f"/api/careers/track/{token}/assistant", json={"message": "  "}).json()["detail"] == "Type a question first."
+        assert "under 1000" in public.post(f"/api/careers/track/{token}/assistant", json={"message": "x" * 1001}).json()["detail"]
+        assert public.get("/api/careers/track/nope/assistant").status_code == 404 and public.post("/api/careers/track/nope/assistant", json={"message": "hi"}).status_code == 404
+        cid = lucas.get(f"/api/recruitment/jobs/{job}").json()["candidates"][0]["id"]
+        candidate_assistant.add_note(cid, "Could the interview be after 5pm?")
+        notes = lucas.get(f"/api/recruitment/candidates/{cid}/notes").json()                                       # the hiring manager of the job reads it
+        assert [n["text"] for n in notes] == ["Could the interview be after 5pm?"] and notes[0]["handled_at"] is None
+        assert lucas.get("/api/needs-you").json()["candidate_notes"][0]["text"] == "Could the interview be after 5pm?"
+        assert hr.get(f"/api/recruitment/jobs/{job}").json()["candidates"][0]["notes_open"] == 1
+        assert as_person("E001").get(f"/api/recruitment/candidates/{cid}/notes").status_code == 403 and as_person("C001").get(f"/api/recruitment/candidates/{cid}/notes").status_code == 404
+        assert public.get(f"/api/recruitment/candidates/{cid}/notes").status_code == 401                              # a candidate has no session: not even their own notes
+        assert as_person("E001").post(f"/api/recruitment/notes/{notes[0]['id']}/handled").status_code == 403
+        assert lucas.post(f"/api/recruitment/notes/{notes[0]['id']}/handled").json() == {"handled": True}
+        assert lucas.get("/api/needs-you").json()["candidate_notes"] == [] and lucas.post("/api/recruitment/notes/99999/handled").status_code == 404
+        server_db = db.get_conn()
+        with server_db:
+            server_db.execute("UPDATE applications SET notice_version = '2026-11'")                                  # applied before the notice said what the AI does
+        server_db.close()
+        old = public.post(f"/api/careers/track/{token}/assistant", json={"message": "Is it remote?"})
+        assert old.status_code == 400 and "only available" in old.json()["detail"]
+        assert public.get(f"/api/careers/track/{token}/assistant").json()["assistant"]["available"] is False
+    with_a_stand_in_agent(run)
+
+
+@test
+def the_assistant_is_rate_limited_per_link_and_per_address():
+    def run():
+        fresh_throttles()
+        server.ASK_BY_LINK.seen.clear()
+        server.ASK_BY_ADDRESS.seen.clear()
+        hr, public = as_person("H001"), TestClient(server.app)
+        job = an_open_careers_job(hr, "Busy Job")
+        token = public.post(f"/api/careers/jobs/{job}/apply", json=apply_form()).json()["link"].rsplit("/", 1)[1]
+        codes = [public.post(f"/api/careers/track/{token}/assistant", json={"message": "are you a bot"}).status_code for _ in range(22)]
+        assert codes[:20] == [200] * 20 and codes[20:] == [429, 429]
+        assert "a lot of messages" in public.post(f"/api/careers/track/{token}/assistant", json={"message": "hi"}).json()["detail"]
+    with_a_stand_in_agent(run)
 
 
 if __name__ == "__main__":

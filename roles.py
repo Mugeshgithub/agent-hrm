@@ -16,8 +16,14 @@ EVERYONE = {
 NEW_HIRE = "new_hire"
 NEW_HIRE_TOOLS = {"get_my_onboarding"}
 
+# a candidate (signed in with nothing but the private tracking link on their application, so not an employee) can read the job they applied
+# for and their own stage, read the privacy notice, and leave a note for HR. Nothing about employees, other candidates, leave, pay or policy.
+CANDIDATE = "candidate"
+CANDIDATE_TOOLS = {"get_my_application", "get_privacy_notice", "note_for_hr"}
+
 ROLE_TOOLS = {
     NEW_HIRE: NEW_HIRE_TOOLS,
+    CANDIDATE: CANDIDATE_TOOLS,
     "employee": EVERYONE,
     "manager":  EVERYONE | {"get_pending_requests", "get_team_member_balance", "decide_leave", "get_needs_attention", "get_job_pipeline"},
     "hr":       EVERYONE | {"get_open_tickets", "reply_to_ticket", "get_needs_attention", "get_contract_status", "get_job_pipeline"},

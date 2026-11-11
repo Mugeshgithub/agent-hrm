@@ -8,7 +8,7 @@ import { useState } from "react";
 import { mutate } from "swr";
 import { api, fetcher } from "@/lib/api";
 import { day, relative, timestamp } from "@/lib/format";
-import { ContractApproval, DismissedGap, DocumentFlag, NeedsYou, PolicyGap, WaitingStep } from "@/lib/types";
+import { ContractApproval, DismissedGap, DocumentFlag, NeedsYou, PolicyGap, WaitingCandidateNote, WaitingStep } from "@/lib/types";
 import { PreviewText } from "@/components/ContractPanel";
 import { TextDialog } from "@/components/TextDialog";
 import { Avatar } from "@/components/Shell";
@@ -83,6 +83,14 @@ export default function NeedsYouPage() {
               </li>
             ))}
           </ul>
+        </section>
+      )}
+
+      {!!data?.candidate_notes?.length && (
+        <section aria-labelledby="candidate-notes" className="mb-6">
+          <h2 id="candidate-notes" className="mb-1 font-medium">Notes from candidates <span className="text-ink-soft font-normal">({data.candidate_notes.length})</span></h2>
+          <p className="mb-3 text-sm text-ink-soft">Each was written by the AI assistant at a candidate's request, from what they said. Read it, answer the candidate yourself if needed, then mark it handled. The assistant never acts on a note.</p>
+          <ul className="panel divide-y divide-rule">{data.candidate_notes.map((n) => <CandidateNoteRow key={n.note_id} n={n} />)}</ul>
         </section>
       )}
 
@@ -222,6 +230,33 @@ function PolicyGapRow({ g }: { g: PolicyGap }) {
 }
 
 // one onboarding step that waits on this person; the rules (who may mark it done) are in onboarding.py
+function CandidateNoteRow({ n }: { n: WaitingCandidateNote }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  async function handled() {
+    setBusy(true);
+    setError("");
+    try { await api(`/recruitment/notes/${n.note_id}/handled`, { body: {} }); mutate(() => true); }
+    catch (e) { setError((e as Error).message); setBusy(false); }
+  }
+  return (
+    <li className="flex flex-col gap-3 px-5 py-4 sm:flex-row sm:items-start sm:justify-between sm:gap-4">
+      <div className="flex min-w-0 items-start gap-3">
+        <Avatar name={n.name} size={32} />
+        <div className="min-w-0">
+          <p className="font-medium">{n.name} <span className="font-normal text-ink-soft">, {n.job_title}, {timestamp(n.created_at)}</span></p>
+          <p className="mt-0.5 whitespace-pre-line text-sm">{n.text}</p>
+          {error && <p role="alert" className="mt-1 text-sm text-no">{error}</p>}
+        </div>
+      </div>
+      <div className="flex shrink-0 gap-2">
+        <Link href={`/recruitment/${n.job_id}`} className="btn-ghost">Open</Link>
+        <button className="btn-primary" disabled={busy} onClick={handled}>Mark handled</button>
+      </div>
+    </li>
+  );
+}
+
 function OnboardingStepRow({ s, isHR }: { s: WaitingStep; isHR: boolean }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");

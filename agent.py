@@ -18,6 +18,7 @@ from notifications import init_notifications, notify_decision, notify_ticket_rep
 from policy import search_policy, embed as embed_texts
 import approval_first
 import booking_first
+import candidate_assistant
 import existing_first
 import collective_agreement
 import confirm_batch
@@ -788,6 +789,26 @@ def fixed_reply(reply, messages, user_text):
     save_message(LOGGED_IN_ID, "assistant", reply)
     print(f"\nAgent: {reply}")
     return reply
+
+
+def candidate_model(system, messages, tools):
+    """One model call for the candidate assistant (candidate_assistant.py): its own prompt, its own three tools, nothing of the employee agent."""
+    response = client.messages.create(
+        model=MODEL,
+        max_tokens=700,
+        system=[{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}],
+        tools=tools,
+        messages=with_cache_marker(messages),
+    )
+    record_usage(response)
+    return response
+
+
+@observe(name="candidate-assistant-turn")   # one trace per message from a candidate; the user id is the application, never the name
+def candidate_answer(token, text):
+    who = f"application-{candidate_assistant.application_id(token)}"
+    with propagate_attributes(user_id=who, session_id=who, tags=["candidate", *EXTRA_TAGS], metadata={"model": MODEL}):
+        return candidate_assistant.answer(token, text, candidate_model)
 
 
 @observe(name="hr-agent-turn")   # one trace per user question, with every Claude call and tool inside

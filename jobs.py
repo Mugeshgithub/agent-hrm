@@ -120,6 +120,25 @@ def init_jobs():
                 updated_by TEXT,
                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             )""")
+        # the candidate assistant (candidate_assistant.py): what a candidate and the assistant said, and the notes they asked it to pass to HR.
+        # Both belong to the application: erasing the candidate deletes them (careers.erase).
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS candidate_messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                application_id INTEGER NOT NULL REFERENCES applications(id),
+                role TEXT NOT NULL,
+                content TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )""")
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS candidate_notes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                application_id INTEGER NOT NULL REFERENCES applications(id),
+                text TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                handled_by TEXT,
+                handled_at TEXT
+            )""")
         conn.execute("""
             CREATE TABLE IF NOT EXISTS application_events (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -406,8 +425,10 @@ def pipeline(actor_id, job_id):
         return {"error": NOT_FOUND}
     rows = _rows("SELECT * FROM applications WHERE job_id = ? AND erased_at IS NULL ORDER BY applied_at, id", (job_id,))
     months = retention_months()
+    notes = {r["application_id"]: r["n"] for r in _rows(
+        "SELECT application_id, COUNT(*) AS n FROM candidate_notes WHERE handled_at IS NULL GROUP BY application_id")}       # notes from the candidate waiting for a person
     return {"job": _present(job, actor, _counts(job_id)), "stages": [{"key": s, "label": LABELS[s]} for s in STAGES],
-            "candidates": [_candidate(r, True, job, months) for r in rows],
+            "candidates": [{**_candidate(r, True, job, months), "notes_open": notes.get(r["id"], 0)} for r in rows],
             "events": _rows("""SELECT e.event, e.detail, e.created_at, p.name AS actor_name FROM job_events e
                                LEFT JOIN employees p ON p.id = e.actor_id WHERE e.job_id = ? ORDER BY e.id DESC LIMIT 30""", (job_id,))}
 
