@@ -6,6 +6,7 @@ from datetime import date, timedelta
 import db
 db.DB_PATH = "unit_test_hr.db"   # its own database, never the real hr.db
 
+import approval_first
 import booking_first
 import collective_agreement
 import confirm_batch
@@ -1433,6 +1434,80 @@ def the_reply_never_talks_about_several_cards_while_the_app_shows_one():
     for reply in ["A confirmation card lists all three. Please review it and press Confirm once.", "I'll cancel those three.", "", None]:
         assert cb.nudge(card, reply) is None, reply
     assert cb.nudge({}, "Here are your cards") is None                                                             # no card, nothing to correct
+
+
+@test
+def a_manager_asked_to_approve_or_reject_is_shown_the_request_pending_now_never_the_chat():
+    def nudge(role, q, called, sources, reply="Emma's leave request is already approved."):
+        return approval_first.nudge(role, q, reply, called, sources)
+    hugo = {"request_id": 3, "employee_name": "Hugo", "leave_type": "casual", "start": "2026-11-16", "end": "2026-11-16", "days": 1}
+    emma = {"request_id": 409, "employee_name": "Emma", "leave_type": "casual", "start": "2026-11-23", "end": "2026-11-23", "days": 1}
+    pending = [json.dumps({"pending_requests": [hugo, emma]})]
+    for q, verb in [("approve emma's leave request", "approve"), ("Approve only Emma's leave request", "approve"), ("please approve emma", "approve"),
+                    ("Can you approve Hugo's request?", "approve"), ("yes, approve it", "approve"), ("reject emma's request", "reject"),
+                    ("I want to decline Hugo's leave", "reject"), ("approuve la demande d'Emma", "approve"), ("refuse la demande de Hugo", "reject")]:
+        assert approval_first.asked_to_decide(q) == verb, q
+    for q in ["Which requests can I approve?", "what happens if I approve it", "How do I reject a request", "any pending request", "emma", "approved?", "", None]:
+        assert approval_first.asked_to_decide(q) is None, q
+    fix = nudge("manager", "approve emma's leave request", ["get_pending_requests"], pending)                       # the real bug: "already approved" from the chat
+    assert fix and "request 409" in fix and "Emma" in fix and "Mon 23 Nov 2026" in fix and "never say it is already approved" in fix and '"approve"' in fix, fix
+    assert "request 3" in nudge("manager", "approve hugo's request", ["get_pending_requests"], pending)
+    assert "request 409" in nudge("manager", "approve emma's leave request", ["get_pending_requests"], [json.dumps({"pending_requests": [{**emma, "request_id": 407}]}), *pending])   # the latest list wins
+    fix = nudge("manager", "reject emma's request", ["get_pending_requests"], pending)
+    assert fix and "request 409" in fix and "reason" in fix and '"reject"' in fix
+    assert nudge("manager", "approve emma's leave request", ["get_pending_requests", "decide_leave"], pending) is None   # it did decide: the card is up
+    assert nudge("employee", "approve emma's leave request", ["get_pending_requests"], pending) is None                # only a manager can decide
+    assert nudge("hr", "approve emma's leave request", ["get_pending_requests"], pending) is None
+    assert nudge("manager", "approve emma's leave request", [], []) == approval_first.LOOK_FIRST                       # answered without looking at what is waiting
+    assert nudge("manager", "approve emma's leave request", ["get_pending_requests"], ["not json", "[1, 2]"]) == approval_first.LOOK_FIRST
+    assert "get_pending_requests" in approval_first.LOOK_FIRST and "already approved" in approval_first.LOOK_FIRST
+    assert nudge("manager", "approve the request", ["get_pending_requests"], pending) is None                           # nobody named: asking which one is fine
+    assert nudge("manager", "approve clara's request", ["get_pending_requests"], pending) is None                       # nothing pending for her: the reply says so
+    assert nudge("manager", "approve emma's request", ["get_pending_requests"], [json.dumps({"pending_requests": [emma, {**emma, "request_id": 410}]})]) is None   # two waiting: which one?
+    assert nudge("manager", "which requests can I approve?", [], []) is None and nudge("manager", "hello", [], []) is None
+    assert approval_first.names("approve helene's request", "Hélène Dupont") and not approval_first.names("approve emmanuel", "Emma")
+
+
+@test
+def a_manager_asked_what_is_pending_is_told_about_every_request_the_tool_returned():
+    def nudge(reply, q="any pending request", called=("get_pending_requests",), sources=None):
+        return approval_first.nudge("manager", q, reply, list(called), sources)
+    hugo = {"request_id": 3, "employee_name": "Hugo", "leave_type": "casual", "start": "2026-11-16", "end": "2026-11-16", "days": 1}
+    clara = {"request_id": 4, "employee_name": "Clara", "leave_type": "sick", "start": "2026-11-12", "end": "2026-11-12", "days": 1}
+    emma = {"request_id": 409, "employee_name": "Emma", "leave_type": "casual", "start": "2026-11-23", "end": "2026-11-23", "days": 1}
+    three = [json.dumps({"pending_requests": [hugo, clara, emma]})]
+    for reply in ["Two pending requests:\n\n- **Hugo** (16 Nov): 1 casual day\n- **Clara** (12 Nov): 1 sick day",                  # the real bug, 8 of 8: the new one left out
+                  "The three pending requests now are Hugo's and Clara's.", "Emma's request is already approved. The pending requests now are Hugo (16 Nov) and Clara (12 Nov).",
+                  "There are no other pending requests.", "No pending requests right now.", "Hugo and Clara each have one request waiting: 2 requests.",
+                  "Il y a deux demandes en attente : Hugo et Clara."]:
+        fix = nudge(reply, sources=three)
+        assert fix and "3 requests" in fix and "Emma, request 409, casual leave, Mon 23 Nov 2026" in fix and "does not present" in fix, reply
+        assert "Hugo, request 3" in fix and "Clara, request 4, sick leave, Thu 12 Nov 2026" in fix
+    assert "present Emma as waiting" in nudge("Two pending requests: Hugo and Clara.", sources=three)
+    assert "present Hugo, Clara as waiting" in nudge("One pending request: Emma, 23 Nov.", sources=three)
+    for reply in ["Three pending requests:\n- Hugo (16 Nov)\n- Clara (12 Nov)\n- Emma (23 Nov)", "You have 3 pending requests from Hugo, Clara and Emma.",
+                  "Hugo's, Clara's and Emma's requests are waiting for you."]:
+        assert nudge(reply, sources=three) is None, reply                                                              # complete: left alone
+    assert nudge("Two pending requests: Hugo and Clara.", "does hugo have a pending request?", sources=three) is None       # a question about one person
+    assert nudge("Hugo has one pending request (16 Nov).", "what about Hugo?", sources=three) is None
+    assert nudge("Emma's approval is ready to confirm in the app.", "what is Emma waiting for", sources=three) is None
+    assert nudge("Two pending requests: Hugo and Clara.", called=(), sources=three) is not None                          # the list is the tool's, however it got into the turn
+    assert nudge("Two pending requests: Hugo and Clara.", sources=[]) is None and nudge("Two pending requests.", sources=["not json"]) is None   # no list this turn: nothing to compare
+    assert nudge("Two pending requests: Hugo and Clara.", sources=[json.dumps({"pending_requests": []})]) is None      # nothing waiting
+    assert nudge("Your balance is 7 days.", "how many casual days do i have", sources=three) is None                     # not a list, not about the requests
+    assert nudge("Two pending requests: Hugo and Clara.", called=("get_pending_requests", "decide_leave"), sources=three) is None
+    assert approval_first.nudge("employee", "any pending request", "Two pending requests: Hugo.", ["get_pending_requests"], three) is None   # only a manager gets this list
+    one = [json.dumps({"pending_requests": [emma]})]
+    assert "1 request " in nudge("No pending requests right now.", sources=one) and "present Emma as waiting" in nudge("No pending requests right now.", sources=one)
+    assert nudge("Three pending requests: Hugo, Clara, and Emma's, which is already approved.", sources=three) is not None   # named, but called decided
+    for reply in ["Two pending requests remain:\n\n- **Hugo** (16 Nov): 1 casual day\n- **Clara** (12 Nov): 1 sick day\n\nEmma's leave (23 Nov) has been approved.",   # 5 of 6, with the confirmation lines out of the chat
+                  "Two pending requests remain: Hugo and Clara. Emma's request is approved.", "Emma's leave request (23 Nov, casual) is already approved. The pending requests now are Hugo and Clara."]:
+        assert nudge(reply, sources=three), reply
+    for reply in ["Three pending requests:\n- Hugo (16 Nov)\n- Clara (12 Nov)\n- Emma (23 Nov): not yet approved",
+                  "Three pending requests: Hugo, Clara and Emma. Emma's 23 Nov leave is waiting to be approved.",
+                  "Three pending requests: Hugo, Clara and Emma, which will be approved once you confirm."]:
+        assert nudge(reply, sources=three) is None, reply
+    assert nudge("Three pending requests: Hugo, Clara and Emma. Emma's earlier request was approved yesterday.", sources=three) is None      # an earlier one, said as such
 
 
 if __name__ == "__main__":

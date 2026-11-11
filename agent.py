@@ -16,6 +16,7 @@ from db import init_db
 from memory import init_memory, init_summaries, save_message, build_context
 from notifications import init_notifications, notify_decision, notify_ticket_reply, show_unread
 from policy import search_policy, embed as embed_texts
+import approval_first
 import booking_first
 import collective_agreement
 import confirm_batch
@@ -810,6 +811,7 @@ def answer_turn(user_text):
         search_retry_used = False
         contract_retry_used = False
         booking_retry_used = False
+        decision_retry_used = False
         card_retry_used = False
         number_retry_used = False
         last_turn["tools_called"] = []
@@ -867,6 +869,15 @@ def answer_turn(user_text):
                     messages.append({"role": "user", "content": fix})
                     continue
 
+                # guardrail in code: a manager is told which requests are pending NOW, from this turn's get_pending_requests, never from the chat: asked to
+                # approve or reject one, it goes on the card (never "already approved"); asked what is pending, every request the tool returned is listed
+                # (approval_first.py). One retry.
+                if not decision_retry_used and (fix := approval_first.nudge(role, user_text, reply, last_turn["tools_called"], turn_sources)):
+                    decision_retry_used = True
+                    print("  [guard] the reply does not match the requests pending now (asked to decide one, or left one out of the list): asking again")
+                    messages.append({"role": "user", "content": fix})
+                    continue
+
                 # guardrail in code: the app shows ONE card, however many items it lists: the reply never talks about several cards (confirm_batch.py). One retry.
                 if not card_retry_used and (fix := confirm_batch.nudge(pending_action, reply)):
                     card_retry_used = True
@@ -913,7 +924,7 @@ def answer_turn(user_text):
                 if action == "replaced":
                     print("  [guard] still not from a tool: replacing it with the tools' figures")
                     reply = shown
-                if document_retry_used or agreement_retry_used or search_retry_used or contract_retry_used or booking_retry_used or card_retry_used or number_retry_used:       # a retry note was sent: the reply must not talk about it
+                if document_retry_used or agreement_retry_used or search_retry_used or contract_retry_used or booking_retry_used or decision_retry_used or card_retry_used or number_retry_used:       # a retry note was sent: the reply must not talk about it
                     reply = document_answers.strip_correction(reply)
 
                 # the policy does not answer it: keep the question, without a name, for HR (policy_gaps.py)
