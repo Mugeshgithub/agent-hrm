@@ -404,6 +404,30 @@ def setup_emma_asks_again_for_a_day_approved_before():
         memory.save_message("M001", role, text)
 
 
+def setup_emma_day_taken(asked_the_date):
+    # the real bug (11 Nov), rebuilt from the live database and chat: Emma's request for a day was cancelled twice and then APPROVED; the old chat says
+    # "Done." for a card of that day. She starts a new chat message "request time off please" and then gives the same day. The assistant asked which kind of
+    # leave before looking at anything, then said "You already have a pending casual leave request" (it is approved) without calling a tool.
+    agent.pending_action.clear()
+    taken = future_weekdays(1)[0]
+    for _ in range(2):
+        cancel_leave("E001", apply_leave("E001", "casual", iso(taken), iso(taken))["request"]["id"])
+    decide_leave("M001", apply_leave("E001", "casual", iso(taken), iso(taken))["request"]["id"], "approve")
+    for role, text in [
+            ("user", f"book casual leave on {say_no_year(taken)}"),
+            ("assistant", f"A confirmation card is now in your app for {say_no_year(taken)} (casual, 1 day). Review it and press Confirm."),
+            ("user", "[In the app, I confirmed the apply_leave card.]"),
+            ("assistant", "Done."),
+            ("user", "request time off please"),
+            ("assistant", "I'd be happy to help you request time off. Could you tell me:\n\n1. What date(s) do you want to take off?\n"
+                          "2. What type of leave: casual, sick, or paid?")]:
+        memory.save_message("E001", role, text)
+    if asked_the_date:
+        memory.save_message("E001", "user", f"{taken.day} {taken:%b}".lower())
+        memory.save_message("E001", "assistant", f"I need to know which type of leave you'd like for {say_no_year(taken)}: casual, sick, or paid?")
+    return taken
+
+
 CARDS = r"(?i)\b(cards|screens)\b"        # the app shows ONE card, however many items it lists
 
 
@@ -1559,6 +1583,34 @@ TEST_CASES = [
         "must_call": ["get_pending_requests"],
         "reply_must_match": r"(?is)^(?=.*emma)(?=.*hugo)(?=.*clara)",
         "reply_must_not_match": r"(?i)\b(?:two|2) pending|(?:already|has been|is) approved",
+        "check": lambda: not agent.pending_action,
+    },
+    {
+        # real, 11 Nov: given "23 nov", the assistant asked which kind of leave (it never looked), then said "You already have a pending casual leave request"
+        # for a request that was approved. The dates are looked up first, and the answer says what the tool returned.
+        "name": "booking: a day that is already approved is said at once, before asking which kind of leave",
+        "user": "E001",
+        "auto_confirm": agent.AWAITING_CONFIRMATION,
+        "setup": lambda: setup_emma_day_taken(False),
+        "input": f"{future_weekdays(1)[0].day} {future_weekdays(1)[0]:%b}".lower(),
+        "must_call_one_of": ["count_leave_days", "get_my_requests", "apply_leave"],
+        "reply_must_match": r"(?i)already|approved|d\u00e9j\u00e0",
+        "reply_must_not_match": r"(?i)(which|what) (type|kind) of leave|casual, sick|\bpending\b|confirmation (screen|card)|press confirm",
+        "expected_requests": 3,
+        "check": lambda: not agent.pending_action,
+    },
+    {
+        # same chat, and the kind of leave is given ("causual"): main showed a card for a day that already has a request (the refusal came after Confirm),
+        # or said "pending" for an approved request. No card, nothing created, and the status is the tool's.
+        "name": "booking: a day that is already approved gets no card, and the reply says it is approved",
+        "user": "E001",
+        "auto_confirm": agent.AWAITING_CONFIRMATION,
+        "setup": lambda: setup_emma_day_taken(True),
+        "input": "causual",
+        "must_call_one_of": ["count_leave_days", "get_my_requests", "apply_leave"],
+        "reply_must_match": r"(?i)already|approved|d\u00e9j\u00e0",
+        "reply_must_not_match": r"(?i)\bpending\b|confirmation (screen|card)|press confirm",
+        "expected_requests": 3,
         "check": lambda: not agent.pending_action,
     },
     {

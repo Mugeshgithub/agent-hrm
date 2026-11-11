@@ -18,6 +18,7 @@ from notifications import init_notifications, notify_decision, notify_ticket_rep
 from policy import search_policy, embed as embed_texts
 import approval_first
 import booking_first
+import existing_first
 import collective_agreement
 import confirm_batch
 import contract_first
@@ -36,7 +37,7 @@ from citations import ungrounded_citations, RETRY_MESSAGE, SAFE_REPLY
 from documents import asks_if_genuine, says_cannot_tell, GENUINE_ANSWER, GENUINE_RETRY
 from tools import (
     get_leave_balance, apply_leave, days_for, days_figures, no_days_reason, today_line, holidays_of, balance_of, clean_days, paid_policy_note,
-    get_pending_requests, decide_leave, get_my_requests, get_employee,
+    get_pending_requests, decide_leave, get_my_requests, get_employee, existing_request, already_requested, when_label,
     get_team_member_balance, cancel_leave, cancel_problem, decide_problem, request_summary,
     create_hr_ticket, get_my_tickets, get_open_tickets, reply_to_ticket,
     PAID, LEAVE_TYPES,
@@ -577,6 +578,9 @@ def run_tool(name, tool_input):
         kind = tool_input.get("leave_type") or "casual"
         if kind not in LEAVE_TYPES:
             return {"error": f"Unknown leave type '{kind}'"}
+        if (found := existing_request(LOGGED_IN_ID, start.isoformat(), end.isoformat())):       # these dates are taken: say so first, whatever the earlier chat says
+            return {"already_requested": already_requested(found),
+                    "note": "These dates already have a request, so there is nothing to count or book. Say so, with its status, and quote no balance."}
         result = {"working_days": days_for(kind, start, end, holidays_of(LOGGED_IN_ID))}
         if not result["working_days"]:
             result["cannot_be_booked"] = no_days_reason(kind, start, end, holidays_of(LOGGED_IN_ID))      # a Saturday, a Sunday, a public holiday: nothing to book
@@ -598,6 +602,11 @@ def run_tool(name, tool_input):
             return {"error": f"Leave cannot start in the past. Today is {date.today()}."}
         if end < start:
             return {"error": "End date is before start date"}
+        # refuse BEFORE asking: dates that already have a pending or approved request never get a card (the refusal used to come only after Confirm)
+        if (found := existing_request(LOGGED_IN_ID, start.isoformat(), end.isoformat())):
+            return {"error": f"You already have request {found['id']} ({found['status']}), {found['leave_type']} leave, "
+                             f"{when_label(found['start_date'], found['end_date'])}. Nothing was submitted and no confirmation was shown.",
+                    "already_requested": already_requested(found)}
         # refuse BEFORE asking: a request for no days (a Saturday, a Sunday, a public holiday) never gets a confirmation card it could not pass
         if (why := no_days_reason(tool_input["leave_type"], start, end, holidays_of(LOGGED_IN_ID))):
             return {"error": f"{why} Nothing was submitted and no confirmation was shown."}
@@ -812,6 +821,7 @@ def answer_turn(user_text):
         contract_retry_used = False
         booking_retry_used = False
         decision_retry_used = False
+        existing_retry_used = False
         card_retry_used = False
         number_retry_used = False
         last_turn["tools_called"] = []
@@ -866,6 +876,15 @@ def answer_turn(user_text):
                 if not booking_retry_used and (fix := booking_first.nudge(role, user_text, reply, last_turn["tools_called"], turn_sources)):
                     booking_retry_used = True
                     print("  [guard] asked before booking, or offered to book dates that use no days: asking again")
+                    messages.append({"role": "user", "content": fix})
+                    continue
+
+                # guardrail in code: what a person is told about dates they already asked for comes from the tools, not the old chat: the dates are looked up
+                # before asking which kind of leave, "you already have a request" needs a tool result (and its real status), and a card is claimed only when
+                # one was made (existing_first.py). One retry.
+                if not existing_retry_used and (fix := existing_first.nudge(role, user_text, reply, last_turn["tools_called"], turn_sources, bool(pending_action))):
+                    existing_retry_used = True
+                    print("  [guard] the reply about existing requests or the card does not match the tools: asking again")
                     messages.append({"role": "user", "content": fix})
                     continue
 
@@ -924,7 +943,7 @@ def answer_turn(user_text):
                 if action == "replaced":
                     print("  [guard] still not from a tool: replacing it with the tools' figures")
                     reply = shown
-                if document_retry_used or agreement_retry_used or search_retry_used or contract_retry_used or booking_retry_used or decision_retry_used or card_retry_used or number_retry_used:       # a retry note was sent: the reply must not talk about it
+                if document_retry_used or agreement_retry_used or search_retry_used or contract_retry_used or booking_retry_used or decision_retry_used or existing_retry_used or card_retry_used or number_retry_used:       # a retry note was sent: the reply must not talk about it
                     reply = document_answers.strip_correction(reply)
 
                 # the policy does not answer it: keep the question, without a name, for HR (policy_gaps.py)

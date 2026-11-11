@@ -15,6 +15,7 @@ import contracts
 import document_answers
 import documents
 import careers
+import existing_first
 import employee_files
 import jobs
 import number_guard
@@ -1508,6 +1509,73 @@ def a_manager_asked_what_is_pending_is_told_about_every_request_the_tool_returne
                   "Three pending requests: Hugo, Clara and Emma, which will be approved once you confirm."]:
         assert nudge(reply, sources=three) is None, reply
     assert nudge("Three pending requests: Hugo, Clara and Emma. Emma's earlier request was approved yesterday.", sources=three) is None      # an earlier one, said as such
+
+
+@test
+def dates_already_requested_are_found_before_the_card_never_after_confirm():
+    mon = next_monday()
+    assert tools.existing_request("E001", d(mon), d(mon)) is None
+    made = apply_leave("E001", "casual", d(mon), d(mon))["request"]["id"]
+    found = tools.existing_request("E001", d(mon), d(mon))
+    assert found["id"] == made and found["status"] == tools.PENDING
+    assert tools.existing_request("E001", d(mon - timedelta(days=3)), d(mon + timedelta(days=3)))["id"] == made     # a range that touches it
+    assert tools.existing_request("E001", d(mon + timedelta(days=1)), d(mon + timedelta(days=1))) is None           # the next day is free
+    assert tools.existing_request("E002", d(mon), d(mon)) is None                                                    # someone else's day
+    assert tools.already_requested(found) == {"request_id": made, "leave_type": "casual", "status": tools.PENDING, "when": tools.when_label(mon)}
+    assert f"request {made} ({tools.PENDING})" in apply_leave("E001", "casual", d(mon), d(mon))["error"]            # apply_leave refuses with the same request
+    assert decide_leave("M001", made, "approve").get("success")
+    assert tools.existing_request("E001", d(mon), d(mon))["status"] == "approved"                                    # approved counts too
+    assert cancel_leave("E001", made).get("cancelled")
+    assert tools.existing_request("E001", d(mon), d(mon)) is None                                                    # a cancelled request leaves the day free
+    assert apply_leave("E001", "casual", d(mon), d(mon)).get("success")
+
+
+@test
+def a_person_is_told_about_dates_they_already_asked_for_from_the_tools_not_the_old_chat():
+    taken = json.dumps({"working_days": 1, "already_requested": {"request_id": 416, "leave_type": "casual", "status": "approved", "when": "Mon 23 Nov 2026"}})
+    refused = json.dumps({"error": "You already have request 416 (approved), casual leave, Mon 23 Nov 2026. Nothing was submitted and no confirmation was shown.",
+                          "already_requested": {"request_id": 416, "leave_type": "casual", "status": "approved", "when": "Mon 23 Nov 2026"}})
+    listing = json.dumps({"my_requests": [{"request_id": 1, "status": "cancelled"}, {"request_id": 416, "status": "approved"}, {"request_id": 417, "status": "pending_manager_approval"}]})
+    nudge = existing_first.nudge
+    said = 'You already have a pending casual leave request for 23 November. Check your app under "My requests".'      # the real reply, 11 Nov
+    assert nudge("employee", "causual", said, [], []) is existing_first.CHECK_FIRST          # no tool result shows it: it came from the old chat
+    assert nudge("employee", "causual", "Vous avez déjà une demande en attente pour le 23 novembre.", [], []) is existing_first.CHECK_FIRST
+    assert "approved" in nudge("employee", "causual", said, ["apply_leave"], [refused])       # the tool says approved: the reply is sent back with the real status
+    assert "approved" in nudge("employee", "23 nov", said, ["count_leave_days"], [taken])
+    assert nudge("employee", "causual", "You already have an approved casual leave request for 23 November.", ["apply_leave"], [refused]) is None
+    assert nudge("employee", "23 nov", "You already have request 416 (approved) for Mon 23 Nov: nothing was booked.", ["count_leave_days"], [taken]) is None
+    assert nudge("employee", "my requests", "You have an approved request for 23 Nov and a pending one for 25 Nov.", ["get_my_requests"], [listing]) is None   # not a claim
+    assert nudge("employee", "my requests", "You already have a pending request for 25 Nov.", ["get_my_requests"], [listing]) is None
+    assert nudge("employee", "my requests", "You already have a rejected request for 25 Nov.", ["get_my_requests"], [listing]) is not None   # none is rejected
+    assert nudge("employee", "x", "You already have a request for 23 Nov.", ["get_my_requests"], [json.dumps({"my_requests": []})]) is None       # looked, and it says no status
+    assert nudge("manager", "any pending requests", "You already have a pending request from Hugo.", ["get_pending_requests"], []) is None              # the team's, not theirs
+    for inbox in ["You have 1 leave request waiting for your approval:\n\n**Emma** has requested 6 days of paid leave.",
+                  "You have one pending leave request and one alert:", "You have one leave request waiting for your decision."]:
+        assert nudge("manager", "What needs my attention?", inbox, ["get_needs_attention"], []) is None, inbox          # a manager's inbox is not a claim about their own dates
+        assert nudge("manager", "What needs my attention?", inbox, [], []) is None, inbox
+    assert nudge("employee", "23 nov", "You've already got casual leave approved for 23 November.", [], []) is existing_first.CHECK_FIRST
+    assert nudge("employee", "23 nov", "You've already booked casual leave on 23 November: it is waiting for your manager.", [], []) is existing_first.CHECK_FIRST
+    assert nudge("employee", "balance", "You already have 5 casual days left.", [], []) is None                     # a balance, not a request
+    assert nudge("new_hire", "x", said, [], []) is None                                                            # a new hire cannot book leave at all
+    # given a date, the assistant looks it up before asking which kind of leave
+    ask = "I need to know which type of leave you'd like for 23 November: casual, sick, or paid?"
+    for text in ["23 nov", "nov 23", "23rd of november", "2026-11-23", "I want to take 23/11 off", "tomorrow", "next friday", "le 23 novembre", "vendredi"]:
+        assert existing_first.has_date(text), text
+    for text in ["request time off please", "causual", "how many days do i have", "yes"]:
+        assert not existing_first.has_date(text), text
+    assert nudge("employee", "23 nov", ask, [], []) is existing_first.COUNT_FIRST
+    assert nudge("employee", "23 nov", ask, ["get_leave_balance"], []) is existing_first.COUNT_FIRST          # a balance is not a look at the dates
+    assert nudge("employee", "23 nov", ask, ["count_leave_days"], [taken]) is None                              # it looked
+    assert nudge("employee", "request time off please", "What dates, and what type of leave: casual, sick, or paid?", [], []) is None   # no date yet
+    assert nudge("employee", "23 nov", "You have 5 casual days left: taking 23 Nov leaves 4.", ["count_leave_days"], [taken]) is None
+    # a card is claimed only when one was made
+    nocard = "You have 5 casual days left. Review it and press Confirm to submit it to your manager."
+    assert nudge("employee", "casual", nocard, ["get_leave_balance"], []) is existing_first.NO_CARD
+    assert nudge("employee", "casual", "A confirmation card is now in your app for 23 November.", [], []) is existing_first.NO_CARD
+    assert nudge("employee", "casual", nocard, ["apply_leave"], []) is None
+    assert nudge("employee", "casual", nocard, ["cancel_leave"], []) is None
+    assert nudge("employee", "ok", nocard, [], [], card_open=True) is None                                     # a card from an earlier turn is still waiting
+    assert nudge("employee", "casual", "Your request was submitted.", [], []) is None
 
 
 if __name__ == "__main__":

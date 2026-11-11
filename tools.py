@@ -173,6 +173,29 @@ def request_summary(request_id):
             "end_date": row["end_date"], "days": clean_days(row["days"]), "status": row["status"], "when": when_label(row["start_date"], row["end_date"])}
 
 
+def existing_request(employee_id, start_date, end_date):
+    """The pending or approved request that already covers any of these dates (ISO strings), or None: a cancelled or rejected one does not count.
+    apply_leave refuses with it, and so does the confirmation card BEFORE it is shown (a test keeps the two in step)."""
+    conn = get_conn()
+    try:
+        row = conn.execute(
+            """SELECT id, leave_type, status, start_date, end_date FROM leave_requests
+               WHERE employee_id = ? AND status IN (?, 'approved')
+                 AND start_date <= ? AND end_date >= ?
+               ORDER BY id""",
+            (employee_id, PENDING, end_date, start_date),
+        ).fetchone()
+    finally:
+        conn.close()
+    return dict(row) if row else None
+
+
+def already_requested(row):
+    """An existing request, as the tools report it: what the reply may quote (its id, kind, status and dates, and nothing else)."""
+    return {"request_id": row["id"], "leave_type": row["leave_type"], "status": row["status"],
+            "when": when_label(row["start_date"], row["end_date"])}
+
+
 def apply_leave(employee_id, leave_type, start_date, end_date):
     emp = get_employee(employee_id)
     if emp is None:
@@ -192,12 +215,7 @@ def apply_leave(employee_id, leave_type, start_date, end_date):
     conn = get_conn()
     try:
         # block duplicates: no overlap with an existing pending or approved request
-        overlap = conn.execute(
-            """SELECT id, status, start_date, end_date FROM leave_requests
-               WHERE employee_id = ? AND status IN (?, 'approved')
-                 AND start_date <= ? AND end_date >= ?""",
-            (employee_id, PENDING, end.isoformat(), start.isoformat()),
-        ).fetchone()
+        overlap = existing_request(employee_id, start.isoformat(), end.isoformat())
         if overlap:
             return {"error": f"You already have request {overlap['id']} ({overlap['status']}) "
                              f"covering {overlap['start_date']} to {overlap['end_date']}. "
