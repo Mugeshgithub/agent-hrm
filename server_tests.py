@@ -1,5 +1,6 @@
 # server_tests.py: checks the web API's rules. No AI, no API keys, runs in CI.
 #   python server_tests.py
+import json
 import os
 import re
 import sys
@@ -12,6 +13,7 @@ import db
 db.DB_PATH = os.environ["HRM_DB"]
 
 from fastapi.testclient import TestClient
+import application_summary
 import base64
 import candidate_assistant
 import demo_data
@@ -1162,6 +1164,60 @@ def the_assistant_is_rate_limited_per_link_and_per_address():
         assert codes[:20] == [200] * 20 and codes[20:] == [429, 429]
         assert "a lot of messages" in public.post(f"/api/careers/track/{token}/assistant", json={"message": "hi"}).json()["detail"]
     with_a_stand_in_agent(run)
+
+
+# ---------- the summary of an application ----------
+
+@test
+def hr_and_the_hiring_manager_ask_for_a_summary_nobody_else_can_and_it_is_rate_limited():
+    cv_text = "Test engineer at Acme, 2020-2024: six years of testing experience, automated regression suites in Playwright and wrote the release checklists."
+    reply = {"requirements": [{"n": 1, "quotes": [{"source": "cv", "quote": "six years of testing experience"}]}]}
+    model = lambda system, user: json.dumps(reply)
+    stub = type(sys)("agent")
+    stub.summary_answer = lambda actor_id, application_id: application_summary.prepare(actor_id, application_id, model)
+    saved = sys.modules.get("agent")
+    sys.modules["agent"] = stub
+    application_summary.READER = lambda data: cv_text
+    try:
+        fresh_throttles()
+        server.SUMMARY_BY_PERSON.seen.clear()
+        hr, lucas, emma, public = as_person("H001"), as_person("M001"), as_person("E001"), TestClient(server.app)
+        job = an_open_careers_job(hr, "Summary Job")
+        public.post(f"/api/careers/jobs/{job}/apply", json=apply_form()).raise_for_status()
+        cid = lucas.get(f"/api/recruitment/jobs/{job}").json()["candidates"][0]["id"]
+        before = lucas.get(f"/api/recruitment/candidates/{cid}/summary").json()
+        assert before["available"] is True and before["summary"] is None and before["stale"] is False                  # one can be made, none is yet
+        made = lucas.post(f"/api/recruitment/candidates/{cid}/summary")
+        assert made.status_code == 200 and made.json()["prepared_by"] == "Lucas"
+        rows = made.json()["summary"]["requirements"]
+        assert [(r["text"], r["state"], [q["text"] for q in r["quotes"]]) for r in rows] == [("Testing experience", "found", ["six years of testing experience"])]
+        assert hr.get(f"/api/recruitment/candidates/{cid}/summary").json()["summary"] == made.json()["summary"]     # HR reads the same, from the saved one
+        assert any(e["event"] == "summary prepared" for e in hr.get(f"/api/recruitment/candidates/{cid}/history").json())
+        for client, code in ((emma, 403), (public, 401)):                                                              # an employee, and a visitor with no session
+            assert client.get(f"/api/recruitment/candidates/{cid}/summary").status_code == code
+            assert client.post(f"/api/recruitment/candidates/{cid}/summary").status_code == code
+        assert lucas.get("/api/recruitment/candidates/99999/summary").status_code == 404 and lucas.post("/api/recruitment/candidates/99999/summary").status_code == 404
+        server_db = db.get_conn()
+        with server_db:
+            server_db.execute("UPDATE applications SET notice_version = '2026-11b'")                                   # sent before the notice said an AI reads the CV
+        server_db.close()
+        old = lucas.post(f"/api/recruitment/candidates/{cid}/summary")
+        assert old.status_code == 400 and "before the privacy notice" in old.json()["detail"]
+        assert lucas.get(f"/api/recruitment/candidates/{cid}/summary").json()["available"] is False
+        stub.summary_answer = lambda actor_id, application_id: (_ for _ in ()).throw(RuntimeError("no key"))
+        down = lucas.post(f"/api/recruitment/candidates/{cid}/summary")
+        assert down.status_code == 503 and "isn't available right now" in down.json()["detail"]
+        server.SUMMARY_BY_PERSON.seen.clear()
+        stub.summary_answer = lambda actor_id, application_id: {"error": application_summary.NO_CV}
+        codes = [lucas.post(f"/api/recruitment/candidates/{cid}/summary").status_code for _ in range(31)]
+        assert codes[:30] == [400] * 30 and codes[30] == 429
+        assert "a lot of summaries" in lucas.post(f"/api/recruitment/candidates/{cid}/summary").json()["detail"] and hr.post(f"/api/recruitment/candidates/{cid}/summary").status_code == 400
+    finally:
+        application_summary.READER = None
+        if saved is None:
+            del sys.modules["agent"]
+        else:
+            sys.modules["agent"] = saved
 
 
 if __name__ == "__main__":

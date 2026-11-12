@@ -16,6 +16,7 @@ from pydantic import BaseModel
 from starlette.concurrency import run_in_threadpool
 from starlette.middleware.sessions import SessionMiddleware
 
+import application_summary
 import candidate_assistant
 import careers
 import checkins
@@ -963,6 +964,28 @@ def recruitment_notes(application_id: int, request: Request):
 @app.post("/api/recruitment/notes/{note_id}/handled")
 def recruitment_note_handled(note_id: int, request: Request):
     return recruitment_result(candidate_assistant.handle_note(recruiter(request)["id"], note_id))
+
+
+SUMMARY_BY_PERSON = careers.Throttle(30, 3600)         # a summary calls a paid model: 30 an hour for one person
+
+
+@app.get("/api/recruitment/candidates/{application_id}/summary")
+def recruitment_summary(application_id: int, request: Request):
+    return recruitment_result(application_summary.read(recruiter(request)["id"], application_id))          # the saved summary, and whether one can be made
+
+
+@app.post("/api/recruitment/candidates/{application_id}/summary")
+def recruitment_prepare_summary(application_id: int, request: Request):
+    actor = recruiter(request)
+    if not SUMMARY_BY_PERSON.allow(actor["id"]):
+        raise HTTPException(429, "That is a lot of summaries in a short time. Please wait a little and try again.")
+    import agent                                         # the model call (application_summary.py holds every rule; agent.py only calls the model)
+    try:
+        return recruitment_result(agent.summary_answer(actor["id"], application_id))
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(503, f"The summary isn't available right now ({type(e).__name__}).")
 
 
 @app.post("/api/recruitment/candidates/{application_id}/tracking-link")

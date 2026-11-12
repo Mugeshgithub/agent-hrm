@@ -25,11 +25,13 @@ import retention
 from jobs import _rows
 
 MAX_CV_BYTES = 5 * 1024 * 1024
-NOTICE_VERSION = "2026-11b"
+NOTICE_VERSION = "2026-11c"
 # the first notice that says what an AI does with an application: the candidate assistant only talks to people who accepted a notice at least this new
 AI_NOTICE_VERSION = "2026-11b"
-# what an AI does with an application. The candidate assistant adds "questions"; the summaries (R4) will add "summaries".
-AI_ASSISTS = ("questions",)
+# the first notice that says an AI reads the CV and the cover letter: a summary (application_summary.py) is only made for people who accepted one at least this new
+SUMMARY_NOTICE_VERSION = "2026-11c"
+# what an AI does with an application: the candidate assistant is "questions", the summary for the hiring team is "summaries".
+AI_ASSISTS = ("questions", "summaries")
 NOT_OPEN = "This job is not open for applications."
 NOT_FOUND = "This link isn't valid."
 STAGE_TEXT = {
@@ -49,11 +51,15 @@ ACTIVE_CONTENT = (b"/JavaScript", b"/JS", b"/Launch", b"/OpenAction", b"/Embedde
 def notice(months=None):
     """The notice shown on every job page, from what the app really does. `months` is the talent-pool limit HR set."""
     months = months or jobs.retention_months()
-    ai = ("An AI assistant helps with applications: " + " and ".join(
-        {"questions": "it answers your questions about the job and about your application on your tracking page. It does not read your CV or your cover "
-                       "letter. What you write to it is kept with your application and erased with it, and a note you ask it to pass on is read by HR",
-         "summaries": "it prepares, for the hiring manager, a summary of your application against the job's requirements"}[a] for a in AI_ASSISTS)
-          + ". It never ranks, scores or rejects anyone: people read every application and decide."
+    ai = (" ".join(
+        {"questions": "On your tracking page, an AI assistant answers your questions about the job and about your application. It does not read your CV "
+                      "or your cover letter. What you write to it is kept with your application and erased with it, and a note you ask it to pass on "
+                      "is read by HR.",
+         "summaries": "When HR or the hiring manager asks for it, an AI reads your CV and your cover letter and shows, for each requirement of the job, "
+                      "the passages that relate to it, word for word, or says that it found none. It does not score, rank or recommend anyone, and it "
+                      "leaves out details such as age, gender, nationality, family situation, health and address. The summary is kept with your "
+                      "application and erased with it."}[a] for a in AI_ASSISTS)
+          + " No AI ever ranks, scores or rejects anyone: people read every application and decide."
           if AI_ASSISTS else
           "No AI is used on your application today: people read it and decide. If an AI assistant is added, this notice will say what it does "
           "before it handles your application.")
@@ -208,9 +214,10 @@ def tracking_for(app):
     job = _rows("SELECT * FROM jobs WHERE id = ?", (app["job_id"],))[0]
     label, message = STAGE_TEXT[app["stage"]]
     erase = jobs.erase_date(app, job, jobs.retention_months())
+    summary = _rows("SELECT created_at FROM application_summaries WHERE application_id = ?", (app["id"],))        # the candidate may know that an AI read their CV, and when
     return {"name": app["name"], "job_title": job["title"], "applied_on": app["applied_at"][:10], "stage": app["stage"], "stage_label": label,
             "message": message, "talent_pool": bool(app["talent_pool"]), "erase_on": erase.isoformat() if erase else None,
-            "can_withdraw": app["stage"] != "hired"}
+            "can_withdraw": app["stage"] != "hired", "ai_summary_on": summary[0]["created_at"][:10] if summary else None}
 
 
 def leave_talent_pool(token):
@@ -234,6 +241,7 @@ def erase(conn, app, reason, by=None):
                  "erased_at = CURRENT_TIMESTAMP WHERE id = ?", (app["id"],))
     conn.execute("DELETE FROM candidate_messages WHERE application_id = ?", (app["id"],))        # what they wrote to the assistant is personal data too
     conn.execute("DELETE FROM candidate_notes WHERE application_id = ?", (app["id"],))
+    conn.execute("DELETE FROM application_summaries WHERE application_id = ?", (app["id"],))            # quotes from the CV are personal data too
     conn.execute("INSERT INTO candidate_erasures (application_id, job_id, stage, reason, erased_by) VALUES (?, ?, ?, ?, ?)",
                  (app["id"], app["job_id"], app["stage"], reason, by))
     conn.execute("INSERT INTO application_events (application_id, actor_id, event, reason) VALUES (?, ?, 'erased', ?)", (app["id"], by, reason))

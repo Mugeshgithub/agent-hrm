@@ -20,6 +20,14 @@ else:
         return nullcontext()
 
 
+def private_call():
+    # a context for ONE model call whose text must not reach Langfuse (a CV): the Anthropic instrumentation skips the call, so no prompt or reply is recorded
+    if ENABLED:
+        from opentelemetry.instrumentation.utils import suppress_instrumentation
+        return suppress_instrumentation()
+    return nullcontext()
+
+
 def current_trace_id():
     # the ID of the trace we're inside right now, or None when tracing is off
     return langfuse.get_current_trace_id() if ENABLED else None
