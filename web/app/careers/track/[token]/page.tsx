@@ -1,11 +1,13 @@
 "use client";
 // A candidate's own page, opened with the private link they got when they applied. It shows where the application stands in plain words (never
-// the internal reason for a decision), when their data will be erased, and lets them leave the talent pool or withdraw and erase everything.
+// the internal reason for a decision), when their data will be erased, and lets them leave the talent pool or withdraw and erase everything. The AI
+// assistant (CandidateAssistant) answers questions about the job and the application, and says it is an AI.
 import { useState } from "react";
 import useSWR, { mutate } from "swr";
 import { api, ApiError, fetcher } from "@/lib/api";
 import { day } from "@/lib/format";
 import { Tracking } from "@/lib/types";
+import { CandidateAssistant } from "@/components/CandidateAssistant";
 import { CareersFrame } from "@/components/CareersFrame";
 import { Dialog } from "@/components/Dialog";
 import { ErrorNote } from "@/components/PageHeader";
@@ -54,6 +56,8 @@ export default function Track({ params }: { params: { token: string } }) {
         <p className="mt-1 text-lg font-medium">{data.stage_label}</p>
         <p className="mt-1">{data.message}</p>
       </section>
+
+      <CandidateAssistant token={params.token} />
 
       <section aria-labelledby="data" className="panel mt-4 px-5 py-4">
         <h2 id="data" className="font-medium">Your data</h2>

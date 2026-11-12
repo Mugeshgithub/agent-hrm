@@ -25,9 +25,11 @@ import retention
 from jobs import _rows
 
 MAX_CV_BYTES = 5 * 1024 * 1024
-NOTICE_VERSION = "2026-11"
-# what an AI does with an application. Empty today: nothing. The candidate assistant (R3) adds "questions", the summaries (R4) add "summaries".
-AI_ASSISTS = ()
+NOTICE_VERSION = "2026-11b"
+# the first notice that says what an AI does with an application: the candidate assistant only talks to people who accepted a notice at least this new
+AI_NOTICE_VERSION = "2026-11b"
+# what an AI does with an application. The candidate assistant adds "questions"; the summaries (R4) will add "summaries".
+AI_ASSISTS = ("questions",)
 NOT_OPEN = "This job is not open for applications."
 NOT_FOUND = "This link isn't valid."
 STAGE_TEXT = {
@@ -48,7 +50,8 @@ def notice(months=None):
     """The notice shown on every job page, from what the app really does. `months` is the talent-pool limit HR set."""
     months = months or jobs.retention_months()
     ai = ("An AI assistant helps with applications: " + " and ".join(
-        {"questions": "it answers your questions about the job on your tracking page",
+        {"questions": "it answers your questions about the job and about your application on your tracking page. It does not read your CV or your cover "
+                       "letter. What you write to it is kept with your application and erased with it, and a note you ask it to pass on is read by HR",
          "summaries": "it prepares, for the hiring manager, a summary of your application against the job's requirements"}[a] for a in AI_ASSISTS)
           + ". It never ranks, scores or rejects anyone: people read every application and decide."
           if AI_ASSISTS else
@@ -198,6 +201,10 @@ def tracking(token):
     app = _by_token(token)
     if app is None:
         return {"error": NOT_FOUND}
+    return tracking_for(app)
+
+
+def tracking_for(app):
     job = _rows("SELECT * FROM jobs WHERE id = ?", (app["job_id"],))[0]
     label, message = STAGE_TEXT[app["stage"]]
     erase = jobs.erase_date(app, job, jobs.retention_months())
@@ -225,6 +232,8 @@ def erase(conn, app, reason, by=None):
     """Erase one candidate's personal data inside the caller's transaction. Returns the CV file name to delete once it is saved."""
     conn.execute("UPDATE applications SET name = '(erased)', email = '', phone = '', cover_letter = '', cv_file = NULL, track_hash = NULL, "
                  "erased_at = CURRENT_TIMESTAMP WHERE id = ?", (app["id"],))
+    conn.execute("DELETE FROM candidate_messages WHERE application_id = ?", (app["id"],))        # what they wrote to the assistant is personal data too
+    conn.execute("DELETE FROM candidate_notes WHERE application_id = ?", (app["id"],))
     conn.execute("INSERT INTO candidate_erasures (application_id, job_id, stage, reason, erased_by) VALUES (?, ?, ?, ?, ?)",
                  (app["id"], app["job_id"], app["stage"], reason, by))
     conn.execute("INSERT INTO application_events (application_id, actor_id, event, reason) VALUES (?, ?, 'erased', ?)", (app["id"], by, reason))

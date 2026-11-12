@@ -1178,12 +1178,19 @@ def the_privacy_notice_says_only_what_the_app_does_and_what_the_cnil_recommends(
                                                    "How long we keep it", "Your rights"]
     assert "18 months" in text and "30 days after we mark it as not selected" in text and "90 days after the job closes" in text and "two years" in text
     assert "talent-pool box" in text and "CNIL" in text and "L1132-1" in text and "withdraw and erase" in text
-    assert "No AI is used on your application today" in text and "never ranks" not in text                      # nothing to promise yet
+    # the assistant on the tracking page is there, so the notice says what it does (and does not): it never promises more than the app does
+    assert "answers your questions about the job and about your application" in text and "does not read your CV or your cover letter" in text
+    assert "kept with your application and erased with it" in text and "never ranks, scores or rejects" in text and "No AI is used" not in text
+    assert "summary of your application" not in text                      # the summaries (R4) are not built yet
+    saved = careers.AI_ASSISTS
     try:
+        careers.AI_ASSISTS = ()
+        none = " ".join(s["text"] for s in careers.notice(18)["sections"])
         careers.AI_ASSISTS = ("questions", "summaries")
         on = " ".join(s["text"] for s in careers.notice(24)["sections"])
     finally:
-        careers.AI_ASSISTS = ()
+        careers.AI_ASSISTS = saved
+    assert "No AI is used on your application today" in none and "never ranks" not in none
     assert "answers your questions about the job" in on and "summary of your application against the job's requirements" in on and "never ranks, scores or rejects" in on
     assert "No AI is used" not in on
 

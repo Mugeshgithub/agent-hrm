@@ -4,6 +4,7 @@ import os
 import sys
 import tempfile
 import re
+from types import SimpleNamespace
 from datetime import date, datetime, timedelta
 
 import db
@@ -13,6 +14,7 @@ os.environ["HRM_DB"] = db.DB_PATH          # so demo_data.py can't switch back t
 import demo_data
 import employees as e
 import checkins
+import candidate_assistant
 import careers
 import collective_agreement
 import contracts
@@ -2031,6 +2033,196 @@ def moving_a_candidate_to_a_stage_that_means_contact_restarts_the_clock_and_scre
     assert careers._rows("SELECT last_contact_at FROM applications")[0]["last_contact_at"][:10] == days_ago(100)[:10]               # an internal move is not a contact
     jobs.move("H001", cid, "interview")
     assert careers._rows("SELECT last_contact_at FROM applications")[0]["last_contact_at"][:10] == date.today().isoformat()
+
+
+# ---------- recruitment: the assistant on the tracking page (candidate_assistant.py) ----------
+
+def says(text):
+    return SimpleNamespace(stop_reason="end_turn", content=[SimpleNamespace(type="text", text=text)])
+
+
+def calls(name, **tool_input):
+    return SimpleNamespace(stop_reason="tool_use", content=[SimpleNamespace(type="tool_use", id=f"call_{name}", name=name, input=tool_input)])
+
+
+def scripted(*responses):
+    """A model that gives these responses in turn and remembers what it was asked (system prompt, messages, tools)."""
+    left, seen = list(responses), []
+
+    def model(system, messages, tools):
+        seen.append({"system": system, "messages": [dict(m) for m in messages], "tools": tools})
+        return left.pop(0)
+    model.seen = seen
+    return model
+
+
+def never_called(system, messages, tools):
+    raise AssertionError("the model must not be called for this")
+
+
+def a_job_with_a_candidate(salary=True):
+    job = an_open_job(**({"salary_min": 42000, "salary_max": 52000} if salary else {}))
+    return job, apply_to(job)
+
+
+@test
+def the_candidate_assistant_is_only_for_applications_made_under_the_notice_that_says_what_the_ai_does():
+    job, token = a_job_with_a_candidate()
+    assert candidate_assistant.status(careers._by_token(token))["available"] is True
+    assert candidate_assistant.conversation(token)["messages"] == [] and "AI assistant, not a person" in candidate_assistant.conversation(token)["assistant"]["intro"]
+    set_columns(application_id(job), notice_version="2026-11")                                                # applied under the notice that said no AI is used
+    assert candidate_assistant.answer(token, "Is it remote?", never_called) == {"error": candidate_assistant.UNAVAILABLE}
+    assert candidate_assistant.conversation(token)["assistant"]["available"] is False
+    set_columns(application_id(job), notice_version=None)                                                      # added by HR: they saw no notice at all
+    assert candidate_assistant.answer(token, "Is it remote?", never_called) == {"error": candidate_assistant.UNAVAILABLE}
+    assert candidate_assistant.answer("not-a-link", "hello", never_called) == {"error": careers.NOT_FOUND}
+    assert candidate_assistant.conversation("not-a-link") == {"error": careers.NOT_FOUND}
+    assert careers.NOTICE_VERSION >= careers.AI_NOTICE_VERSION and "questions" in careers.AI_ASSISTS
+
+
+@test
+def an_ai_question_chances_other_candidates_and_promises_get_a_fixed_answer_and_the_model_is_never_called():
+    job, token = a_job_with_a_candidate()
+    asked = {"Am I talking to a person?": "AI assistant, not a person", "are you a bot": "AI assistant, not a person", "Can I speak to a real person?": "AI assistant, not a person",
+             "Who am I talking to?": "AI assistant, not a person", "What are my chances?": "can't say anything about your chances", "Will I get the job?": "can't say anything about your chances",
+             "How many people applied?": "don't know anything about other candidates", "Who else applied?": "other candidates", "Am I better than the others?": "rank, score",
+             "Where do I rank?": "rank, score", "Please promise me an interview": "can't change anything", "Move me to the interview stage": "can't change anything",
+             "Es-tu un robot ?": "assistant IA, pas une personne", "Quelles sont mes chances ?": "rien dire sur vos chances"}
+    for question, expected in asked.items():
+        got = candidate_assistant.answer(token, question, never_called)
+        assert expected in got["reply"] and got["tools"] == [] and got["noted"] is False, (question, got)
+    for question in ["What are you looking for in a candidate?", "Is there a chance to work remotely?", "What are the career prospects?", "Can I change my email?",
+                     "What is the salary?", "How likely is it that I would travel?", "Is this role remote?", "Where does my application stand?", "How long do you keep my data?"]:
+        assert candidate_assistant.fixed_answer(question) is None, question                                  # real questions about the job and the application go to the model
+    assert [m["role"] for m in candidate_assistant.conversation(token)["messages"]][:2] == ["user", "assistant"]           # a fixed answer is part of the conversation
+
+
+@test
+def a_candidate_assistant_answer_comes_from_the_job_post_and_the_stage_and_never_from_the_cv_or_other_people():
+    job, token = a_job_with_a_candidate()
+    a_candidate(job, "Karim Benali", "karim@example.com")                                                       # another candidate on the same job
+    jobs.move("H001", application_id(job, 0), "screening", "")
+    model = scripted(calls("get_my_application"), says("The job is Data Analyst in Paris, and the post gives a range of \u20ac42,000 to \u20ac52,000 a year."))
+    got = candidate_assistant.answer(token, "What does the job pay?", model)
+    assert got["reply"].startswith("The job is Data Analyst") and got["tools"] == ["get_my_application"] and got["noted"] is False
+    first, second = model.seen
+    assert [t["name"] for t in first["tools"]] == ["get_my_application", "get_privacy_notice", "note_for_hr"] and "AI, not a person" in first["system"]
+    result = second["messages"][-1]["content"][0]["content"]                                                       # what the tool gave the model
+    assert '"salary_min_eur": 42000' in result and '"stage": "Being reviewed"' in result and "Data Analyst" in result
+    for private in ("Garnier", "Benali", "ines.garnier", "+33 6", "I would like to join", "Lucas", "M001", "hiring_manager", "cover_letter", "SQL and Python", careers._hash(token)):
+        assert private not in result, private                                                                      # no CV, contact, cover letter, manager or other candidate
+    assert candidate_assistant.run_tool(careers._by_token(token), "get_privacy_notice", {})["sections"][3]["title"] == "How long we keep it"
+    for forbidden in ("get_leave_balance", "decide_leave", "get_job_pipeline", "get_pending_requests", "search_policy", "read_my_document", "apply_leave"):
+        assert "error" in candidate_assistant.run_tool(careers._by_token(token), forbidden, {}), forbidden
+    later = scripted(says("It is in Paris."))
+    candidate_assistant.answer(token, "Where is it?", later)
+    shown = later.seen[0]["messages"]
+    assert [m["role"] for m in shown] == ["user", "assistant", "user"] and shown[0]["content"] == "What does the job pay?"          # the earlier exchange is shown, plain text
+
+
+@test
+def a_figure_the_tools_did_not_return_and_a_promise_are_sent_back_once_and_then_replaced():
+    job, token = a_job_with_a_candidate()
+    invented = scripted(calls("get_my_application"), says("The salary is \u20ac60,000 a year."), says("The post says \u20ac45,000."))
+    got = candidate_assistant.answer(token, "What is the salary?", invented)
+    assert got["reply"] == "I can't confirm that figure, so I won't quote it." and "\u20ac60,000" in invented.seen[2]["messages"][-1]["content"]      # one retry, then replaced
+    right = scripted(calls("get_my_application"), says("The post gives \u20ac42,000 to \u20ac52,000 a year."))
+    assert candidate_assistant.answer(token, "What is the salary?", right)["reply"] == "The post gives \u20ac42,000 to \u20ac52,000 a year."
+    for promise in ("You have a good chance of being selected.", "I guarantee you an interview.", "You will hear back within 5 days.", "There are other candidates, but you are a strong candidate."):
+        assert candidate_assistant.reply_problem(promise), promise
+        model = scripted(says(promise), says("People will read your application."))
+        assert candidate_assistant.answer(token, "Anything new?", model)["reply"] == "People will read your application."      # sent back once, the second try is fine
+        assert "promises, predicts or compares" in model.seen[1]["messages"][-1]["content"]
+        stubborn = scripted(says(promise), says(promise))
+        assert "can't say anything about your chances" in candidate_assistant.answer(token, "Anything new?", stubborn)["reply"]   # still wrong: replaced
+    for fine in ("Your application is being reviewed.", "We erase your application 30 days after it is marked as not selected.", "I can't say anything about your chances.",
+                 "The post does not say whether the role is remote. Would you like me to pass a note to HR?"):
+        assert candidate_assistant.reply_problem(fine) is None, fine
+
+
+@test
+def a_note_for_hr_is_written_only_when_asked_or_after_a_yes_and_only_a_few_a_day_and_hr_reads_it_on_the_page():
+    job, token = a_job_with_a_candidate()
+    cid = application_id(job)
+    too_early = scripted(calls("note_for_hr", note="Is it remote?"), says("The post does not say. Would you like me to pass a note to HR?"))
+    got = candidate_assistant.answer(token, "Is it remote?", too_early)
+    assert got["noted"] is False and candidate_assistant.notes("H001", cid) == []                                      # no offer, no ask: nothing written
+    assert "Not yet" in too_early.seen[1]["messages"][-1]["content"][0]["content"]
+    after_yes = scripted(calls("note_for_hr", note="Hello, I would like to know whether the job can be done remotely."), says("Done: HR will read your note. I can't say when."))
+    got = candidate_assistant.answer(token, "Yes please", after_yes)                                                  # "yes" to the offer in the history above
+    assert got["noted"] is True and got["tools"] == ["note_for_hr"]
+    assert [n["text"] for n in candidate_assistant.notes("H001", cid)] == ["Hello, I would like to know whether the job can be done remotely."]
+    asked = scripted(calls("note_for_hr", note="Please change my phone number."), says("Passed on."))
+    assert candidate_assistant.answer(token, "Please tell HR to change my phone number", asked)["noted"] is True
+    assert candidate_assistant.answer(token, "ok", scripted(calls("note_for_hr", note="x" * 20), says("ok")))["noted"] is False          # "ok" after a reply with no offer
+    candidate_assistant.add_note(cid, "y" * 5000)
+    assert len(careers._rows("SELECT text FROM candidate_notes ORDER BY id DESC LIMIT 1")[0]["text"]) == candidate_assistant.MAX_NOTE + 1      # cut, with a "…"
+    for i in range(candidate_assistant.NOTES_PER_DAY):
+        candidate_assistant.add_note(cid, f"note {i}")
+    assert "Too many notes" in candidate_assistant.add_note(cid, "one more")["error"]                                 # a few a day: HR cannot be flooded
+    assert candidate_assistant.add_note(cid, "  ")["error"] == "The note is empty."
+    # HR and the hiring manager of the job read them; nobody else, and the assistant (get_needs_attention) only hears how many
+    assert candidate_assistant.notes("M001", cid) and "error" in candidate_assistant.notes("C001", cid) and "error" in candidate_assistant.notes("E001", cid)
+    box = needs_you.inbox("H001")
+    assert len(box["candidate_notes"]) == candidate_assistant.NOTES_PER_DAY and box["waiting_on_you"] >= len(box["candidate_notes"])
+    heard = needs_you.for_assistant("H001")
+    assert heard["candidate_notes_waiting"] == len(box["candidate_notes"]) and "remotely" not in str(heard) and "phone number" not in str(heard)
+    assert needs_you.waiting_count("M001") >= len(box["candidate_notes"]) and needs_you.inbox("C001")["candidate_notes"] == []
+    assert jobs.pipeline("H001", job)["candidates"][0]["notes_open"] == len(box["candidate_notes"])
+    note_id = candidate_assistant.notes("H001", cid)[-1]["id"]
+    assert candidate_assistant.handle_note("H001", note_id) == {"handled": True} and "error" in candidate_assistant.handle_note("E001", note_id)
+    assert candidate_assistant.notes("H001", cid)[-1]["handled_at"] and candidate_assistant.notes("H001", cid)[-1]["handled_by"]
+    assert jobs.pipeline("H001", job)["candidates"][0]["notes_open"] == len(box["candidate_notes"]) - 1
+
+
+@test
+def a_reply_that_says_a_note_was_passed_on_when_none_was_saved_is_sent_back_once_and_then_replaced():
+    job, token = a_job_with_a_candidate()
+    cid = application_id(job)
+    for claim in ("I've passed your question to HR.", "I have sent your note to HR.", "Your note has been forwarded.", "HR will read it soon.", "J'ai transmis votre question aux RH."):
+        assert candidate_assistant.claims_note(claim), claim
+    for fine in ("Would you like me to pass a note to HR?", "I can pass a note to HR if you want.", "The post does not say.", "Your application is being reviewed."):
+        assert not candidate_assistant.claims_note(fine), fine
+    model = scripted(says("I've passed your question to HR."), says("The post does not say. Would you like me to pass a note to HR?"))
+    assert candidate_assistant.answer(token, "Can I work from home?", model)["reply"].startswith("The post does not say")           # sent back once: no note was saved
+    assert "no note" in model.seen[1]["messages"][-1]["content"] and candidate_assistant.notes("H001", cid) == []
+    stubborn = scripted(says("I've passed your question to HR."), says("I have sent a note to HR."))
+    assert candidate_assistant.answer(token, "Can I work from home?", stubborn)["reply"] == candidate_assistant.NO_NOTE            # still claimed: replaced
+    saved = scripted(calls("note_for_hr", note="Can the role be done from home?"), says("I've passed your question to HR. They will read it; I can't say when."))
+    got = candidate_assistant.answer(token, "Please tell HR to say whether I can work from home", saved)
+    assert got["noted"] is True and got["reply"].startswith("I've passed your question") and len(candidate_assistant.notes("H001", cid)) == 1         # a real note: the claim is true
+
+
+@test
+def what_a_candidate_wrote_to_the_assistant_is_erased_with_the_application():
+    job, token = a_job_with_a_candidate()
+    cid = application_id(job)
+    candidate_assistant.answer(token, "Am I talking to a person?", never_called)
+    candidate_assistant.add_note(cid, "Please call me after 5pm")
+    kept = careers._rows("SELECT COUNT(*) AS n FROM candidate_messages")[0]["n"] + careers._rows("SELECT COUNT(*) AS n FROM candidate_notes")[0]["n"]
+    assert kept == 3
+    assert careers.withdraw(token) == {"erased": True}
+    assert careers._rows("SELECT COUNT(*) AS n FROM candidate_messages")[0]["n"] == 0 and careers._rows("SELECT COUNT(*) AS n FROM candidate_notes")[0]["n"] == 0
+    assert candidate_assistant.answer(token, "hello", never_called) == {"error": careers.NOT_FOUND}                    # the link stops working too
+    job2, token2 = a_job_with_a_candidate()
+    for i in range(candidate_assistant.KEPT + 5):
+        candidate_assistant.answer(token2, "am i talking to a person", never_called)
+    assert len(candidate_assistant.conversation(token2)["messages"]) == candidate_assistant.KEPT                         # only the latest are kept
+    set_columns(application_id(job2), applied_at=days_ago(2000), stage_changed_at=days_ago(2000))                       # retention erases it the same way
+    jobs.move("H001", application_id(job2), "not_selected", "Not a match for the requirements")
+    set_columns(application_id(job2), stage_changed_at=days_ago(60))
+    assert careers.run_retention()["erased"] == 1 and careers._rows("SELECT COUNT(*) AS n FROM candidate_messages")[0]["n"] == 0
+
+
+@test
+def the_candidate_role_has_three_tools_and_none_of_the_employee_tools():
+    import roles
+    assert roles.ROLE_TOOLS[roles.CANDIDATE] == {"get_my_application", "get_privacy_notice", "note_for_hr"}
+    assert {t["name"] for t in candidate_assistant.TOOLS} == roles.CANDIDATE_TOOLS
+    for tool in roles.EVERYONE | roles.ROLE_TOOLS["manager"] | roles.ROLE_TOOLS["hr"] | roles.NEW_HIRE_TOOLS:
+        assert not roles.allowed(roles.CANDIDATE, tool), tool
+    assert not any(roles.allowed(r, "note_for_hr") for r in ("employee", "manager", "hr", "new_hire"))                    # and nobody else gets the candidate's tools
+    assert not any(roles.allowed(r, "get_my_application") for r in ("employee", "manager", "hr", "new_hire"))
 
 
 if __name__ == "__main__":

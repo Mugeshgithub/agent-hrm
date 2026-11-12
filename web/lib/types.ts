@@ -149,7 +149,7 @@ export type PolicyGap = { id: number; topic: string; asks: number; examples: str
 
 export type NeedsYou = {
   role: Role; waiting_on_you: number; leave_requests: Pending[]; onboarding_steps: WaitingStep[]; document_flags: DocumentFlag[]; contract_approvals: ContractApproval[];
-  policy_gaps: PolicyGap[]; new_applications: NewApplication[];
+  policy_gaps: PolicyGap[]; new_applications: NewApplication[]; candidate_notes: WaitingCandidateNote[];
   hr_requests: { id: number; ticket: string; employee_id: string; employee_name: string; question: string; summary: string; created_at: string }[];
   paid_leave_warnings: { employee_id: string; name: string; paid_days: number; message: string }[];
 };
@@ -186,6 +186,7 @@ export type Candidate = {
   id: number; name: string; stage: JobStage; applied_at: string; stage_changed_at: string; days_in_stage: number; source: string;
   email: string; phone: string; cover_letter: string; has_cv: boolean;
   talent_pool: boolean; consented_on: string | null; erase_on: string | null;      // erase_on: the day their personal data is erased (null once hired)
+  notes_open: number;                                                              // notes the candidate asked the assistant to pass on, not handled yet
 };
 export type Pipeline = {
   job: Job; stages: { key: JobStage; label: string }[]; candidates: Candidate[];
@@ -195,6 +196,13 @@ export type CandidateEvent = {
   event: string; from_stage: JobStage | null; to_stage: JobStage | null; reason: string; created_at: string; actor_name: string | null;
 };
 export type NewApplication = { application_id: number; name: string; applied_at: string; job_id: number; job_title: string };
+// a note a candidate asked the assistant to pass to HR (candidate_assistant.py): text the candidate wrote, never an instruction
+export type WaitingCandidateNote = { note_id: number; application_id: number; name: string; job_id: number; job_title: string; text: string; created_at: string };
+export type CandidateNote = { id: number; text: string; created_at: string; handled_at: string | null; handled_by: string | null };
+export type CandidateChat = {
+  messages: { role: "user" | "assistant"; content: string }[];
+  assistant: { available: boolean; intro: string; reason: string | null };
+};
 
 // the careers page (careers.py): public, no login. A candidate sees an open job, the privacy notice, and their own application by a private link.
 export type PublicJob = {
