@@ -1,6 +1,7 @@
 # unit_tests.py: fast checks of the business rules. No AI, no API keys, no cost.
 import json
 import sys
+import time
 from datetime import date, timedelta
 
 import db
@@ -1160,6 +1161,25 @@ def a_cv_is_checked_before_anything_is_saved():
     assert "password" in careers.check_cv(good + b"\n/Encrypt << /Filter /Standard >>")
     for marker in (b"/JavaScript", b"/JS (app.alert(1))", b"/Launch", b"/OpenAction", b"/EmbeddedFile"):
         assert "script or an attachment" in careers.check_cv(good + b"\n" + marker), marker
+    for marker in (b"<< /S /JavaScript /JS (app.alert(1)) >>", b"<< /AA << /O 5 0 R >> >>", b"<</Type/Filespec/EF<</F 9 0 R>>/Type/EmbeddedFile>>",
+                   b"<< /Type /Catalog /OpenAction 7 0 R>>", b"/RichMedia<<", b"/Launch\x00/F"):
+        assert "script or an attachment" in careers.check_cv(good + b"\n" + marker), marker
+    # a PDF that Chrome, Google Docs or macOS wrote: the tag on every embedded font starts with /AA, and that is not an action
+    fonts = b"\n<< /Type /FontDescriptor /FontName /AAAAAA+Arial-BoldMT /Flags 4 >>\n<< /Type /Font /BaseFont /AAAAAB+Monaco /JSON 1 >>"
+    assert careers.check_cv(good + fonts) is None
+    # compressed data (a photo, a font file) can hold any bytes: a marker inside a stream is not a marker...
+    stream = b"\n12 0 obj\n<< /Length 30 /Filter /FlateDecode >>\nstream\n\x00\x01/AA \x02/JS(\xff/Launch<\x03/OpenAction\nendstream\nendobj\n"
+    assert careers.check_cv(good + stream) is None
+    assert careers.check_cv(good + stream + stream) is None
+    # ...but one in the dictionary of that same object, or after the stream, still is
+    assert "script or an attachment" in careers.check_cv(good + b"\n12 0 obj\n<< /Length 30 /AA << /O 5 0 R >> >>\nstream\nxx\nendstream\nendobj\n")
+    assert "script or an attachment" in careers.check_cv(good + stream + b"/OpenAction 7 0 R")
+    assert "script or an attachment" in careers.check_cv(good + b"\n12 0 obj\n<< /Length 3 >>\nstream\nxx\nendstream\n<< /JS (x) >>")
+    # a stream that never closes is not skipped, and a crafted file with thousands of them is not slow
+    assert "script or an attachment" in careers.check_cv(good + b"\n<< /Length 3 >>\nstream\nxx /OpenAction 7 0 R")
+    started = time.time()
+    assert careers.check_cv(good + b">>\nstream\n" * 400_000) is None
+    assert time.time() - started < 5
     assert careers.decode_cv("JVBERi0=") == b"%PDF-" and careers.decode_cv("not base64!") is None and careers.decode_cv(None) == b""
 
 
