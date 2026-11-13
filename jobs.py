@@ -148,6 +148,36 @@ def init_jobs():
                 requirements_hash TEXT NOT NULL,
                 result TEXT NOT NULL
             )""")
+        # interviews (interviews.py): the times offered, the one the candidate chose, and the emails for the candidate that wait for HR to send them.
+        # Both belong to the application: erasing the candidate deletes them (careers.erase). Times are Paris wall time.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS interviews (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                application_id INTEGER NOT NULL REFERENCES applications(id),
+                created_by TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                status TEXT NOT NULL,
+                slots TEXT NOT NULL,
+                chosen TEXT,
+                duration_min INTEGER NOT NULL,
+                place TEXT NOT NULL DEFAULT '',
+                note TEXT NOT NULL DEFAULT '',
+                cancelled_by TEXT,
+                cancelled_at TEXT,
+                reminded_at TEXT
+            )""")
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS candidate_outbox (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                application_id INTEGER NOT NULL REFERENCES applications(id),
+                to_email TEXT NOT NULL,
+                subject TEXT NOT NULL,
+                body TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                sent_at TEXT,
+                sent_by TEXT
+            )""")
         conn.execute("""
             CREATE TABLE IF NOT EXISTS application_events (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -436,8 +466,10 @@ def pipeline(actor_id, job_id):
     months = retention_months()
     notes = {r["application_id"]: r["n"] for r in _rows(
         "SELECT application_id, COUNT(*) AS n FROM candidate_notes WHERE handled_at IS NULL GROUP BY application_id")}       # notes from the candidate waiting for a person
+    latest = {r["application_id"]: r for r in _rows("SELECT application_id, status, chosen FROM interviews WHERE id IN (SELECT MAX(id) FROM interviews GROUP BY application_id)")}
     return {"job": _present(job, actor, _counts(job_id)), "stages": [{"key": s, "label": LABELS[s]} for s in STAGES],
-            "candidates": [{**_candidate(r, True, job, months), "notes_open": notes.get(r["id"], 0)} for r in rows],
+            "candidates": [{**_candidate(r, True, job, months), "notes_open": notes.get(r["id"], 0),
+                            "interview": {"status": latest[r["id"]]["status"], "at": latest[r["id"]]["chosen"]} if r["id"] in latest else None} for r in rows],
             "events": _rows("""SELECT e.event, e.detail, e.created_at, p.name AS actor_name FROM job_events e
                                LEFT JOIN employees p ON p.id = e.actor_id WHERE e.job_id = ? ORDER BY e.id DESC LIMIT 30""", (job_id,))}
 

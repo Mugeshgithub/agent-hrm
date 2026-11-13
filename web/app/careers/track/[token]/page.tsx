@@ -8,6 +8,7 @@ import { api, ApiError, fetcher } from "@/lib/api";
 import { day } from "@/lib/format";
 import { Tracking } from "@/lib/types";
 import { CandidateAssistant } from "@/components/CandidateAssistant";
+import { CandidateInterview } from "@/components/CandidateInterview";
 import { CareersFrame } from "@/components/CareersFrame";
 import { Dialog } from "@/components/Dialog";
 import { ErrorNote } from "@/components/PageHeader";
@@ -57,6 +58,7 @@ export default function Track({ params }: { params: { token: string } }) {
         <p className="mt-1">{data.message}</p>
       </section>
 
+      <CandidateInterview token={params.token} />
       <CandidateAssistant token={params.token} />
 
       <section aria-labelledby="data" className="panel mt-4 px-5 py-4">

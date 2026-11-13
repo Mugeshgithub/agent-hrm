@@ -22,6 +22,7 @@ import collective_agreement
 import contracts
 import documents
 import employee_files
+import interviews
 import jobs
 import needs_you
 import onboarding
@@ -2468,6 +2469,237 @@ def the_real_pdf_reader_reads_the_apps_own_cv_and_a_quote_across_wrapped_lines_i
     assert text.startswith("Inès Garnier Data analyst with three years")                                  # accents survive
     assert application_summary.find("SQL for customer churn analysis across the whole product", text) == "SQL for customer churn analysis across the whole product"
     assert application_summary.pdf_text(b"not a pdf") == "" and application_summary.pdf_text(b"") == ""
+
+
+# ---------- recruitment, step 5: interviews (interviews.py) ----------
+
+FRIDAY = datetime(2026, 11, 20, 9, 0)                  # a Friday morning, Paris time
+TUE, WED, THU = "2026-11-24T14:00", "2026-11-25T10:30", "2026-11-26T16:00"
+
+
+def an_interview_candidate(**changes):
+    job = an_open_job(**changes)
+    token = apply_to(job)
+    return job, application_id(job), token
+
+
+def offered(app_id, slots=(TUE, WED, THU), who="M001", **more):
+    got = interviews.offer(who, app_id, {"slots": list(slots), "duration_min": 45, "place": "Paris office, room Seine", "note": "Ask at the front desk", **more}, FRIDAY)
+    assert "error" not in got, got
+    return got
+
+
+def candidate_mail(app_id=None, kind=None):
+    rows = careers._rows("SELECT * FROM candidate_outbox ORDER BY id")
+    return [r for r in rows if (app_id is None or r["application_id"] == app_id) and (kind is None or r["kind"] == kind)]
+
+
+@test
+def only_hr_or_the_jobs_hiring_manager_offers_times_and_every_time_is_checked():
+    job, app_id, token = an_interview_candidate()
+    good = {"slots": [TUE, WED], "duration_min": 45}
+    for who in ("E001", "E002", "N001", "nobody"):
+        assert interviews.offer(who, app_id, good, FRIDAY) == {"error": interviews.NOT_FOUND} and interviews.for_staff(who, app_id) == {"error": interviews.NOT_FOUND}
+    assert interviews.offer("M001", 9999, good, FRIDAY) == {"error": interviews.NOT_FOUND}
+    bad = lambda **c: interviews.offer("M001", app_id, {**good, **c}, FRIDAY)["error"]
+    assert "duration" in bad(duration_min=50) and "duration" in bad(duration_min=None)
+    assert "between 1 and 5" in bad(slots=[]) and "between 1 and 5" in bad(slots=[TUE, WED, THU, "2026-11-27T09:00", "2026-11-30T09:00", "2026-12-01T09:00"])
+    assert "between 1 and 5" in bad(slots=["tomorrow at 3"]) and "between 1 and 5" in bad(slots="2026-11-24T14:00")
+    assert "twice" in bad(slots=[TUE, "2026-11-24 14:00"])
+    assert "too soon" in bad(slots=["2026-11-20T09:30"]) and "too soon" in bad(slots=["2026-11-19T10:00"])      # less than an hour ahead, or in the past
+    assert "more than 90 days" in bad(slots=["2027-03-01T10:00"])
+    assert interviews.offer("M001", app_id, {"slots": ["2026-11-20T10:00"], "duration_min": 15}, FRIDAY)["current"]["status"] == "offered"      # an hour ahead is fine
+    set_columns(app_id, email="")
+    assert "no email" in bad()
+    set_columns(app_id, email="ines@example.com", stage="hired")
+    assert "no longer in the process" in bad()
+    assert interviews.for_staff("H001", app_id)["can_offer"] is False
+
+
+@test
+def an_offer_is_saved_logged_told_to_the_candidate_through_the_outbox_and_a_new_offer_replaces_the_old():
+    job, app_id, token = an_interview_candidate()
+    view = offered(app_id, place="  Paris   office,\nroom Seine ", note="x" * 600)
+    cur = view["current"]
+    assert cur["status"] == "offered" and [s["value"] for s in cur["slots"]] == ["2026-11-24 14:00", "2026-11-25 10:30", "2026-11-26 16:00"]
+    assert cur["slots"][0]["label"] == "Tuesday 24 November 2026, 14:00" and cur["place"] == "Paris office, room Seine" and len(cur["note"]) == interviews.MAX_NOTE
+    assert view["can_offer"] is True and view["zone"] == "Europe/Paris" and view["earlier"] == [] and view["job_title"] == "Data Analyst"
+    mail = candidate_mail(app_id, "interview offered")
+    assert len(mail) == 1 and mail[0]["to_email"] == "ines.garnier@example.com" and "Tuesday 24 November 2026, 14:00" in mail[0]["body"] and "Hello Inès Garnier" in mail[0]["body"]
+    assert "45 minutes (Paris time)" in mail[0]["body"] and "/careers/track/" not in mail[0]["body"] and token not in mail[0]["body"]          # no link: only its hash is kept
+    assert jobs.history("H001", app_id)[-1]["event"] == "interview offered"
+    again = offered(app_id, slots=[THU], who="H001")
+    assert again["current"]["slots"][0]["value"] == "2026-11-26 16:00" and again["current"]["offered_by"] == "Narmadha"
+    assert [e["status"] for e in again["earlier"]] == ["cancelled"] and again["earlier"][0]["cancelled_by"] == "staff"                       # the old offer is closed, not deleted
+    assert "instead of the earlier" in jobs.history("H001", app_id)[-1]["reason"] and len(candidate_mail(app_id, "interview offered")) == 2
+
+
+@test
+def the_candidate_chooses_one_time_the_first_choice_wins_and_everyone_is_told():
+    job, app_id, token = an_interview_candidate()
+    offered(app_id)
+    assert interviews.choose("not-a-link", TUE, FRIDAY) == {"error": careers.NOT_FOUND}
+    assert "not one of the times" in interviews.choose(token, "2026-11-27T10:00", FRIDAY)["error"] and "not one of the times" in interviews.choose(token, "soon", FRIDAY)["error"]
+    assert "has passed" in interviews.choose(token, TUE, datetime(2026, 11, 24, 15, 0))["error"]
+    got = interviews.choose(token, "2026-11-25 10:30", FRIDAY)
+    assert got["status"] == "confirmed" and got["chosen"]["label"] == "Wednesday 25 November 2026, 10:30" and got["slots"] == [] and got["duration_min"] == 45
+    assert interviews.choose(token, TUE, FRIDAY) == {"error": interviews.GONE}                                       # the second click finds it closed
+    mail = candidate_mail(app_id, "interview confirmed")
+    assert len(mail) == 1 and "Wednesday 25 November 2026, 10:30" in mail[0]["body"] and "Paris office, room Seine" in mail[0]["body"]
+    note = careers._rows("SELECT * FROM notifications WHERE employee_id = 'M001'")
+    assert len(note) == 1 and "Ines Garnier".replace("Ines", "Inès") in note[0]["message"] and "Wed 25 Nov, 10:30" in note[0]["message"]    # the offerer is the hiring manager: told once
+    last = jobs.history("H001", app_id)[-1]
+    assert last["event"] == "interview confirmed" and last["actor_name"] is None
+    assert interviews.for_staff("M001", app_id)["current"]["chosen"]["value"] == "2026-11-25 10:30"
+    assert jobs.pipeline("M001", job)["candidates"][0]["interview"] == {"status": "confirmed", "at": "2026-11-25 10:30"}                    # the job page shows it on the candidate's row
+
+
+@test
+def a_time_the_offering_person_already_has_an_interview_at_is_refused_because_nothing_reads_a_calendar():
+    job = an_open_job()
+    first = apply_to(job)
+    second = apply_to(job, name="Karim Benali", email="karim.benali@example.com")
+    a, b = application_id(job, 0), application_id(job, 1)
+    offered(a, slots=[TUE, WED])
+    offered(b, slots=[TUE, THU])                                                                                   # both are offered Tuesday: nothing is booked yet
+    assert interviews.choose(first, TUE, FRIDAY)["status"] == "confirmed"
+    assert interviews.choose(second, TUE, FRIDAY) == {"error": interviews.TAKEN}                                    # the second one is told it has just gone, and may choose again
+    assert interviews.for_candidate(careers._by_token(second), FRIDAY)["status"] == "offered" and interviews.choose(second, THU, FRIDAY)["status"] == "confirmed"
+    third = apply_to(job, name="Théo Marchand", email="theo.marchand@example.com")
+    c = application_id(job, 2)
+    assert "already have an interview at Tuesday 24 November 2026, 14:00" in interviews.offer("M001", c, {"slots": [TUE], "duration_min": 30}, FRIDAY)["error"]
+    assert "already have an interview" in interviews.offer("M001", c, {"slots": ["2026-11-24T14:30"], "duration_min": 30}, FRIDAY)["error"]         # inside the 45 minutes
+    assert interviews.offer("M001", c, {"slots": ["2026-11-24T14:45"], "duration_min": 30}, FRIDAY)["current"]["status"] == "offered"            # right after it
+    assert interviews.offer("H001", c, {"slots": [TUE], "duration_min": 30}, FRIDAY)["current"]["status"] == "offered"                          # someone else's calendar is free
+    assert interviews.offer("M001", a, {"slots": [TUE], "duration_min": 45}, FRIDAY)["current"]["status"] == "offered"                          # a re-offer does not clash with itself
+
+
+@test
+def the_staff_can_cancel_and_the_candidate_can_say_they_cannot_come_and_each_is_told_and_logged():
+    job, app_id, token = an_interview_candidate()
+    assert interviews.cancel("M001", app_id) == {"error": "There is no open interview to cancel."} and interviews.decline(token) == {"error": interviews.GONE}
+    offered(app_id)
+    assert interviews.cancel("E001", app_id) == {"error": interviews.NOT_FOUND}
+    got = interviews.cancel("M001", app_id, "The room is not free after all")
+    assert got["current"]["status"] == "cancelled" and got["current"]["cancelled_by"] == "staff" and got["can_offer"] is True
+    mail = candidate_mail(app_id, "interview cancelled")
+    assert len(mail) == 1 and "The room is not free after all" in mail[0]["body"] and "offer you other times" in mail[0]["body"]
+    assert jobs.history("H001", app_id)[-1]["reason"] == "Cancelled by the hiring manager: The room is not free after all"
+    assert interviews.cancel("M001", app_id) == {"error": "There is no open interview to cancel."} and interviews.choose(token, TUE, FRIDAY) == {"error": interviews.GONE}
+    offered(app_id)                                                                                                # none of the times suit the candidate
+    seen = interviews.decline(token, FRIDAY)
+    assert seen["status"] == "cancelled" and seen["cancelled_by"] == "candidate"
+    notes = [r["text"] for r in careers._rows("SELECT text FROM candidate_notes ORDER BY id")]
+    assert notes == ["None of the interview times you offered suit me. Please offer me other times."]            # HR and the manager see it in Needs you
+    assert "asked for other interview times" in careers._rows("SELECT message FROM notifications WHERE employee_id = 'M001'")[-1]["message"]
+    assert interviews.decline(token) == {"error": interviews.GONE}
+    offered(app_id)
+    interviews.choose(token, WED, FRIDAY)
+    assert interviews.decline(token, FRIDAY)["cancelled_by"] == "candidate"                                          # and after confirming
+    assert [r["text"] for r in careers._rows("SELECT text FROM candidate_notes ORDER BY id")][-1] == "I can no longer attend the interview on Wednesday 25 November 2026, 10:30. Please offer me other times."
+    assert jobs.history("H001", app_id)[-1]["reason"] == "The candidate cannot make it"
+
+
+@test
+def a_reminder_is_prepared_once_for_an_interview_today_or_tomorrow_and_never_for_the_others():
+    job = an_open_job()
+    tokens = [apply_to(job, name=n, email=e) for n, e in (("Inès Garnier", "ines@example.com"), ("Karim Benali", "karim@example.com"), ("Théo Marchand", "theo@example.com"),
+                                                          ("Camille Roux", "camille@example.com"))]
+    ids = [application_id(job, i) for i in range(4)]
+    for token, app_id, slot in zip(tokens, ids, ("2026-11-21T10:00", "2026-11-23T10:00", "2026-11-24T10:00", "2026-11-21T11:00")):
+        offered(app_id, slots=[slot], who="H001")
+        interviews.choose(token, slot, FRIDAY)
+    set_columns(ids[3], stage="not_selected")                                                                    # no longer in the process: no reminder
+    assert interviews.run_reminders(datetime(2026, 11, 20, 9, 0)) == 1                                           # only Inès: Saturday is tomorrow, Monday and Tuesday are not
+    assert interviews.run_reminders(datetime(2026, 11, 20, 9, 5)) == 0                                           # not twice
+    assert [r["subject"] for r in candidate_mail(kind="interview reminder")] == ["Reminder: your interview for Data Analyst is tomorrow"] and candidate_mail(ids[0], "interview reminder")[0]["to_email"] == "ines@example.com"
+    assert interviews.run_reminders(datetime(2026, 11, 21, 10, 30)) == 0                                         # Inès's started at 10:00 and was reminded; Camille's is over for the app
+    assert interviews.run_reminders(datetime(2026, 11, 22, 9, 0)) == 1                                           # Karim's is tomorrow now
+    assert "tomorrow" in candidate_mail(ids[1], "interview reminder")[0]["body"] and "Monday 23 November 2026, 10:00" in candidate_mail(ids[1], "interview reminder")[0]["body"]
+    same_day = careers._rows("SELECT message FROM notifications WHERE message LIKE 'Interview %'")
+    assert any("Interview tomorrow: Inès Garnier" in r["message"] for r in same_day)
+    assert jobs.history("H001", ids[0])[-1]["event"] == "interview reminder"
+
+
+@test
+def the_calendar_file_has_the_time_the_place_and_the_job_and_nothing_about_the_person():
+    job, app_id, token = an_interview_candidate()
+    assert interviews.calendar_for_candidate(token)["error"].startswith("There is no confirmed interview") and interviews.calendar_for_staff("M001", app_id)["error"].startswith("There is no confirmed")
+    offered(app_id, place="Room 4, 12 rue Cler; Paris", note="Bring your ID, a laptop,\nand a good mood " + "very long " * 12)
+    assert interviews.calendar_for_candidate(token)["error"].startswith("There is no confirmed interview")      # offered, not confirmed
+    interviews.choose(token, TUE, FRIDAY)
+    got = interviews.calendar_for_candidate(token)
+    text = got["text"]
+    assert got["filename"] == "interview.ics" and text.startswith("BEGIN:VCALENDAR\r\nVERSION:2.0\r\n") and text.endswith("END:VEVENT\r\nEND:VCALENDAR\r\n")
+    unfolded = text.replace("\r\n ", "")
+    assert "SUMMARY:Interview: Data Analyst at CognivexAI\r\n" in unfolded and "UID:interview-" in unfolded and "STATUS:CONFIRMED" in unfolded
+    assert "LOCATION:Room 4\\, 12 rue Cler\\; Paris\r\n" in unfolded and "DESCRIPTION:Bring your ID\\, a laptop\\, and a good mood" in unfolded     # commas, semicolons and line breaks are escaped
+    assert all(len(line.encode("utf-8")) <= 75 for line in text.split("\r\n")) and "\n" not in text.replace("\r\n", "")
+    lowered = text.lower()
+    assert "inès" not in lowered and "garnier" not in lowered and "example.com" not in lowered and token not in text      # no name, no email, no link
+    start = [l for l in unfolded.split("\r\n") if l.startswith("DTSTART:")][0][8:]
+    end = [l for l in unfolded.split("\r\n") if l.startswith("DTEND:")][0][6:]
+    try:
+        import zoneinfo
+        zoneinfo.ZoneInfo("Europe/Paris")
+        assert (start, end) == ("20261124T130000Z", "20261124T134500Z")                                              # 14:00 in Paris in November is 13:00 UTC
+    except Exception:
+        assert (start, end) == ("20261124T140000", "20261124T144500")                                                # no time zone data: a floating local time
+    assert interviews.calendar_for_staff("H001", app_id)["text"].replace("\r\n ", "").count("BEGIN:VEVENT") == 1 and interviews.calendar_for_staff("E001", app_id) == {"error": interviews.NOT_FOUND}
+    assert interviews.calendar_for_candidate("nope") == {"error": careers.NOT_FOUND}
+
+
+@test
+def the_candidate_outbox_is_for_hr_and_everything_about_an_interview_is_erased_with_the_application():
+    job, app_id, token = an_interview_candidate()
+    offered(app_id)
+    interviews.choose(token, TUE, FRIDAY)
+    assert interviews.waiting_messages() == 2 and interviews.outbox("M001") == {"error": "Only HR can see the outbox."} and interviews.mark_sent("E001", 1) == {"error": "Only HR can change the outbox."}
+    box = interviews.outbox("H001")
+    assert [m["kind"] for m in box] == ["interview confirmed", "interview offered"] and box[0]["candidate_name"] == "Inès Garnier" and box[0]["sent_at"] is None
+    assert interviews.mark_sent("H001", box[1]["id"]) == {"success": True, "id": box[1]["id"]} and interviews.waiting_messages() == 1
+    assert interviews.mark_sent("H001", box[1]["id"]) == {"error": "This message is already marked as sent."} and interviews.mark_sent("H001", 999) == {"error": "No such message."}
+    assert interviews.outbox("H001")[1]["sent_by_name"] == "Narmadha"
+    assert careers.withdraw(token) == {"erased": True}
+    assert careers._rows("SELECT COUNT(*) AS n FROM interviews")[0]["n"] == 0 and careers._rows("SELECT COUNT(*) AS n FROM candidate_outbox")[0]["n"] == 0
+    assert interviews.for_staff("H001", app_id) == {"error": interviews.NOT_FOUND}
+
+
+@test
+def the_candidates_view_has_only_times_place_and_state():
+    job, app_id, token = an_interview_candidate()
+    app = careers._by_token(token)
+    assert interviews.for_candidate(app) == {"status": "none"}
+    offered(app_id)
+    view = interviews.for_candidate(app, FRIDAY)
+    assert set(view) == {"id", "status", "duration_min", "place", "note", "slots", "chosen", "cancelled_by", "created_at"} and view["status"] == "offered"
+    assert all(set(s) == {"value", "label", "past"} and s["past"] is False for s in view["slots"])
+    assert [s["past"] for s in interviews.for_candidate(app, datetime(2026, 11, 25, 12, 0))["slots"]] == [True, True, False]               # the page can grey out a time that has gone
+
+
+@test
+def the_candidate_assistant_can_read_the_interview_in_every_state_and_is_told_it_cannot_change_it():
+    job, app_id, token = an_interview_candidate()
+    read = lambda: candidate_assistant._application(careers._by_token(token))["interview"]
+    got = read()
+    assert got["status"] == "none" and "cannot say if or when" in got["meaning"] and "how_to_change" not in got
+    offered(app_id)
+    got = read()
+    assert got["status"] == "offered" and got["time_zone"] == "Paris time" and got["place"] == "Paris office, room Seine" and got["duration_minutes"] == 45
+    assert all("Tuesday 24 November 2026, 14:00" in t or "Wednesday" in t or "Thursday" in t for t in got["times_offered"]) and "nothing is booked until they do" in got["meaning"]
+    assert "Only the person can choose, change or cancel" in got["how_to_change"] and "Interview panel" in got["how_to_change"]
+    interviews.choose(token, WED, FRIDAY)
+    got = read()
+    assert got["status"] == "confirmed" and got["interview_time"] == "Wednesday 25 November 2026, 10:30" and "times_offered" not in got
+    interviews.decline(token, FRIDAY)
+    assert "by the person" in read()["meaning"] and read()["status"] == "cancelled"
+    offered(app_id)
+    interviews.cancel("M001", app_id)
+    assert "by the team" in read()["meaning"]
+    everything = str(candidate_assistant._application(careers._by_token(token)))
+    assert "created_by" not in everything and "M001" not in everything and "Lucas" not in everything                  # who offered it stays with the staff
+    assert "interview" in candidate_assistant.PROMPT.lower() and "cannot choose, change or cancel" in candidate_assistant.PROMPT
+    assert "interview" in [t for t in candidate_assistant.TOOLS if t["name"] == "get_my_application"][0]["description"]
 
 
 if __name__ == "__main__":

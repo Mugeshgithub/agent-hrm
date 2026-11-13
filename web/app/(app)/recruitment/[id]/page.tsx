@@ -7,8 +7,8 @@ import { FormEvent, useState } from "react";
 import useSWR, { mutate } from "swr";
 import { ArrowLeft, Pencil, Plus } from "lucide-react";
 import { api, ApiError, fetcher } from "@/lib/api";
-import { day, timestamp } from "@/lib/format";
-import { ApplicationSummary, Candidate, CandidateEvent, CandidateNote, JobStage, Pipeline } from "@/lib/types";
+import { day, timestamp, wallTime } from "@/lib/format";
+import { ApplicationSummary, Candidate, CandidateEvent, CandidateNote, JobStage, Pipeline, StaffInterview } from "@/lib/types";
 import { ACTIVE_STAGES, ALL_STAGES, Counts, JobStatus, salaryText, STAGE } from "@/components/JobParts";
 import { JobFormDialog } from "@/components/JobForm";
 import { Dialog } from "@/components/Dialog";
@@ -27,6 +27,7 @@ export default function JobPage({ params }: { params: { id: string } }) {
   const [linking, setLinking] = useState<Candidate | null>(null);
   const [noting, setNoting] = useState<Candidate | null>(null);
   const [summarising, setSummarising] = useState<Candidate | null>(null);
+  const [interviewing, setInterviewing] = useState<Candidate | null>(null);
   const [problem, setProblem] = useState("");
 
   if (!allowed || (error instanceof ApiError && (error.status === 404 || error.status === 403))) {
@@ -92,7 +93,7 @@ export default function JobPage({ params }: { params: { id: string } }) {
           {job.status === "closed" && ACTIVE_STAGES.some((s) => job.counts[s] > 0) && (
             <p className="mb-3 panel px-5 py-3 text-sm text-ink-soft">This job is closed, but some people are still waiting for a decision. Closing a job rejects nobody: move each candidate yourself.</p>
           )}
-          {ALL_STAGES.map((stage) => <StageSection key={stage} stage={stage} candidates={by(stage)} isHR={me.role === "hr"} onMove={setMoving} onHistory={setViewing} onLink={setLinking} onNotes={setNoting} onSummary={setSummarising} />)}
+          {ALL_STAGES.map((stage) => <StageSection key={stage} stage={stage} candidates={by(stage)} isHR={me.role === "hr"} onMove={setMoving} onHistory={setViewing} onLink={setLinking} onNotes={setNoting} onSummary={setSummarising} onInterview={setInterviewing} />)}
         </>
       )}
 
@@ -114,12 +115,13 @@ export default function JobPage({ params }: { params: { id: string } }) {
       {linking && <NewLinkDialog c={linking} onClose={() => setLinking(null)} />}
       {noting && <NotesDialog c={noting} onClose={() => setNoting(null)} />}
       {summarising && <SummaryDialog c={summarising} onClose={() => setSummarising(null)} />}
+      {interviewing && <InterviewDialog c={interviewing} onClose={() => setInterviewing(null)} />}
     </>
   );
 }
 
 const EVENT_LABEL: Record<string, string> = {
-  added: "Added", "note handled": "Candidate note handled", "cv opened": "CV opened", "summary prepared": "AI summary prepared", "new link": "New tracking link", "talent pool left": "Left the talent pool", erased: "Personal data erased",
+  added: "Added", "note handled": "Candidate note handled", "cv opened": "CV opened", "summary prepared": "AI summary prepared", "interview offered": "Interview times offered", "interview confirmed": "Interview time chosen", "interview cancelled": "Interview cancelled", "interview reminder": "Interview reminder prepared", "new link": "New tracking link", "talent pool left": "Left the talent pool", erased: "Personal data erased",
 };
 
 function eventText(event: string, detail: string) {
@@ -130,12 +132,12 @@ function eventText(event: string, detail: string) {
   return event;
 }
 
-function StageSection({ stage, candidates, isHR, onMove, onHistory, onLink, onNotes, onSummary }:
-  { stage: JobStage; candidates: Candidate[]; isHR: boolean; onMove: (c: Candidate) => void; onHistory: (c: Candidate) => void; onLink: (c: Candidate) => void; onNotes: (c: Candidate) => void; onSummary: (c: Candidate) => void }) {
+function StageSection({ stage, candidates, isHR, onMove, onHistory, onLink, onNotes, onSummary, onInterview }:
+  { stage: JobStage; candidates: Candidate[]; isHR: boolean; onMove: (c: Candidate) => void; onHistory: (c: Candidate) => void; onLink: (c: Candidate) => void; onNotes: (c: Candidate) => void; onSummary: (c: Candidate) => void; onInterview: (c: Candidate) => void }) {
   const folded = stage === "not_selected" || stage === "hired";
   const list = (
     <ul className="panel divide-y divide-rule">
-      {candidates.map((c) => <CandidateRow key={c.id} c={c} isHR={isHR} onMove={onMove} onHistory={onHistory} onLink={onLink} onNotes={onNotes} onSummary={onSummary} />)}
+      {candidates.map((c) => <CandidateRow key={c.id} c={c} isHR={isHR} onMove={onMove} onHistory={onHistory} onLink={onLink} onNotes={onNotes} onSummary={onSummary} onInterview={onInterview} />)}
     </ul>
   );
   if (!candidates.length) return null;
@@ -156,8 +158,14 @@ function StageSection({ stage, candidates, isHR, onMove, onHistory, onLink, onNo
   );
 }
 
-function CandidateRow({ c, isHR, onMove, onHistory, onLink, onNotes, onSummary }:
-  { c: Candidate; isHR: boolean; onMove: (c: Candidate) => void; onHistory: (c: Candidate) => void; onLink: (c: Candidate) => void; onNotes: (c: Candidate) => void; onSummary: (c: Candidate) => void }) {
+function interviewLine(i: NonNullable<Candidate["interview"]>) {
+  if (i.status === "confirmed" && i.at) return `Interview: ${wallTime(i.at)} (Paris time), confirmed by the candidate.`;
+  if (i.status === "offered") return "Interview: times offered, waiting for the candidate to choose.";
+  return "Interview: cancelled.";
+}
+
+function CandidateRow({ c, isHR, onMove, onHistory, onLink, onNotes, onSummary, onInterview }:
+  { c: Candidate; isHR: boolean; onMove: (c: Candidate) => void; onHistory: (c: Candidate) => void; onLink: (c: Candidate) => void; onNotes: (c: Candidate) => void; onSummary: (c: Candidate) => void; onInterview: (c: Candidate) => void }) {
   const full = (iso: string) => `${day(iso)} ${iso.slice(0, 4)}`;
   return (
     <li className="px-5 py-4">
@@ -173,14 +181,16 @@ function CandidateRow({ c, isHR, onMove, onHistory, onLink, onNotes, onSummary }
               {c.talent_pool && c.consented_on ? `, in the talent pool (agreed ${full(c.consented_on)})` : ""}.
               {c.erase_on ? ` Personal data erased on ${full(c.erase_on)}.` : ""}
             </p>
+            {c.interview && <p className="text-sm text-ink-soft">{interviewLine(c.interview)}</p>}
           </div>
         </div>
-        <div className="flex shrink-0 flex-wrap gap-2">
+        <div className="flex shrink-0 flex-wrap gap-2 sm:max-w-md sm:justify-end">
           {c.notes_open > 0 && <button className="btn-quiet" onClick={() => onNotes(c)}>Notes ({c.notes_open})</button>}
           {c.has_cv && <a className="btn-quiet" href={`/api/recruitment/candidates/${c.id}/cv`}>Open CV</a>}
           {c.has_cv && <button className="btn-quiet" onClick={() => onSummary(c)}>Summary</button>}
           {isHR && c.source === "careers page" && <button className="btn-quiet" onClick={() => onLink(c)}>New link</button>}
           <button className="btn-quiet" onClick={() => onHistory(c)}>History</button>
+          {(c.stage === "applied" || c.stage === "screening" || c.stage === "interview" || c.stage === "offer") && <button className="btn-quiet" onClick={() => onInterview(c)}>Interview</button>}
           {c.stage !== "hired" && <button className="btn-primary" onClick={() => onMove(c)}>Move</button>}
         </div>
       </div>
@@ -397,6 +407,113 @@ function SummaryDialog({ c, onClose }: { c: Candidate; onClose: () => void }) {
           <button className="btn-quiet" onClick={onClose}>Close</button>
         </div>
       </div>
+    </Dialog>
+  );
+}
+
+// arranging an interview (interviews.py): offer 1 to 5 times, the candidate chooses on their page, and the confirmation and the reminder wait in the Outbox for HR to
+// send. A new offer replaces the open one. There is no calendar integration: the only check is that you are not booked twice. Times are Paris time. No AI is involved.
+function InterviewDialog({ c, onClose }: { c: Candidate; onClose: () => void }) {
+  const path = `/recruitment/candidates/${c.id}/interview`;
+  const { data, error, mutate: refresh } = useSWR<StaffInterview>(path, fetcher);
+  const [slots, setSlots] = useState<string[]>(["", ""]);
+  const [duration, setDuration] = useState(45);
+  const [place, setPlace] = useState("");
+  const [note, setNote] = useState("");
+  const [reason, setReason] = useState("");
+  const [cancelling, setCancelling] = useState(false);
+  const [problem, setProblem] = useState("");
+  const [busy, setBusy] = useState(false);
+  const cur = data?.current;
+  const isOpen = cur?.status === "offered" || cur?.status === "confirmed";
+
+  async function send<T>(call: () => Promise<T>, after: (r: T) => void) {
+    setBusy(true);
+    setProblem("");
+    try { after(await call()); mutate(() => true); }
+    catch (e) { setProblem((e as Error).message); }
+    finally { setBusy(false); }
+  }
+  const offer = (e: FormEvent) => {
+    e.preventDefault();
+    send(() => api<StaffInterview>(path, { body: { slots: slots.filter(Boolean), duration_min: duration, place, note } }),
+      (r) => { refresh(r, { revalidate: false }); setSlots(["", ""]); setPlace(""); setNote(""); });
+  };
+  const cancel = () => send(() => api<StaffInterview>(`${path}/cancel`, { body: { reason } }), (r) => { refresh(r, { revalidate: false }); setCancelling(false); setReason(""); });
+  const setSlot = (i: number, value: string) => setSlots(slots.map((s, j) => (j === i ? value : s)));
+
+  return (
+    <Dialog open onClose={onClose} title={`${c.name}: interview`} width="max-w-xl">
+      <div className="max-h-[70vh] space-y-5 overflow-y-auto pr-1">
+        {(error || problem) && <ErrorNote message={error?.message ?? problem} />}
+        {!data && !error && <p className="text-ink-soft">Loading…</p>}
+        {data && (
+          <>
+            <section aria-label="Where it stands">
+              {!cur && <p className="text-ink-soft">No interview has been arranged yet.</p>}
+              {cur?.status === "offered" && (
+                <>
+                  <p className="font-medium">Times offered: waiting for {c.name} to choose</p>
+                  <ul className="mt-1 list-disc pl-5 text-sm">{cur.slots?.map((s) => <li key={s.value}>{s.label}{s.past ? " (gone)" : ""}</li>)}</ul>
+                </>
+              )}
+              {cur?.status === "confirmed" && cur.chosen && (
+                <>
+                  <p className="font-medium">Confirmed: {cur.chosen.label}</p>
+                  <a className="btn-quiet mt-2" href={`/api${path}.ics`}>Add to my calendar</a>
+                </>
+              )}
+              {cur?.status === "cancelled" && <p className="font-medium">Cancelled {cur.cancelled_by === "candidate" ? "by the candidate, who asked for other times" : "by the team"}</p>}
+              {cur && <p className="mt-1 text-sm text-ink-soft">{cur.duration_min} minutes{cur.place ? ` · ${cur.place}` : ""}{cur.offered_by ? ` · offered by ${cur.offered_by}` : ""}{cur.note ? ` · ${cur.note}` : ""}</p>}
+              {isOpen && !cancelling && <button className="btn-quiet mt-3" onClick={() => setCancelling(true)}>Cancel this interview</button>}
+              {isOpen && cancelling && (
+                <div className="mt-3 space-y-2">
+                  <label className="block"><span className="label">Reason, sent to the candidate (optional)</span>
+                    <textarea className="field h-auto py-2 leading-relaxed" rows={2} maxLength={300} value={reason} onChange={(e) => setReason(e.target.value)} /></label>
+                  <div className="flex justify-end gap-2">
+                    <button className="btn-quiet" onClick={() => setCancelling(false)}>Keep it</button>
+                    <button className="btn-primary" disabled={busy} onClick={cancel}>Cancel the interview</button>
+                  </div>
+                </div>
+              )}
+            </section>
+
+            {data.can_offer ? (
+              <form onSubmit={offer} className="space-y-3" aria-label="Offer times">
+                <h3 className="font-medium">{isOpen ? "Offer other times (they replace the current ones)" : "Offer times"}</h3>
+                <p className="text-sm text-ink-soft">Offer {data.max_slots} at most. {c.name} chooses one on their page. All times are Paris time.
+                  The app sends no email: the message waits in the Outbox for HR to send.</p>
+                {slots.map((s, i) => (
+                  <div key={i} className="flex items-center gap-2">
+                    <input className="field" type="datetime-local" aria-label={`Time ${i + 1}`} value={s} onChange={(e) => setSlot(i, e.target.value)} />
+                    {slots.length > 1 && <button type="button" className="btn-quiet" onClick={() => setSlots(slots.filter((_, j) => j !== i))}>Remove</button>}
+                  </div>
+                ))}
+                {slots.length < data.max_slots && <button type="button" className="btn-quiet" onClick={() => setSlots([...slots, ""])}>Add a time</button>}
+                <label className="block"><span className="label">Length</span>
+                  <select className="field" value={duration} onChange={(e) => setDuration(Number(e.target.value))}>
+                    {data.durations.map((d) => <option key={d} value={d}>{d} minutes</option>)}
+                  </select></label>
+                <label className="block"><span className="label">Where (an address or a video link, optional)</span>
+                  <input className="field" maxLength={200} value={place} onChange={(e) => setPlace(e.target.value)} /></label>
+                <label className="block"><span className="label">Note for the candidate (optional)</span>
+                  <textarea className="field h-auto py-2 leading-relaxed" rows={2} maxLength={500} value={note} onChange={(e) => setNote(e.target.value)} /></label>
+                <div className="flex justify-end"><button className="btn-primary" disabled={busy || !slots.some(Boolean)}>Offer these times</button></div>
+              </form>
+            ) : <p className="panel px-4 py-3 text-sm">{data.reason}</p>}
+
+            {data.earlier.length > 0 && (
+              <details>
+                <summary className="cursor-pointer text-sm text-ink-soft">Earlier interviews ({data.earlier.length})</summary>
+                <ul className="mt-2 space-y-1 text-sm text-ink-soft">
+                  {data.earlier.map((e, i) => <li key={i}>{e.chosen ? e.chosen.label : "Times offered"}: {e.status}{e.cancelled_by === "candidate" ? " (by the candidate)" : ""}</li>)}
+                </ul>
+              </details>
+            )}
+          </>
+        )}
+      </div>
+      <div className="mt-4 flex justify-end"><button className="btn-quiet" onClick={onClose}>Close</button></div>
     </Dialog>
   );
 }

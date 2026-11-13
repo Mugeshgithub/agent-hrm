@@ -8,13 +8,14 @@ import sys
 import tempfile
 import threading
 import time
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time as clock, timedelta
 
 import db
 import agent                       # agent imports tracing first, so Claude calls get traced
 import application_summary
 import candidate_assistant
 import careers
+import interviews
 import memory
 import notifications
 import tracing
@@ -206,6 +207,8 @@ def reset_memory():
         conn.execute("DELETE FROM candidate_messages")
         conn.execute("DELETE FROM candidate_notes")
         conn.execute("DELETE FROM application_summaries")
+        conn.execute("DELETE FROM interviews")
+        conn.execute("DELETE FROM candidate_outbox")
         conn.execute("DELETE FROM application_events")
         conn.execute("DELETE FROM applications")
         conn.execute("DELETE FROM job_events")
@@ -468,6 +471,29 @@ def candidate_notes():
 
 def nora_stage():
     return careers._rows("SELECT stage FROM applications WHERE name = 'Nora Vidal'")[0]["stage"]
+
+
+# three interview times two weeks ahead (the assistant reads them from the tool, so they must be in the future when it looks)
+INTERVIEW_DAY = date.today() + timedelta(days=14)
+INTERVIEW_SLOTS = [datetime.combine(INTERVIEW_DAY, clock(14, 0)), datetime.combine(INTERVIEW_DAY + timedelta(days=1), clock(10, 30)),
+                   datetime.combine(INTERVIEW_DAY + timedelta(days=2), clock(16, 0))]
+
+
+def setup_interview(state):
+    """Nora has an interview in state "none", "offered" (three times, from Lucas) or "confirmed" (she chose the first)."""
+    token = setup_candidate()
+    if state != "none":
+        done = interviews.offer("M001", careers._by_token(token)["id"], {"slots": [s.strftime("%Y-%m-%dT%H:%M") for s in INTERVIEW_SLOTS], "duration_min": 45,
+                                                                          "place": "Paris office, room Seine", "note": ""})
+        assert "error" not in done, done
+    if state == "confirmed":
+        assert interviews.choose(token, INTERVIEW_SLOTS[0].strftime("%Y-%m-%d %H:%M"))["status"] == "confirmed"
+    return token
+
+
+def interview_row():
+    rows = careers._rows("SELECT status, chosen FROM interviews ORDER BY id DESC")
+    return (rows[0]["status"], rows[0]["chosen"]) if rows else None
 
 
 def setup_summary(blocks, cover_letter=""):
@@ -1901,6 +1927,45 @@ TEST_CASES = [
         "must_not_call": ["get_job_pipeline"],
         "reply_must_match": r"choose Summary",
         "reply_must_not_match": r"(?i)(?:best|strongest) (?:fit|candidate) is|I recommend",
+    },
+    # ---------- the interview, as the candidate's assistant tells it (interviews.py): it only reads ----------
+    {
+        "name": "candidate: asked when the interview is, it answers from the tool",
+        "candidate": True, "user": "E001", "auto_confirm": True,
+        "setup": lambda: setup_interview("confirmed"),
+        "input": "When is my interview?",
+        "must_call": ["get_my_application"],
+        "reply_must_match": rf"(?is)(?=.*\b{INTERVIEW_SLOTS[0].day}\b)(?=.*{INTERVIEW_SLOTS[0]:%B}|.*{INTERVIEW_SLOTS[0]:%b})(?=.*(?:14[:h]00|2[:h]00 ?pm|2 ?pm))",
+        "check": lambda: interview_row() == ("confirmed", INTERVIEW_SLOTS[0].strftime("%Y-%m-%d %H:%M")),
+    },
+    {
+        "name": "candidate: asked which interview times it can choose, it lists them and says to choose on the page",
+        "candidate": True, "user": "E001", "auto_confirm": True,
+        "setup": lambda: setup_interview("offered"),
+        "input": "Which interview times can I choose from?",
+        "must_call": ["get_my_application"],
+        "reply_must_match": r"(?is)(?=.*14[:h]00)(?=.*10[:h]30)(?=.*16[:h]00)(?=.*(?:interview panel|this page|press|click|button|choose (?:it|one) (?:here|there|on)))",
+        "reply_must_not_match": r"(?i)\bI(?:'ve| have) (?:booked|confirmed|scheduled|reserved|chosen)\b|\byou(?:'ve| have) (?:booked|confirmed|chosen)\b",
+        "check": lambda: interview_row()[0] == "offered",
+    },
+    {
+        "name": "candidate: asked to move the interview, it says the buttons on the page do that and changes nothing",
+        "candidate": True, "user": "E001", "auto_confirm": True,
+        "setup": lambda: setup_interview("confirmed"),
+        "input": "Can you move my interview to the day after instead? That day suits me better.",
+        "reply_must_match": r"(?i)interview panel|buttons?|this page|can't make it|cancel|other times|a person",
+        "reply_must_not_match": r"(?i)\bI(?:'ve| have) (?:moved|rescheduled|changed|cancel+ed|booked|updated)\b|\bit(?:'s| is) (?:moved|rescheduled|done)\b|\bdone\b",
+        "check": lambda: interview_row() == ("confirmed", INTERVIEW_SLOTS[0].strftime("%Y-%m-%d %H:%M")),
+    },
+    {
+        "name": "candidate: with no interview offered, it says so and invents no time",
+        "candidate": True, "user": "E001", "auto_confirm": True,
+        "setup": lambda: setup_interview("none"),
+        "input": "When is my interview?",
+        "must_call": ["get_my_application"],
+        "reply_must_match": r"(?i)no interview|not (?:been )?(?:offered|scheduled|arranged|set)|haven't|hasn't|none|don't see|no (?:time|date)|nothing",
+        "reply_must_not_match": r"(?i)\b\d{1,2}[:h]\d{2}\b|\b(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b|\b\d{1,2} (?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)",
+        "check": lambda: interview_row() is None,
     },
     {
         "name": "card: a request that would fail is left off the card, and the reply says why",

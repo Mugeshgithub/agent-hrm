@@ -16,6 +16,7 @@ from fastapi.testclient import TestClient
 import application_summary
 import base64
 import candidate_assistant
+import interviews
 import demo_data
 import documents
 import employee_files
@@ -1218,6 +1219,64 @@ def hr_and_the_hiring_manager_ask_for_a_summary_nobody_else_can_and_it_is_rate_l
             del sys.modules["agent"]
         else:
             sys.modules["agent"] = saved
+
+
+# ---------- interviews ----------
+
+@test
+def hr_and_the_hiring_manager_offer_times_the_candidate_chooses_and_each_side_can_cancel():
+    fresh_throttles()
+    server.CHOOSE_BY_LINK.seen.clear()
+    hr, lucas, emma, public = as_person("H001"), as_person("M001"), as_person("E001"), TestClient(server.app)
+    job = an_open_careers_job(hr, "Interview Job")
+    token = public.post(f"/api/careers/jobs/{job}/apply", json=apply_form()).json()["link"].rsplit("/", 1)[1]
+    cid = lucas.get(f"/api/recruitment/jobs/{job}").json()["candidates"][0]["id"]
+    soon = interviews.now_paris().replace(hour=10, minute=0) + timedelta(days=6)
+    first, second = soon.strftime("%Y-%m-%dT%H:%M"), (soon + timedelta(days=1)).strftime("%Y-%m-%dT%H:%M")
+    path = f"/api/recruitment/candidates/{cid}/interview"
+    for client, code in ((emma, 403), (public, 401)):                                                                  # an employee, and a visitor with no session
+        assert client.get(path).status_code == code and client.post(path, json={"slots": [first], "duration_min": 30}).status_code == code
+        assert client.post(path + "/cancel", json={}).status_code == code and client.get(path + ".ics").status_code == code
+    assert lucas.get(path).json()["current"] is None and lucas.get(path).json()["can_offer"] is True
+    assert "duration" in lucas.post(path, json={"slots": [first], "duration_min": 50}).json()["detail"] and lucas.post(path, json={"slots": [first]}).status_code == 422
+    assert lucas.post("/api/recruitment/candidates/99999/interview", json={"slots": [first], "duration_min": 30}).status_code == 404
+    offered_view = lucas.post(path, json={"slots": [first, second], "duration_min": 45, "place": "Room Seine", "note": "Ask at the desk"})
+    assert offered_view.status_code == 200 and offered_view.json()["current"]["status"] == "offered" and len(offered_view.json()["current"]["slots"]) == 2
+    seen = public.get(f"/api/careers/track/{token}/interview").json()
+    assert seen["status"] == "offered" and seen["place"] == "Room Seine" and "created_by" not in seen and len(seen["slots"]) == 2
+    assert public.get("/api/careers/track/nope/interview").status_code == 404 and public.post("/api/careers/track/nope/interview/choose", json={"slot": first}).status_code == 404
+    assert public.get(f"/api/careers/track/{token}/interview.ics").status_code == 400                                 # nothing confirmed yet
+    assert "not one of the times" in public.post(f"/api/careers/track/{token}/interview/choose", json={"slot": "2031-01-01T10:00"}).json()["detail"]
+    chosen = public.post(f"/api/careers/track/{token}/interview/choose", json={"slot": seen["slots"][1]["value"]})
+    assert chosen.status_code == 200 and chosen.json()["status"] == "confirmed" and chosen.json()["chosen"]["value"] == seen["slots"][1]["value"]
+    assert "no longer open" in public.post(f"/api/careers/track/{token}/interview/choose", json={"slot": seen["slots"][0]["value"]}).json()["detail"]
+    for response in (public.get(f"/api/careers/track/{token}/interview.ics"), lucas.get(path + ".ics"), hr.get(path + ".ics")):
+        assert response.status_code == 200 and response.headers["content-type"].startswith("text/calendar") and "attachment" in response.headers["content-disposition"]
+        assert response.text.startswith("BEGIN:VCALENDAR") and "Room Seine" in response.text and "nora" not in response.text.lower() and response.headers["x-content-type-options"] == "nosniff"
+    assert [n for n in lucas.get("/api/needs-you").json()["candidate_notes"]] == []
+    box = hr.get("/api/hr/outbox/candidates").json()
+    assert [m["kind"] for m in box] == ["interview confirmed", "interview offered"] and box[0]["candidate_name"] == "Nora Vidal" and box[0]["to_email"] == "nora.vidal@example.com"
+    assert lucas.get("/api/hr/outbox/candidates").status_code == 403 and emma.post(f"/api/hr/outbox/candidates/{box[0]['id']}/sent").status_code == 403 and public.get("/api/hr/outbox/candidates").status_code == 401
+    assert hr.post(f"/api/hr/outbox/candidates/{box[0]['id']}/sent").json() == {"success": True, "id": box[0]["id"]} and hr.post(f"/api/hr/outbox/candidates/{box[0]['id']}/sent").status_code == 400
+    cancelled = lucas.post(path + "/cancel", json={"reason": "The room is taken"})
+    assert cancelled.status_code == 200 and cancelled.json()["current"]["status"] == "cancelled" and lucas.post(path + "/cancel", json={}).status_code == 400
+    assert hr.get("/api/hr/outbox/candidates").json()[0]["kind"] == "interview cancelled"
+    lucas.post(path, json={"slots": [first], "duration_min": 30})
+    declined = public.post(f"/api/careers/track/{token}/interview/cancel")
+    assert declined.status_code == 200 and declined.json()["cancelled_by"] == "candidate" and public.post(f"/api/careers/track/{token}/interview/cancel").status_code == 400
+    assert "other times" in lucas.get("/api/needs-you").json()["candidate_notes"][0]["text"]                           # HR and the manager see why
+    assert any(e["event"] == "interview cancelled" for e in hr.get(f"/api/recruitment/candidates/{cid}/history").json())
+
+
+@test
+def choosing_and_cancelling_an_interview_are_rate_limited_per_link():
+    fresh_throttles()
+    server.CHOOSE_BY_LINK.seen.clear()
+    public = TestClient(server.app)
+    token = "a-link-that-does-not-exist"
+    codes = [public.post(f"/api/careers/track/{token}/interview/choose", json={"slot": "2031-01-01T10:00"}).status_code for _ in range(22)]
+    assert codes[:20] == [404] * 20 and codes[20:] == [429, 429]
+    assert "a lot of tries" in public.post(f"/api/careers/track/{token}/interview/cancel").json()["detail"]
 
 
 if __name__ == "__main__":
