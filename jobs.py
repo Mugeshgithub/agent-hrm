@@ -139,6 +139,15 @@ def init_jobs():
                 handled_by TEXT,
                 handled_at TEXT
             )""")
+        # the summary of an application against the job's requirements (application_summary.py): one per application, quotes only, erased with the application
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS application_summaries (
+                application_id INTEGER PRIMARY KEY REFERENCES applications(id),
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                created_by TEXT,
+                requirements_hash TEXT NOT NULL,
+                result TEXT NOT NULL
+            )""")
         conn.execute("""
             CREATE TABLE IF NOT EXISTS application_events (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,

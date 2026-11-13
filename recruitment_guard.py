@@ -6,7 +6,8 @@ import re
 
 REFUSAL = ("I don't rank, score or compare candidates, and I can't say who to hire or reject. That decision is yours, and it has to rest on "
            "what each application shows against the job's requirements, not on a ranking from me. I can tell you who is in the pipeline "
-           "and which stage they are at.")
+           "and which stage they are at. To see what a candidate's CV says about each requirement, open the candidate and choose Summary: "
+           "it quotes the CV word for word and leaves the judgement to you.")
 NOT_YOURS = "Recruitment isn't something I can help with here: candidates are handled by HR and the hiring manager."
 
 # a question about candidates ...

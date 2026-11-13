@@ -58,6 +58,7 @@ def init_all(reset=False):
             conn.execute("DELETE FROM recruitment_settings")
             conn.execute("DELETE FROM candidate_messages")
             conn.execute("DELETE FROM candidate_notes")
+            conn.execute("DELETE FROM application_summaries")
             conn.execute("DELETE FROM application_events")
             conn.execute("DELETE FROM applications")
             conn.execute("DELETE FROM job_events")

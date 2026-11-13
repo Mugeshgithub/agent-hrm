@@ -16,6 +16,7 @@ from db import init_db
 from memory import init_memory, init_summaries, save_message, build_context
 from notifications import init_notifications, notify_decision, notify_ticket_reply, show_unread
 from policy import search_policy, embed as embed_texts
+import application_summary
 import approval_first
 import booking_first
 import candidate_assistant
@@ -809,6 +810,22 @@ def candidate_answer(token, text):
     who = f"application-{candidate_assistant.application_id(token)}"
     with propagate_attributes(user_id=who, session_id=who, tags=["candidate", *EXTRA_TAGS], metadata={"model": MODEL}):
         return candidate_assistant.answer(token, text, candidate_model)
+
+
+def summary_model(system, user):
+    """One model call for an application summary (application_summary.py): a prompt and the text, NO tools, so nothing in a CV can make it do anything.
+    The CV is not sent to Langfuse: this call is left out of the trace."""
+    with tracing.private_call():
+        response = client.messages.create(model=MODEL, max_tokens=3000, temperature=0, system=system, messages=[{"role": "user", "content": user}])
+    record_usage(response)
+    return "".join(b.text for b in response.content if b.type == "text")
+
+
+@observe(name="application-summary", capture_input=False, capture_output=False)   # the trace holds no CV, no quote and no name: the id of the application only
+def summary_answer(actor_id, application_id):
+    who = f"application-{application_id}"
+    with propagate_attributes(user_id=who, session_id=who, tags=["summary", *EXTRA_TAGS], metadata={"model": MODEL}):
+        return application_summary.prepare(actor_id, application_id, summary_model)
 
 
 @observe(name="hr-agent-turn")   # one trace per user question, with every Claude call and tool inside

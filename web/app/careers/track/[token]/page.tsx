@@ -64,6 +64,7 @@ export default function Track({ params }: { params: { token: string } }) {
         <p className="mt-1 text-sm text-ink-soft">
           {data.erase_on ? <>We will erase your application by <strong className="text-ink">{fullDay(data.erase_on)}</strong>. </> : <>You have been selected, so your details now follow the employee rules. </>}
           {data.talent_pool ? "You agreed to be in our talent pool, so we may contact you about other jobs until then." : "You are not in our talent pool."}
+          {data.ai_summary_on && <> On <strong className="text-ink">{fullDay(data.ai_summary_on)}</strong> an AI prepared a summary of your CV against the job's requirements for the hiring team. It quotes your CV and does not score or rank you: a person decides.</>}
         </p>
         {problem && <div className="mt-3"><ErrorNote message={problem} /></div>}
         <div className="mt-4 flex flex-wrap gap-2">

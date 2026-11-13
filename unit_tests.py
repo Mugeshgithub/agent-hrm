@@ -1085,6 +1085,7 @@ def a_request_to_rank_score_compare_or_choose_between_candidates_gets_the_fixed_
         assert g.refusal("hr", q, CANDIDATES) == g.REFUSAL and g.refusal("manager", q, CANDIDATES) == g.REFUSAL, q
     assert g.refusal("manager", "RANK THEM", CANDIDATES) is None                                          # no candidate named or mentioned: nothing says it is about people
     assert "I don't rank, score or compare" in g.REFUSAL and "decision is yours" in g.REFUSAL and "who is in the pipeline" in g.REFUSAL
+    assert "choose Summary" in g.REFUSAL and "word for word" in g.REFUSAL                                  # and it says where the evidence is
 
 
 @test
@@ -1180,19 +1181,21 @@ def the_privacy_notice_says_only_what_the_app_does_and_what_the_cnil_recommends(
     assert "talent-pool box" in text and "CNIL" in text and "L1132-1" in text and "withdraw and erase" in text
     # the assistant on the tracking page is there, so the notice says what it does (and does not): it never promises more than the app does
     assert "answers your questions about the job and about your application" in text and "does not read your CV or your cover letter" in text
-    assert "kept with your application and erased with it" in text and "never ranks, scores or rejects" in text and "No AI is used" not in text
-    assert "summary of your application" not in text                      # the summaries (R4) are not built yet
+    assert "kept with your application and erased with it" in text and "No AI ever ranks, scores or rejects anyone" in text and "No AI is used" not in text
+    # the summary for the hiring team is there too, so the notice says what it reads, what it shows and what it leaves out
+    assert "an AI reads your CV and your cover letter" in text and "word for word" in text and "does not score, rank or recommend anyone" in text
+    assert "age, gender, nationality, family situation, health and address" in text and careers.NOTICE_VERSION >= careers.SUMMARY_NOTICE_VERSION
     saved = careers.AI_ASSISTS
     try:
         careers.AI_ASSISTS = ()
         none = " ".join(s["text"] for s in careers.notice(18)["sections"])
-        careers.AI_ASSISTS = ("questions", "summaries")
-        on = " ".join(s["text"] for s in careers.notice(24)["sections"])
+        careers.AI_ASSISTS = ("questions",)
+        only_questions = " ".join(s["text"] for s in careers.notice(24)["sections"])
     finally:
         careers.AI_ASSISTS = saved
-    assert "No AI is used on your application today" in none and "never ranks" not in none
-    assert "answers your questions about the job" in on and "summary of your application against the job's requirements" in on and "never ranks, scores or rejects" in on
-    assert "No AI is used" not in on
+    assert "No AI is used on your application today" in none and "ever ranks" not in none
+    assert "answers your questions about the job" in only_questions and "an AI reads your CV" not in only_questions          # it promises no more than the app does
+    assert "No AI is used" not in only_questions
 
 
 @test

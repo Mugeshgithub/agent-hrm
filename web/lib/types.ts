@@ -199,6 +199,17 @@ export type NewApplication = { application_id: number; name: string; applied_at:
 // a note a candidate asked the assistant to pass to HR (candidate_assistant.py): text the candidate wrote, never an instruction
 export type WaitingCandidateNote = { note_id: number; application_id: number; name: string; job_id: number; job_title: string; text: string; created_at: string };
 export type CandidateNote = { id: number; text: string; created_at: string; handled_at: string | null; handled_by: string | null };
+// what the CV and the cover letter say about each requirement (application_summary.py): quotes only. There is no score, grade or total, on purpose.
+// found: checked quotes. not_mentioned: the AI found nothing (code cannot prove it). withheld: the passage carries a personal detail. unchecked: no quote could be checked.
+export type SummaryRequirement = {
+  kind: "must_have" | "nice_to_have"; text: string; state: "found" | "not_mentioned" | "withheld" | "unchecked";
+  quotes: { source: "CV" | "cover letter"; text: string }[];
+};
+export type ApplicationSummary = {
+  available: boolean; reason: string | null; stale: boolean;
+  summary: { requirements: SummaryRequirement[]; notes: string[] } | null;
+  prepared_at?: string; prepared_by?: string | null;
+};
 export type CandidateChat = {
   messages: { role: "user" | "assistant"; content: string }[];
   assistant: { available: boolean; intro: string; reason: string | null };
@@ -213,6 +224,7 @@ export type Notice = { version: string; sections: { title: string; text: string 
 export type Tracking = {
   name: string; job_title: string; applied_on: string; stage: JobStage; stage_label: string; message: string;
   talent_pool: boolean; erase_on: string | null; can_withdraw: boolean;
+  ai_summary_on: string | null;                                                    // the day an AI prepared a summary of the CV for the hiring team (application_summary.py)
 };
 export type RetentionSettings = {
   retention_months: number; max_months: number; default_months: number; not_selected_days: number; closed_job_days: number;

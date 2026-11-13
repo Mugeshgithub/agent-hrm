@@ -8,7 +8,7 @@ import useSWR, { mutate } from "swr";
 import { ArrowLeft, Pencil, Plus } from "lucide-react";
 import { api, ApiError, fetcher } from "@/lib/api";
 import { day, timestamp } from "@/lib/format";
-import { Candidate, CandidateEvent, CandidateNote, JobStage, Pipeline } from "@/lib/types";
+import { ApplicationSummary, Candidate, CandidateEvent, CandidateNote, JobStage, Pipeline } from "@/lib/types";
 import { ACTIVE_STAGES, ALL_STAGES, Counts, JobStatus, salaryText, STAGE } from "@/components/JobParts";
 import { JobFormDialog } from "@/components/JobForm";
 import { Dialog } from "@/components/Dialog";
@@ -26,6 +26,7 @@ export default function JobPage({ params }: { params: { id: string } }) {
   const [viewing, setViewing] = useState<Candidate | null>(null);
   const [linking, setLinking] = useState<Candidate | null>(null);
   const [noting, setNoting] = useState<Candidate | null>(null);
+  const [summarising, setSummarising] = useState<Candidate | null>(null);
   const [problem, setProblem] = useState("");
 
   if (!allowed || (error instanceof ApiError && (error.status === 404 || error.status === 403))) {
@@ -91,7 +92,7 @@ export default function JobPage({ params }: { params: { id: string } }) {
           {job.status === "closed" && ACTIVE_STAGES.some((s) => job.counts[s] > 0) && (
             <p className="mb-3 panel px-5 py-3 text-sm text-ink-soft">This job is closed, but some people are still waiting for a decision. Closing a job rejects nobody: move each candidate yourself.</p>
           )}
-          {ALL_STAGES.map((stage) => <StageSection key={stage} stage={stage} candidates={by(stage)} isHR={me.role === "hr"} onMove={setMoving} onHistory={setViewing} onLink={setLinking} onNotes={setNoting} />)}
+          {ALL_STAGES.map((stage) => <StageSection key={stage} stage={stage} candidates={by(stage)} isHR={me.role === "hr"} onMove={setMoving} onHistory={setViewing} onLink={setLinking} onNotes={setNoting} onSummary={setSummarising} />)}
         </>
       )}
 
@@ -112,12 +113,13 @@ export default function JobPage({ params }: { params: { id: string } }) {
       {viewing && <HistoryDialog c={viewing} onClose={() => setViewing(null)} />}
       {linking && <NewLinkDialog c={linking} onClose={() => setLinking(null)} />}
       {noting && <NotesDialog c={noting} onClose={() => setNoting(null)} />}
+      {summarising && <SummaryDialog c={summarising} onClose={() => setSummarising(null)} />}
     </>
   );
 }
 
 const EVENT_LABEL: Record<string, string> = {
-  added: "Added", "note handled": "Candidate note handled", "cv opened": "CV opened", "new link": "New tracking link", "talent pool left": "Left the talent pool", erased: "Personal data erased",
+  added: "Added", "note handled": "Candidate note handled", "cv opened": "CV opened", "summary prepared": "AI summary prepared", "new link": "New tracking link", "talent pool left": "Left the talent pool", erased: "Personal data erased",
 };
 
 function eventText(event: string, detail: string) {
@@ -128,12 +130,12 @@ function eventText(event: string, detail: string) {
   return event;
 }
 
-function StageSection({ stage, candidates, isHR, onMove, onHistory, onLink, onNotes }:
-  { stage: JobStage; candidates: Candidate[]; isHR: boolean; onMove: (c: Candidate) => void; onHistory: (c: Candidate) => void; onLink: (c: Candidate) => void; onNotes: (c: Candidate) => void }) {
+function StageSection({ stage, candidates, isHR, onMove, onHistory, onLink, onNotes, onSummary }:
+  { stage: JobStage; candidates: Candidate[]; isHR: boolean; onMove: (c: Candidate) => void; onHistory: (c: Candidate) => void; onLink: (c: Candidate) => void; onNotes: (c: Candidate) => void; onSummary: (c: Candidate) => void }) {
   const folded = stage === "not_selected" || stage === "hired";
   const list = (
     <ul className="panel divide-y divide-rule">
-      {candidates.map((c) => <CandidateRow key={c.id} c={c} isHR={isHR} onMove={onMove} onHistory={onHistory} onLink={onLink} onNotes={onNotes} />)}
+      {candidates.map((c) => <CandidateRow key={c.id} c={c} isHR={isHR} onMove={onMove} onHistory={onHistory} onLink={onLink} onNotes={onNotes} onSummary={onSummary} />)}
     </ul>
   );
   if (!candidates.length) return null;
@@ -154,8 +156,8 @@ function StageSection({ stage, candidates, isHR, onMove, onHistory, onLink, onNo
   );
 }
 
-function CandidateRow({ c, isHR, onMove, onHistory, onLink, onNotes }:
-  { c: Candidate; isHR: boolean; onMove: (c: Candidate) => void; onHistory: (c: Candidate) => void; onLink: (c: Candidate) => void; onNotes: (c: Candidate) => void }) {
+function CandidateRow({ c, isHR, onMove, onHistory, onLink, onNotes, onSummary }:
+  { c: Candidate; isHR: boolean; onMove: (c: Candidate) => void; onHistory: (c: Candidate) => void; onLink: (c: Candidate) => void; onNotes: (c: Candidate) => void; onSummary: (c: Candidate) => void }) {
   const full = (iso: string) => `${day(iso)} ${iso.slice(0, 4)}`;
   return (
     <li className="px-5 py-4">
@@ -176,6 +178,7 @@ function CandidateRow({ c, isHR, onMove, onHistory, onLink, onNotes }:
         <div className="flex shrink-0 flex-wrap gap-2">
           {c.notes_open > 0 && <button className="btn-quiet" onClick={() => onNotes(c)}>Notes ({c.notes_open})</button>}
           {c.has_cv && <a className="btn-quiet" href={`/api/recruitment/candidates/${c.id}/cv`}>Open CV</a>}
+          {c.has_cv && <button className="btn-quiet" onClick={() => onSummary(c)}>Summary</button>}
           {isHR && c.source === "careers page" && <button className="btn-quiet" onClick={() => onLink(c)}>New link</button>}
           <button className="btn-quiet" onClick={() => onHistory(c)}>History</button>
           {c.stage !== "hired" && <button className="btn-primary" onClick={() => onMove(c)}>Move</button>}
@@ -335,6 +338,68 @@ function NotesDialog({ c, onClose }: { c: Candidate; onClose: () => void }) {
   );
 }
 
+// what the CV and the cover letter say about each requirement of the job, word for word, prepared by an AI only when a person asks (application_summary.py).
+// There is nothing to add up: no score, no colour, no total, and the requirements stay in the job's order, never in an order of fit. "Not mentioned" is the AI's
+// finding, not proof, so the page says to read the CV. Quotes are the candidate's own text: they are shown as text, never as instructions.
+function SummaryDialog({ c, onClose }: { c: Candidate; onClose: () => void }) {
+  const path = `/recruitment/candidates/${c.id}/summary`;
+  const { data, error, mutate: refresh } = useSWR<ApplicationSummary>(path, fetcher);
+  const [busy, setBusy] = useState(false);
+  const [problem, setProblem] = useState("");
+  async function prepare() {
+    setBusy(true);
+    setProblem("");
+    try { refresh(await api<ApplicationSummary>(path, { body: {} }), { revalidate: false }); mutate(`/recruitment/candidates/${c.id}/history`); }       // the history now has a line for it
+    catch (e) { setProblem((e as Error).message); }
+    finally { setBusy(false); }
+  }
+  const s = data?.summary;
+  return (
+    <Dialog open onClose={onClose} title={`${c.name}: the CV against the requirements`} width="max-w-2xl">
+      <div className="max-h-[65vh] space-y-4 overflow-y-auto pr-1">
+        <p className="text-sm text-ink-soft">An AI reads the CV and the cover letter and quotes, word for word, what they say about each requirement. It does not score, rank or recommend: you decide.
+          Details such as age, gender, nationality, family situation, health and address are left out. "Not mentioned" is what the AI found, not proof: read the CV.</p>
+        {(error || problem) && <ErrorNote message={error?.message ?? problem} />}
+        {!data && !error && <p className="text-ink-soft">Loading…</p>}
+        {data && !data.available && <p className="panel px-4 py-3 text-sm">{data.reason}</p>}
+        {data?.available && !s && !busy && <p className="text-ink-soft">No summary has been prepared for this application yet.</p>}
+        {busy && <p className="text-ink-soft" aria-live="polite">Reading the CV…</p>}
+        {data?.stale && s && <p className="panel px-4 py-3 text-sm">The job's requirements changed after this summary was prepared. Prepare it again to read the CV against the new ones.</p>}
+        {s && (["must_have", "nice_to_have"] as const).map((kind) => {
+          const rows = s.requirements.filter((r) => r.kind === kind);
+          if (!rows.length) return null;
+          return (
+            <section key={kind} aria-label={kind === "must_have" ? "Must have" : "Nice to have"}>
+              <h3 className="text-sm font-medium text-ink-soft">{kind === "must_have" ? "Must have" : "Nice to have"}</h3>
+              <ul className="mt-2 space-y-4">
+                {rows.map((r, i) => (
+                  <li key={i}>
+                    <p className="font-medium">{r.text}</p>
+                    {r.state === "found" && r.quotes.map((q, j) => (
+                      <blockquote key={j} className="mt-1.5 border-l-2 border-rule-strong pl-3 text-sm">“{q.text}” <span className="text-ink-soft">({q.source === "CV" ? "CV" : "cover letter"})</span></blockquote>
+                    ))}
+                    {r.state === "not_mentioned" && <p className="mt-1 text-sm text-ink-soft">Not mentioned. The AI found no passage: check the CV.</p>}
+                    {r.state === "withheld" && <p className="mt-1 text-sm text-ink-soft">The matching passage carries personal details, which are left out. Read the CV.</p>}
+                    {r.state === "unchecked" && <p className="mt-1 text-sm text-ink-soft">No quote could be checked against the CV. Read the CV.</p>}
+                  </li>
+                ))}
+              </ul>
+            </section>
+          );
+        })}
+        {s && s.notes.length > 0 && <div className="panel space-y-1 px-4 py-3 text-sm">{s.notes.map((n, i) => <p key={i}>{n}</p>)}</div>}
+      </div>
+      <div className="mt-4 flex flex-wrap items-center justify-between gap-2">
+        <p className="text-sm text-ink-soft">{data?.prepared_at ? `Prepared by ${data.prepared_by ?? "someone"}, ${timestamp(data.prepared_at)}.` : ""}</p>
+        <div className="flex flex-wrap gap-2">
+          {c.has_cv && <a className="btn-quiet" href={`/api/recruitment/candidates/${c.id}/cv`}>Open CV</a>}
+          {data?.available && <button className={s ? "btn-quiet" : "btn-primary"} disabled={busy} onClick={prepare}>{s ? "Prepare it again" : "Prepare the summary"}</button>}
+          <button className="btn-quiet" onClick={onClose}>Close</button>
+        </div>
+      </div>
+    </Dialog>
+  );
+}
 
 function HistoryDialog({ c, onClose }: { c: Candidate; onClose: () => void }) {
   const { data, error } = useSWR<CandidateEvent[]>(`/recruitment/candidates/${c.id}/history`, fetcher);
