@@ -14,6 +14,7 @@ import binascii
 import hashlib
 import json
 import os
+import re
 import secrets
 import time
 from datetime import date, datetime, timezone
@@ -42,8 +43,10 @@ STAGE_TEXT = {
     "hired": ("Selected", "You have been selected for this role. HR will be in touch."),
     "not_selected": ("Not selected", "Your application was not selected for this role. Thank you for the time you gave it."),
 }
-# a PDF that carries a script, a launch action or an attachment is refused: a person opens it. A plain-case check, not a virus scan.
-ACTIVE_CONTENT = (b"/JavaScript", b"/JS", b"/Launch", b"/OpenAction", b"/EmbeddedFile", b"/RichMedia", b"/AA")
+# a PDF that carries a script, a launch action or an attachment is refused: a person opens it. A plain check, not a virus scan.
+# A marker counts only as a whole PDF name: "/AA << ... >>" is an action, "/AAAAAA+Arial" is the tag every exporter puts on an embedded font.
+ACTIVE_CONTENT = re.compile(rb"/(?:JavaScript|JS|Launch|OpenAction|EmbeddedFile|RichMedia|AA)(?=[\s\x00/<>\[\]()%{}]|$)")
+STREAM_START = re.compile(rb">>\s*stream\r?\n")
 
 
 # ---------- the privacy notice ----------
@@ -101,6 +104,20 @@ def open_job(job_id):
 
 # ---------- applying ----------
 
+def _outside_streams(data):
+    """The PDF without the bodies of its streams: compressed data (fonts, photos) can hold the bytes of any marker by chance.
+    A loop with find(), not one big regex, so a crafted file cannot make it quadratic."""
+    kept, pos = [], 0
+    while True:
+        start = STREAM_START.search(data, pos)
+        end = data.find(b"endstream", start.end()) if start else -1
+        if end < 0:                                         # no more streams (or one never closes: keep the rest and check it)
+            kept.append(data[pos:])
+            return b"".join(kept)
+        kept.append(data[pos:start.end()])
+        pos = end
+
+
 def check_cv(data):
     """None for a CV we accept, else the reason in words the candidate can act on."""
     if not data:
@@ -111,7 +128,7 @@ def check_cv(data):
         return "Your CV must be a PDF file."
     if b"/Encrypt" in data:
         return "That PDF is password-protected, so nobody could read it. Send it without a password."
-    if any(marker in data for marker in ACTIVE_CONTENT):
+    if ACTIVE_CONTENT.search(_outside_streams(data)):
         return "That PDF contains a script or an attachment, which we can't accept. Export your CV again as a plain PDF."
     return None
 
