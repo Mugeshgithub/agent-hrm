@@ -18,6 +18,7 @@ from starlette.middleware.sessions import SessionMiddleware
 
 import application_summary
 import candidate_assistant
+import interviews
 import careers
 import checkins
 import contracts
@@ -559,6 +560,24 @@ def outbox_sent(message_id: int, request: Request):
     return fail_on_error(outbox.mark_sent(hr["id"], message_id))
 
 
+@app.get("/api/hr/outbox/candidates")
+def hr_candidate_outbox(request: Request):
+    hr = need(request, "hr")
+    return fail_on_error(interviews.outbox(hr["id"]))                      # the emails to candidates about their interview, for HR to copy and send
+
+
+@app.post("/api/hr/outbox/candidates/reminders")
+def candidate_outbox_reminders(request: Request):
+    need(request, "hr")
+    return {"reminders": interviews.run_reminders()}                       # the same as the daily job (recruitment_jobs.py); safe to run again
+
+
+@app.post("/api/hr/outbox/candidates/{message_id}/sent")
+def candidate_outbox_sent(message_id: int, request: Request):
+    hr = need(request, "hr")
+    return fail_on_error(interviews.mark_sent(hr["id"], message_id))
+
+
 @app.get("/api/welcome/{token}")
 def welcome_state(token: str):
     return welcome.link_state(token)                                       # ready, expired, locked... nothing more
@@ -966,6 +985,43 @@ def recruitment_note_handled(note_id: int, request: Request):
     return recruitment_result(candidate_assistant.handle_note(recruiter(request)["id"], note_id))
 
 
+class InterviewIn(BaseModel):
+    slots: list[str]
+    duration_min: int
+    place: str = ""
+    note: str = ""
+
+
+class InterviewCancelIn(BaseModel):
+    reason: str = ""
+
+
+def calendar_response(result):
+    result = recruitment_result(result)
+    return Response(result["text"], media_type="text/calendar; charset=utf-8",
+                    headers={"Content-Disposition": f'attachment; filename="{result["filename"]}"', "X-Content-Type-Options": "nosniff"})
+
+
+@app.get("/api/recruitment/candidates/{application_id}/interview")
+def recruitment_interview(application_id: int, request: Request):
+    return recruitment_result(interviews.for_staff(recruiter(request)["id"], application_id))                  # the latest interview, the earlier ones, whether times can be offered
+
+
+@app.post("/api/recruitment/candidates/{application_id}/interview")
+def recruitment_offer_interview(application_id: int, body: InterviewIn, request: Request):
+    return recruitment_result(interviews.offer(recruiter(request)["id"], application_id, body.model_dump()))   # HR or the hiring manager offers 1 to 5 times
+
+
+@app.post("/api/recruitment/candidates/{application_id}/interview/cancel")
+def recruitment_cancel_interview(application_id: int, body: InterviewCancelIn, request: Request):
+    return recruitment_result(interviews.cancel(recruiter(request)["id"], application_id, body.reason))
+
+
+@app.get("/api/recruitment/candidates/{application_id}/interview.ics")
+def recruitment_interview_calendar(application_id: int, request: Request):
+    return calendar_response(interviews.calendar_for_staff(recruiter(request)["id"], application_id))
+
+
 SUMMARY_BY_PERSON = careers.Throttle(30, 3600)         # a summary calls a paid model: 30 an hour for one person
 
 
@@ -1090,6 +1146,45 @@ def careers_assistant_ask(token: str, body: AskIn, request: Request):
     except Exception as e:
         raise HTTPException(503, f"The assistant isn't available right now ({type(e).__name__}).")
     return {"reply": result["reply"], "noted": result["noted"]}
+
+
+class ChooseIn(BaseModel):
+    slot: str
+
+
+CHOOSE_BY_LINK = careers.Throttle(20, 600)             # choosing and cancelling change what staff and the outbox see: 20 tries per 10 minutes for one link
+
+
+def interview_allowed(token):
+    if not CHOOSE_BY_LINK.allow(token):
+        raise HTTPException(429, "That is a lot of tries in a short time. Please wait a little and try again.")
+
+
+@app.get("/api/careers/track/{token}/interview")
+def careers_interview(token: str):
+    app_row = careers._by_token(token)
+    if app_row is None:
+        raise HTTPException(404, careers.NOT_FOUND)
+    return interviews.for_candidate(app_row)
+
+
+@app.post("/api/careers/track/{token}/interview/choose")
+def careers_interview_choose(token: str, body: ChooseIn):
+    interview_allowed(token)
+    return careers_result(interviews.choose(token, body.slot))
+
+
+@app.post("/api/careers/track/{token}/interview/cancel")
+def careers_interview_cancel(token: str):
+    interview_allowed(token)
+    return careers_result(interviews.decline(token))
+
+
+@app.get("/api/careers/track/{token}/interview.ics")
+def careers_interview_calendar(token: str):
+    result = careers_result(interviews.calendar_for_candidate(token))
+    return Response(result["text"], media_type="text/calendar; charset=utf-8",
+                    headers={"Content-Disposition": f'attachment; filename="{result["filename"]}"', "X-Content-Type-Options": "nosniff"})
 
 
 @app.post("/api/careers/track/{token}/withdraw")

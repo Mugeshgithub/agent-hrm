@@ -24,6 +24,12 @@ export function dayWithWeekday(iso: string) {
   return `${DAYS[d.getDay()]} ${d.getDate()} ${MONTHS[d.getMonth()]}`;
 }
 
+// an interview time arrives as "2026-11-24 14:00", Paris time: shown as written, whatever time zone the browser is in
+export function wallTime(at: string) {
+  const [date, time] = at.split(/[ T]/);
+  return `${dayWithWeekday(date)}, ${time.slice(0, 5)}`;
+}
+
 export function range(start: string, end: string) {
   if (start === end) return dayWithWeekday(start);
   const a = parseISO(start), b = parseISO(end);

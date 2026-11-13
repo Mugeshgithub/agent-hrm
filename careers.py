@@ -242,6 +242,8 @@ def erase(conn, app, reason, by=None):
     conn.execute("DELETE FROM candidate_messages WHERE application_id = ?", (app["id"],))        # what they wrote to the assistant is personal data too
     conn.execute("DELETE FROM candidate_notes WHERE application_id = ?", (app["id"],))
     conn.execute("DELETE FROM application_summaries WHERE application_id = ?", (app["id"],))            # quotes from the CV are personal data too
+    conn.execute("DELETE FROM interviews WHERE application_id = ?", (app["id"],))                       # the interview and the emails about it (their address, their name)
+    conn.execute("DELETE FROM candidate_outbox WHERE application_id = ?", (app["id"],))
     conn.execute("INSERT INTO candidate_erasures (application_id, job_id, stage, reason, erased_by) VALUES (?, ?, ?, ?, ?)",
                  (app["id"], app["job_id"], app["stage"], reason, by))
     conn.execute("INSERT INTO application_events (application_id, actor_id, event, reason) VALUES (?, ?, 'erased', ?)", (app["id"], by, reason))

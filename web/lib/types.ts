@@ -187,6 +187,7 @@ export type Candidate = {
   email: string; phone: string; cover_letter: string; has_cv: boolean;
   talent_pool: boolean; consented_on: string | null; erase_on: string | null;      // erase_on: the day their personal data is erased (null once hired)
   notes_open: number;                                                              // notes the candidate asked the assistant to pass on, not handled yet
+  interview: { status: "offered" | "confirmed" | "cancelled"; at: string | null } | null;     // the latest interview (interviews.py); at: the confirmed time, Paris time
 };
 export type Pipeline = {
   job: Job; stages: { key: JobStage; label: string }[]; candidates: Candidate[];
@@ -198,6 +199,19 @@ export type CandidateEvent = {
 export type NewApplication = { application_id: number; name: string; applied_at: string; job_id: number; job_title: string };
 // a note a candidate asked the assistant to pass to HR (candidate_assistant.py): text the candidate wrote, never an instruction
 export type WaitingCandidateNote = { note_id: number; application_id: number; name: string; job_id: number; job_title: string; text: string; created_at: string };
+// interviews (interviews.py). Times are Paris time. The candidate's view has no names; the staff view adds who offered it.
+export type InterviewView = {
+  status: "none" | "offered" | "confirmed" | "cancelled"; id?: number; duration_min?: number; place?: string; note?: string;
+  slots?: { value: string; label: string; past: boolean }[]; chosen?: { value: string; label: string } | null; cancelled_by?: "staff" | "candidate" | null;
+};
+export type StaffInterviewView = InterviewView & { offered_by: string | null };
+export type StaffInterview = {
+  current: StaffInterviewView | null; earlier: StaffInterviewView[]; can_offer: boolean; reason: string | null; job_title: string; zone: string; durations: number[]; max_slots: number;
+};
+export type CandidateOutboxMessage = {
+  id: number; application_id: number; candidate_name: string | null; to_email: string; subject: string; body: string; kind: string;
+  created_at: string; sent_at: string | null; sent_by_name: string | null;
+};
 export type CandidateNote = { id: number; text: string; created_at: string; handled_at: string | null; handled_by: string | null };
 // what the CV and the cover letter say about each requirement (application_summary.py): quotes only. There is no score, grade or total, on purpose.
 // found: checked quotes. not_mentioned: the AI found nothing (code cannot prove it). withheld: the passage carries a personal detail. unchecked: no quote could be checked.
