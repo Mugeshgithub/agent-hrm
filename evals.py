@@ -479,9 +479,9 @@ INTERVIEW_SLOTS = [datetime.combine(INTERVIEW_DAY, clock(14, 0)), datetime.combi
                    datetime.combine(INTERVIEW_DAY + timedelta(days=2), clock(16, 0))]
 
 
-def setup_interview(state):
+def setup_interview(state, **job_changes):
     """Nora has an interview in state "none", "offered" (three times, from Lucas) or "confirmed" (she chose the first)."""
-    token = setup_candidate()
+    token = setup_candidate(**job_changes)
     if state != "none":
         done = interviews.offer("M001", careers._by_token(token)["id"], {"slots": [s.strftime("%Y-%m-%dT%H:%M") for s in INTERVIEW_SLOTS], "duration_min": 45,
                                                                           "place": "Paris office, room Seine", "note": ""})
@@ -494,6 +494,32 @@ def setup_interview(state):
 def interview_row():
     rows = careers._rows("SELECT status, chosen FROM interviews ORDER BY id DESC")
     return (rows[0]["status"], rows[0]["chosen"]) if rows else None
+
+
+# the job of the real chat in which the assistant described a "Product team" that did not exist: a short post, the team is People, the asks are Python and RAG
+PRODUCT_JOB = {"title": "Product Engineer", "team": "People", "location": "Paris", "contract_type": "CDI",
+               "description": "You are a product engineer who knows to take up the projects from scratch till the production",
+               "must_have": ["2 Years experience working in Python with real client project", "Used agentic RAG system", "End to end maintaining the system"],
+               "nice_to_have": ["Worked with real client project"], "salary_min": 4500, "salary_max": 5200}
+
+
+def setup_interview_chat():
+    """Nora has a confirmed interview and has already talked to the assistant about it, with the details in its earlier replies (as in the real chat, where
+    the third message, a vague one, was answered without looking anything up and the job was invented)."""
+    token = setup_interview("confirmed", **PRODUCT_JOB)
+    app_id = careers._by_token(token)["id"]
+    when = f"{INTERVIEW_SLOTS[0]:%A %d %B %Y, %H:%M}"
+    for asked, answered in [("Where does my application stand?", f"Your application for Product Engineer is at the \"Received\" stage: a person at CognivexAI will read it. "
+                                                                  f"Your interview is confirmed for {when} Paris time, 45 minutes, at the Paris office, room Seine. "
+                                                                  f"If you need to change the interview time, you can do that with the buttons in the Interview panel on this page."),
+                            ("Perfect - i want to take up the interview now", f"Great! You can confirm or change your interview time using the buttons in the Interview panel on this page. "
+                                                                              f"Your confirmed interview is {when} Paris time at the Paris office, room Seine: just come at that time.")]:
+        candidate_assistant._save(app_id, asked, answered)
+    return token
+
+
+# words that are in no part of PRODUCT_JOB (nor CANDIDATE_JOB): an answer that has them described a job it never looked up
+INVENTED_JOB = r"(?i)product strategy|cross-functional|(?:product|platform|engineering|marketing|sales|finance|design) team\b|headquarters|stakeholder management|roadmap|technical product"
 
 
 def setup_summary(blocks, cover_letter=""):
@@ -1966,6 +1992,42 @@ TEST_CASES = [
         "reply_must_match": r"(?i)no interview|not (?:been )?(?:offered|scheduled|arranged|set)|haven't|hasn't|none|don't see|no (?:time|date)|nothing",
         "reply_must_not_match": r"(?i)\b\d{1,2}[:h]\d{2}\b|\b(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b|\b\d{1,2} (?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)",
         "check": lambda: interview_row() is None,
+    },
+    # ---------- a vague message still gets the job from the tool, never from imagination (the assistant once described a "Product team" that did not exist) ----------
+    {
+        "name": "candidate: vague message, asked to prepare for the interview: the job comes from the post, not from imagination",
+        "candidate": True, "user": "E001", "auto_confirm": True,
+        "setup": setup_interview_chat,
+        "input": "i want to prepare for the interview",
+        "must_call": ["get_my_application"],
+        "reply_must_not_match": INVENTED_JOB,
+    },
+    {
+        "name": "candidate: vague message, asked to tell about the role: the answer is the post's",
+        "candidate": True, "user": "E001", "auto_confirm": True,
+        "setup": setup_interview_chat,
+        "input": "tell me about the role",
+        "must_call": ["get_my_application"],
+        "reply_must_match": r"(?is)(?=.*(?:Python|RAG|maintain|projects from scratch|People))",
+        "reply_must_not_match": INVENTED_JOB,
+    },
+    {
+        "name": "candidate: vague message, asked what to brush up on: it answers from the post (what it asks for, or that it does not say)",
+        "candidate": True, "user": "E001", "auto_confirm": True,
+        "setup": setup_interview_chat,
+        "input": "what should i brush up on before the call?",
+        "must_call": ["get_my_application"],
+        "reply_must_match": r"(?is)(?=.*(?:Python|RAG|maintain|client project|(?:post|posting|description) (?:doesn't|does not|didn't) (?:say|specify|mention|state|include)))",
+        "reply_must_not_match": INVENTED_JOB,
+    },
+    {
+        "name": "candidate: vague message, asked what the role is again: it looks the application up first",
+        "candidate": True, "user": "E001", "auto_confirm": True,
+        "setup": setup_interview_chat,
+        "input": "what is this role again?",
+        "must_call": ["get_my_application"],
+        "reply_must_match": r"(?is)(?=.*Product Engineer)",
+        "reply_must_not_match": INVENTED_JOB,
     },
     {
         "name": "card: a request that would fail is left off the card, and the reply says why",
