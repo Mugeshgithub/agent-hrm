@@ -2117,7 +2117,7 @@ def a_candidate_assistant_answer_comes_from_the_job_post_and_the_stage_and_never
     assert candidate_assistant.run_tool(careers._by_token(token), "get_privacy_notice", {})["sections"][3]["title"] == "How long we keep it"
     for forbidden in ("get_leave_balance", "decide_leave", "get_job_pipeline", "get_pending_requests", "search_policy", "read_my_document", "apply_leave"):
         assert "error" in candidate_assistant.run_tool(careers._by_token(token), forbidden, {}), forbidden
-    later = scripted(says("It is in Paris."))
+    later = scripted(calls("get_my_application"), says("It is in Paris."))
     candidate_assistant.answer(token, "Where is it?", later)
     shown = later.seen[0]["messages"]
     assert [m["role"] for m in shown] == ["user", "assistant", "user"] and shown[0]["content"] == "What does the job pay?"          # the earlier exchange is shown, plain text
@@ -2133,10 +2133,10 @@ def a_figure_the_tools_did_not_return_and_a_promise_are_sent_back_once_and_then_
     assert candidate_assistant.answer(token, "What is the salary?", right)["reply"] == "The post gives \u20ac42,000 to \u20ac52,000 a year."
     for promise in ("You have a good chance of being selected.", "I guarantee you an interview.", "You will hear back within 5 days.", "There are other candidates, but you are a strong candidate."):
         assert candidate_assistant.reply_problem(promise), promise
-        model = scripted(says(promise), says("People will read your application."))
+        model = scripted(calls("get_my_application"), says(promise), says("People will read your application."))
         assert candidate_assistant.answer(token, "Anything new?", model)["reply"] == "People will read your application."      # sent back once, the second try is fine
-        assert "promises, predicts or compares" in model.seen[1]["messages"][-1]["content"]
-        stubborn = scripted(says(promise), says(promise))
+        assert "promises, predicts or compares" in model.seen[2]["messages"][-1]["content"]
+        stubborn = scripted(calls("get_my_application"), says(promise), says(promise))
         assert "can't say anything about your chances" in candidate_assistant.answer(token, "Anything new?", stubborn)["reply"]   # still wrong: replaced
     for fine in ("Your application is being reviewed.", "We erase your application 30 days after it is marked as not selected.", "I can't say anything about your chances.",
                  "The post does not say whether the role is remote. Would you like me to pass a note to HR?"):
@@ -2144,10 +2144,36 @@ def a_figure_the_tools_did_not_return_and_a_promise_are_sent_back_once_and_then_
 
 
 @test
+def a_reply_written_without_looking_the_application_up_in_this_turn_is_sent_back_once_and_then_replaced():
+    job, token = a_job_with_a_candidate()
+    # the real failure: with the interview already in its earlier replies, the model answered a vague message from memory and described a job that did not exist
+    model = scripted(says("It is a Product team role: product strategy and cross-functional work."), calls("get_my_application"), says("The post is for Data Analyst in Paris."))
+    got = candidate_assistant.answer(token, "i want to prepare for the interview", model)
+    assert got["reply"] == "The post is for Data Analyst in Paris." and got["tools"] == ["get_my_application"]
+    sent_back = model.seen[1]["messages"][-1]["content"]
+    assert "without calling get_my_application" in sent_back and sent_back.startswith(candidate_assistant.HIDDEN)                    # the note is for the model, not for the person
+    assert "Product team" not in str(candidate_assistant.recent(application_id(job)))                                     # what the person is shown and what is saved
+    # it still does not look it up: the reply is replaced, in the person's language, and says nothing about the job
+    stubborn = scripted(says("It is a Product team role."), says("A Product team role, I am sure."))
+    got = candidate_assistant.answer(token, "i want to prepare for the interview", stubborn)
+    assert got["reply"] == candidate_assistant.NOT_LOOKED_UP and "Product" not in got["reply"] and got["tools"] == []
+    french = scripted(says("Un poste dans l'équipe Produit."), says("Toujours l'équipe Produit."))
+    assert candidate_assistant.answer(token, "Je voudrais me préparer pour l'entretien, vous pouvez m'aider ?", french)["reply"] == candidate_assistant.NOT_LOOKED_UP_FR
+    # the privacy notice alone is not a lookup of the application: the job and the stage are not in it
+    privacy = scripted(calls("get_privacy_notice"), says("Your data is kept as the notice says."), calls("get_my_application"), says("Your data is erased on the date shown."))
+    got = candidate_assistant.answer(token, "How long do you keep my data?", privacy)
+    assert got["tools"] == ["get_privacy_notice", "get_my_application"] and got["reply"] == "Your data is erased on the date shown."
+    # a lookup first, as the prompt says: nothing is sent back and the model is asked only once
+    fine = scripted(calls("get_my_application"), says("The post is for Data Analyst in Paris."))
+    assert candidate_assistant.answer(token, "tell me about the role", fine)["reply"] == "The post is for Data Analyst in Paris." and len(fine.seen) == 2
+
+
+@test
 def a_note_for_hr_is_written_only_when_asked_or_after_a_yes_and_only_a_few_a_day_and_hr_reads_it_on_the_page():
     job, token = a_job_with_a_candidate()
     cid = application_id(job)
-    too_early = scripted(calls("note_for_hr", note="Is it remote?"), says("The post does not say. Would you like me to pass a note to HR?"))
+    too_early = scripted(calls("note_for_hr", note="Is it remote?"), says("The post does not say. Would you like me to pass a note to HR?"),
+                         calls("get_my_application"), says("The post does not say. Would you like me to pass a note to HR?"))      # no lookup the first time: sent back once
     got = candidate_assistant.answer(token, "Is it remote?", too_early)
     assert got["noted"] is False and candidate_assistant.notes("H001", cid) == []                                      # no offer, no ask: nothing written
     assert "Not yet" in too_early.seen[1]["messages"][-1]["content"][0]["content"]
@@ -2157,7 +2183,7 @@ def a_note_for_hr_is_written_only_when_asked_or_after_a_yes_and_only_a_few_a_day
     assert [n["text"] for n in candidate_assistant.notes("H001", cid)] == ["Hello, I would like to know whether the job can be done remotely."]
     asked = scripted(calls("note_for_hr", note="Please change my phone number."), says("Passed on."))
     assert candidate_assistant.answer(token, "Please tell HR to change my phone number", asked)["noted"] is True
-    assert candidate_assistant.answer(token, "ok", scripted(calls("note_for_hr", note="x" * 20), says("ok")))["noted"] is False          # "ok" after a reply with no offer
+    assert candidate_assistant.answer(token, "ok", scripted(calls("note_for_hr", note="x" * 20), says("ok"), calls("get_my_application"), says("ok")))["noted"] is False          # "ok" after a reply with no offer
     candidate_assistant.add_note(cid, "y" * 5000)
     assert len(careers._rows("SELECT text FROM candidate_notes ORDER BY id DESC LIMIT 1")[0]["text"]) == candidate_assistant.MAX_NOTE + 1      # cut, with a "…"
     for i in range(candidate_assistant.NOTES_PER_DAY):
@@ -2186,10 +2212,10 @@ def a_reply_that_says_a_note_was_passed_on_when_none_was_saved_is_sent_back_once
         assert candidate_assistant.claims_note(claim), claim
     for fine in ("Would you like me to pass a note to HR?", "I can pass a note to HR if you want.", "The post does not say.", "Your application is being reviewed."):
         assert not candidate_assistant.claims_note(fine), fine
-    model = scripted(says("I've passed your question to HR."), says("The post does not say. Would you like me to pass a note to HR?"))
+    model = scripted(calls("get_my_application"), says("I've passed your question to HR."), says("The post does not say. Would you like me to pass a note to HR?"))
     assert candidate_assistant.answer(token, "Can I work from home?", model)["reply"].startswith("The post does not say")           # sent back once: no note was saved
-    assert "no note" in model.seen[1]["messages"][-1]["content"] and candidate_assistant.notes("H001", cid) == []
-    stubborn = scripted(says("I've passed your question to HR."), says("I have sent a note to HR."))
+    assert "no note" in model.seen[2]["messages"][-1]["content"] and candidate_assistant.notes("H001", cid) == []
+    stubborn = scripted(calls("get_my_application"), says("I've passed your question to HR."), says("I have sent a note to HR."))
     assert candidate_assistant.answer(token, "Can I work from home?", stubborn)["reply"] == candidate_assistant.NO_NOTE            # still claimed: replaced
     saved = scripted(calls("note_for_hr", note="Can the role be done from home?"), says("I've passed your question to HR. They will read it; I can't say when."))
     got = candidate_assistant.answer(token, "Please tell HR to say whether I can work from home", saved)

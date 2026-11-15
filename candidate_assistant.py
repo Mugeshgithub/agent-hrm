@@ -27,7 +27,7 @@ NOTES_PER_DAY = 5               # per application: a note is read by a person, s
 OPEN_NOTES = 20
 HISTORY = 10                    # earlier messages the assistant is shown
 KEPT = 60                       # earlier messages kept at all
-MAX_CALLS = 4
+MAX_CALLS = 6
 
 INTRO = ("I'm an AI assistant, not a person. I can answer questions about this job and where your application stands, and I can pass a note to HR. "
          "I can't see your CV, I don't know anything about other candidates, and I never say anything about your chances: people read every "
@@ -135,6 +135,17 @@ NOTE_NOT_MADE = HIDDEN + ("Your reply says a note was passed to HR, but note_for
                           "itself and say nothing about this note.")
 NO_NOTE = "I haven't passed anything to HR yet. If you'd like me to, tell me what to write."
 NO_NOTE_FR = "Je n'ai encore rien transmis aux RH. Si vous le souhaitez, dites-moi ce qu'il faut leur \u00e9crire."
+
+# every reply the model writes follows get_my_application in THIS turn (the prompt says so; code checks it). With the interview details already in its earlier
+# replies, the model once answered "i want to prepare for the interview" with no lookup at all and described a job that did not exist (a "Product team").
+# Only a reply after a note was saved needs no lookup.
+LOOK_UP_FIRST = HIDDEN + ("You answered without calling get_my_application in this turn, so what you say about the job, the application or the interview may be "
+                          "wrong: earlier messages are old, and you must not rely on them or on memory. Call get_my_application now, then answer the person's "
+                          "whole question again from what the tools returned in this turn (all of them, not only this one). Start with the answer itself and say "
+                          "nothing about this note.")
+NOT_LOOKED_UP = "I couldn't check your application just now, so I won't guess. Please ask again, or I can pass a note to HR."
+NOT_LOOKED_UP_FR = ("Je n'ai pas pu consulter votre candidature \u00e0 l'instant, donc je pr\u00e9f\u00e8re ne rien supposer. R\u00e9essayez, ou je peux "
+                    "transmettre une note aux RH.")
 
 
 def claims_note(reply):
@@ -317,13 +328,19 @@ def answer(token, text, model):
         _save(app["id"], text, fixed)
         return {"reply": fixed, "noted": False, "tools": []}
     messages = [*earlier, {"role": "user", "content": text}]
-    sources, called, noted, promise_retry, figures_retry, note_retry = [], [], False, False, False, False
+    sources, called, noted, promise_retry, figures_retry, note_retry, lookup_retry = [], [], False, False, False, False, False
     for _ in range(MAX_CALLS):
         response = model(PROMPT, messages, TOOLS)
         messages.append({"role": "assistant", "content": response.content})
         if response.stop_reason != "tool_use":
             reply = "".join(b.text for b in response.content if b.type == "text").strip()
-            if claims_note(reply) and not noted:
+            if "get_my_application" not in called and not noted:
+                if not lookup_retry:
+                    lookup_retry = True
+                    messages.append({"role": "user", "content": LOOK_UP_FIRST})
+                    continue
+                reply = NOT_LOOKED_UP_FR if _french(text) else NOT_LOOKED_UP
+            elif claims_note(reply) and not noted:
                 if not note_retry:
                     note_retry = True
                     messages.append({"role": "user", "content": NOTE_NOT_MADE})
