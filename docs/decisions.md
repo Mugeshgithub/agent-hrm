@@ -79,3 +79,10 @@ Entries marked *backfilled* were written afterwards from the code, the git histo
 - **Why:** both steps only improve an order that is already good. 3 runs before and after, production path, top 5: 49-50/50 became 50/50 every run; held-out 20/20 and situations 14/14 unchanged; the rewrite alone went from 38-41/50 to 45/50 every run.
 - **Cost:** the strict reader turns down 3 or 4 of 100 rerank answers (Haiku adds "25-1" or an explanation): those keep the search order. A search can still wait about a minute when every step times out (was up to 30 minutes per call).
 - **Change it when:** "rerank answer is not a list of positions" shows up often in the log, or recall drops: ask for structured JSON output instead.
+
+### 12. Labour code from the Légifrance API, loaded beside the live data (PR #45, 2026-11-17)
+- **Chose:** one `consult/legiPart` call for the whole Code du travail, cleaned in code (HTML to text, entries listed twice, two versions, old pre-2008 code, annexes), cut and embedded as today, stored in a side table `chunks_api` ([labour_code/legifrance.py](../labour_code/legifrance.py), [labour_code/load_api.py](../labour_code/load_api.py)).
+- **Not chosen:** one `getArticle` call per article (about 11,500), the DILA open-data XML files, or keeping the Hugging Face copy.
+- **Why:** the copy we search lacks 1,830 articles in force and has 210 out-of-date texts; the API gives everything in about 6 seconds. Recall on the new table equals today's: 50/50, 20/20, 14/14 at top 5.
+- **Cost:** sandbox data so far. Annexes (10 tables) and 62 old-code articles are left out; 53 articles with a repeated sentence are kept. $0.04 of embeddings once, then only changed chunks.
+- **Change it when:** production keys exist (`PISTE_ENV=production`), or recall on the new table falls below the live one.

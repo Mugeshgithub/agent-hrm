@@ -10,6 +10,8 @@ from psycopg.rows import dict_row
 
 load_dotenv()
 DB_URL = os.environ["LABOUR_DB_URL"]
+TABLE = os.environ.get("LABOUR_TABLE", "chunks")       # chunks_api: measure the Légifrance load (load_api.py) before it goes live
+assert re.fullmatch(r"[a-z_]+", TABLE), TABLE           # a table name goes into the SQL text, so letters and _ only
 MODEL = "text-embedding-3-small"
 client = OpenAI()
 
@@ -27,7 +29,7 @@ def vector_search(conn, question, k=20):
     # meaning: closest embeddings first (<=> is cosine distance)
     v = embed(question)
     return conn.execute(
-        """SELECT chunk_id, num, text FROM chunks
+        f"""SELECT chunk_id, num, text FROM {TABLE}
            ORDER BY embedding <=> %s::vector LIMIT %s""", (v, k)).fetchall()
 
 
@@ -38,7 +40,7 @@ def keyword_search(conn, question, k=20):
         return []
     query = " | ".join(words)
     return conn.execute(
-        """SELECT chunk_id, num, text FROM chunks, to_tsquery('french', %s) q
+        f"""SELECT chunk_id, num, text FROM {TABLE}, to_tsquery('french', %s) q
            WHERE tsv @@ q ORDER BY ts_rank(tsv, q, 1) DESC LIMIT %s""", (query, k)).fetchall()
 
 

@@ -7,7 +7,7 @@ import os
 import sys
 import time
 import types
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 import db
 db.DB_PATH = "unit_test_hr.db"   # its own database, never the real hr.db
@@ -35,6 +35,8 @@ import tool_guard
 import tools
 from eval_retry import MAX_RETRIED, retry_report, run_with_retry
 from judge_parse import verdict
+from labour_code import chunk as law_chunk
+from labour_code import legifrance
 from tools import (count_working_days, apply_leave, decide_leave, cancel_leave,
                    get_leave_balance, get_team_member_balance)
 
@@ -553,6 +555,151 @@ def labour_rerank_with_no_candidates_makes_no_call():
     search.claude.answers = ["congés payés durée"]
     assert search.reranked_search(None, "How many days of paid leave?") == []
     assert len(search.claude.calls) == 1                                                       # the rewrite only, no rerank
+
+
+@test
+def labour_search_table_can_be_switched_for_a_measurement_but_only_to_a_plain_name():
+    saved = os.environ.get("LABOUR_TABLE")
+    try:
+        os.environ["LABOUR_TABLE"] = "chunks_api"                                              # load_api.py's side table
+        search = labour_search()
+        seen = []
+        conn = types.SimpleNamespace(execute=lambda sql, params: seen.append(sql) or types.SimpleNamespace(fetchall=lambda: []))
+        search.embed = lambda question: "[0]"
+        search.vector_search(conn, "congés payés")
+        search.keyword_search(conn, "congés payés")
+        assert len(seen) == 2 and all("FROM chunks_api" in sql for sql in seen), seen
+        os.environ["LABOUR_TABLE"] = "chunks; DROP TABLE chunks"                               # the name goes into the SQL text
+        try:
+            labour_search()
+            accepted = True
+        except AssertionError:
+            accepted = False
+        assert not accepted
+    finally:
+        if saved is None:
+            os.environ.pop("LABOUR_TABLE", None)
+        else:
+            os.environ["LABOUR_TABLE"] = saved
+
+# ---------- the labour code from Légifrance: one call, cleaned before anything is stored (labour_code/legifrance.py) ----------
+
+def at_midnight_ms(day):
+    return int(datetime(day.year, day.month, day.day, tzinfo=timezone.utc).timestamp() * 1000)
+
+
+def legifrance_answer():
+    """A small consult/legiPart answer with each problem the real one has (Nov 2026: 164 entries listed twice, one article in
+    two versions, 62 old-code articles, 10 annexes, a number with spaces, a link label left in a text, the same decree sentence 14 times)."""
+    today = date.today()
+    long_ago, last_month = at_midnight_ms(today - timedelta(days=4000)), at_midnight_ms(today - timedelta(days=30))
+
+    def art(id, num, content, etat="VIGUEUR", start=long_ago, end=at_midnight_ms(date(2999, 1, 1))):
+        return {"id": id, "cid": "C" + id, "num": num, "etat": etat, "dateDebut": str(start), "dateFin": end, "content": content}
+    decree = "<p>Un décret en Conseil d'Etat détermine les modalités d'application du présent chapitre.</p>"
+    chapter = {"title": "Chapitre Ier : Congés payés ", "sections": [], "articles": [
+        art("A1", "L3141-3", '<p>Le salarié a droit à un congé de <a href="x" title="y">deux jours et demi</a> ouvrables.</p><p>Surface : 2 m<sup>2</sup>.</p>'),
+        art("A2", "L3141-4", "<p>Ancienne version.</p>"),
+        art("A3", "L3141-4", "<p>Nouvelle version.</p>", start=last_month),
+        art("A4", "", "<p>Sans numéro.</p>"),
+        art("A5", "Annexe I", "<table><tr><td>a</td><td>b</td></tr></table>"),
+        art("A6", "L3141-5", "<p>Abrogé.</p>", etat="ABROGE"),
+        art("A7", "L3141-6", "<p>Fini hier.</p>", end=at_midnight_ms(today - timedelta(days=1))),
+        art("A8", "L3141-7", "<p>Abrogé l'an prochain.</p>", etat="ABROGE_DIFF", end=at_midnight_ms(today + timedelta(days=365))),
+        art("A9", " L3141-8 ", "<p>mentionnés à l'article AncreL. 1221-13Ancre, sont</p>"),
+        art("A10", "L3141-9", "<p> </p>"),
+    ] + [art(f"B{i}", f"R3141-{i}", decree) for i in range(1, 6)]}
+    return {"sections": [
+        {"title": "Partie législative  ", "sections": [chapter], "articles": []},
+        {"title": "Partie réglementaire", "sections": [{"title": "Ailleurs", "sections": [], "articles": [chapter["articles"][0]]}], "articles": []},
+        {"title": "Partie législative ancienne", "sections": [], "articles": [art("O1", "L143-11-4", "<p>Ancien code.</p>")]},
+    ]}
+
+
+@test
+def legifrance_articles_are_cleaned_merged_and_every_left_out_one_is_counted():
+    articles, report, boilerplate, annexes = legifrance.articles_from(legifrance_answer(), date.today())
+    by = {a["num"]: a for a in articles}
+    assert sorted(by) == ["L3141-3", "L3141-4", "L3141-7", "L3141-8"] + [f"R3141-{i}" for i in range(1, 6)], sorted(by)
+    assert by["L3141-3"]["texte"] == "Le salarié a droit à un congé de deux jours et demi ouvrables. Surface : 2 m2."   # a link and an exponent unwrapped in place
+    assert by["L3141-4"]["id"] == "A3" and by["L3141-4"]["texte"] == "Nouvelle version."                             # the version that started last
+    assert by["L3141-8"]["texte"] == "mentionnés à l'article L. 1221-13, sont"                                        # number trimmed, link label gone
+    assert by["L3141-3"]["dateFin"] == "2999-01-01" and by["L3141-3"]["cid"] == "CA1"
+    assert report == {"entries": 17, "same entry twice": 1, "not in force today": 2, "old pre-2008 code": 1, "no article number": 1,
+                      "annexes left out": 1, "empty text": 1, "two versions, latest kept": 1, "kept": 9, "articles with a repeated text": 5}, dict(report)
+    assert annexes == ["Annexe I"]
+    assert boilerplate == [("Un décret en Conseil d'Etat détermine les modalités d'application du présent chapitre.", 5)]   # reported, still kept
+    chunks = law_chunk.chunks_for(by["L3141-3"])                                                                     # cut like the current copy
+    assert [c["chunk_id"] for c in chunks] == ["L3141-3#1"] and chunks[0]["path"] == "Partie législative > Chapitre Ier : Congés payés"
+    assert chunks[0]["search_text"].startswith("Article L3141-3. Partie législative > Chapitre Ier : Congés payés. Le salarié a droit")
+
+
+@test
+def legifrance_dates_arrive_as_milliseconds_in_numbers_or_text():
+    assert legifrance.to_day(at_midnight_ms(date(2026, 11, 17))) == date(2026, 11, 17)
+    assert legifrance.to_day(str(at_midnight_ms(date(2999, 1, 1)))) == date(2999, 1, 1)
+    assert legifrance.to_day("2026-11-17") == date(2026, 11, 17)
+    assert legifrance.to_day(None) is None and legifrance.to_day("") is None
+
+
+def stand_in_httpx(answers):
+    """httpx for legifrance.fetch_code (CI's unit job has no packages): gives these (status, body) answers in turn, records each request."""
+    class HTTPStatusError(Exception):
+        pass
+
+    class TransportError(Exception):
+        pass
+    calls = []
+
+    def post(url, **request):
+        calls.append((url, request))
+        status, body = answers.pop(0)
+
+        def raise_for_status():
+            if status >= 400:
+                raise HTTPStatusError(status)
+        return types.SimpleNamespace(json=lambda: body, raise_for_status=raise_for_status)
+    return types.SimpleNamespace(post=post, HTTPStatusError=HTTPStatusError, TransportError=TransportError, calls=calls)
+
+
+@test
+def legifrance_fetch_is_one_call_retried_on_429_and_the_secret_goes_only_to_the_token_url():
+    names = ("PISTE_CLIENT_ID", "PISTE_CLIENT_SECRET", "PISTE_ENV")
+    saved = sys.modules.get("httpx"), {k: os.environ.get(k) for k in names}, legifrance.RETRY_WAIT
+    token, (sandbox_token, sandbox_api), (prod_token, prod_api) = (200, {"access_token": "T1"}), legifrance.HOSTS["sandbox"], legifrance.HOSTS["production"]
+    try:
+        os.environ.update(PISTE_CLIENT_ID="id-1", PISTE_CLIENT_SECRET="secret-1")
+        os.environ.pop("PISTE_ENV", None)
+        legifrance.RETRY_WAIT = 0
+        sys.modules["httpx"] = fake = stand_in_httpx([token, (429, {}), token, (200, {"sections": []})])
+        assert legifrance.fetch_code(date(2026, 11, 17)) == {"sections": []}
+        assert [url for url, _ in fake.calls] == [sandbox_token, sandbox_api + "consult/legiPart"] * 2          # sandbox unless PISTE_ENV says otherwise
+        asked = fake.calls[-1][1]
+        noon = int(datetime(2026, 11, 17, 12, tzinfo=timezone.utc).timestamp() * 1000)
+        assert asked["json"] == {"textId": legifrance.CODE_DU_TRAVAIL, "date": noon}
+        assert asked["headers"]["Authorization"] == "Bearer T1" and "secret-1" not in repr(asked)
+        assert fake.calls[0][1]["data"]["client_secret"] == "secret-1"
+        sys.modules["httpx"] = fake = stand_in_httpx([token, (200, {})])
+        legifrance.fetch_code(date(2026, 11, 17), env="production")
+        assert [url for url, _ in fake.calls] == [prod_token, prod_api + "consult/legiPart"]
+        sys.modules["httpx"] = fake = stand_in_httpx([token, (429, {})] * 3)
+        try:
+            legifrance.fetch_code(date(2026, 11, 17))
+            gave_up = False
+        except fake.HTTPStatusError:
+            gave_up = True                                                                                     # after 3 tries: the caller keeps its data
+        assert gave_up and len(fake.calls) == 6
+    finally:
+        if saved[0] is None:
+            sys.modules.pop("httpx", None)
+        else:
+            sys.modules["httpx"] = saved[0]
+        for k, v in saved[1].items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        legifrance.RETRY_WAIT = saved[2]
 
 # ---------- reading the judge's answer (judge_parse.py): its text is free-form, a bad read must never pass ----------
 

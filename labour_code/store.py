@@ -12,9 +12,11 @@ MODEL = "text-embedding-3-small"   # 1,536 numbers per text; works across French
 BATCH = 100
 client = OpenAI()
 
-SCHEMA = """
+def schema(table="chunks"):
+    # the same columns and indexes for the live table and for a side table (load_api.py loads Légifrance into chunks_api)
+    return f"""
 CREATE EXTENSION IF NOT EXISTS vector;
-CREATE TABLE IF NOT EXISTS chunks (
+CREATE TABLE IF NOT EXISTS {table} (
     chunk_id    text PRIMARY KEY,
     num         text NOT NULL,
     part        text,
@@ -24,6 +26,9 @@ CREATE TABLE IF NOT EXISTS chunks (
     text        text NOT NULL,
     search_text text NOT NULL,
     embedding   vector(1536) NOT NULL,
+    article_id  text,           -- Légifrance LEGIARTI id: a new version of an article gets a new one
+    cid         text,           -- the article's id across its versions
+    text_hash   text,           -- sha256 of search_text: an unchanged chunk keeps its vector
     -- keyword search: French stemming, so "congé" also matches "congés"
         -- keyword search: article text counts fully (A), the path only a little (D)
     tsv tsvector GENERATED ALWAYS AS (
@@ -31,10 +36,13 @@ CREATE TABLE IF NOT EXISTS chunks (
         setweight(to_tsvector('french', coalesce(path, '')), 'D')
     ) STORED
 );
-CREATE INDEX IF NOT EXISTS chunks_embedding_idx ON chunks USING hnsw (embedding vector_cosine_ops);
-CREATE INDEX IF NOT EXISTS chunks_tsv_idx ON chunks USING gin (tsv);
-CREATE INDEX IF NOT EXISTS chunks_num_idx ON chunks (num);
+CREATE INDEX IF NOT EXISTS {table}_embedding_idx ON {table} USING hnsw (embedding vector_cosine_ops);
+CREATE INDEX IF NOT EXISTS {table}_tsv_idx ON {table} USING gin (tsv);
+CREATE INDEX IF NOT EXISTS {table}_num_idx ON {table} (num);
 """
+
+
+SCHEMA = schema()
 
 
 def load_chunks():
