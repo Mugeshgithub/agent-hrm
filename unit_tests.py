@@ -1,7 +1,12 @@
 # unit_tests.py: fast checks of the business rules. No AI, no API keys, no cost.
+import contextlib
+import importlib.util
+import io
 import json
+import os
 import sys
 import time
+import types
 from datetime import date, timedelta
 
 import db
@@ -405,6 +410,149 @@ def retrieved_article_is_allowed():
     assert ungrounded_citations(reply, sources) == []
     # an article named inside a policy section also counts as a source
     assert ungrounded_citations("L3141-3 sets the minimum.", ['{"sections": [{"text": "article L3141-3"}]}']) == []
+
+# ---------- labour-law search: a failed or odd Haiku step falls back to the search, never an error (labour_code/search.py) ----------
+
+class FakeClaude:
+    """Stands in for search.claude: gives these answers in turn (an exception is raised) and records each call."""
+    def __init__(self, answers, options):
+        self.answers, self.calls, self.options = list(answers), [], options   # options: what the real client was built with
+        self.messages = self
+
+    def create(self, **request):
+        self.calls.append(request)
+        answer = self.answers.pop(0)
+        if isinstance(answer, Exception):
+            raise answer
+        return types.SimpleNamespace(content=[types.SimpleNamespace(type="text", text=answer)])
+
+
+def labour_search(*answers):
+    """labour_code/search.py with a fake Claude. Its libraries are stand-ins (CI's unit-test job installs no packages), put back after loading."""
+    stand_ins = {name: types.ModuleType(name) for name in ("psycopg", "psycopg.rows", "dotenv", "openai", "anthropic")}
+    stand_ins["psycopg.rows"].dict_row = None
+    stand_ins["dotenv"].load_dotenv = lambda: None
+    stand_ins["openai"].OpenAI = lambda: None
+    stand_ins["anthropic"].Anthropic = lambda **options: options
+    saved, saved_url = {name: sys.modules.get(name) for name in stand_ins}, os.environ.get("LABOUR_DB_URL")
+    sys.modules.update(stand_ins)
+    os.environ["LABOUR_DB_URL"] = "postgresql://never-used"
+    try:
+        spec = importlib.util.spec_from_file_location("labour_search", os.path.join(os.path.dirname(os.path.abspath(__file__)), "labour_code", "search.py"))
+        search = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(search)
+    finally:
+        for name, module in saved.items():
+            if module is None:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = module
+        if saved_url is None:
+            os.environ.pop("LABOUR_DB_URL", None)
+        else:
+            os.environ["LABOUR_DB_URL"] = saved_url
+    search.claude = FakeClaude(answers, search.claude)
+    return search
+
+
+def candidates():
+    # three articles in search order; L3141-3 has two chunks, the reranker sees it once
+    return [{"chunk_id": 1, "num": "L3141-1", "text": "Tout salarié a droit chaque année à un congé payé."},
+            {"chunk_id": 2, "num": "L3141-3", "text": "Le salarié a droit à un congé de deux jours et demi ouvrables par mois."},
+            {"chunk_id": 3, "num": "L3141-3", "text": "La durée totale du congé exigible ne peut excéder trente jours ouvrables."},
+            {"chunk_id": 4, "num": "L3141-12", "text": "Les congés peuvent être pris dès l'embauche."}]
+
+
+SEARCH_ORDER = ["L3141-1", "L3141-3", "L3141-12"]
+
+
+def nums(rows):
+    return [r["num"] for r in rows]
+
+
+def searches_seen(search):
+    # the database searches stand in too: record which words each one was given
+    seen = []
+    search.vector_search = lambda conn, question, k=20: seen.append(("vector", question)) or candidates()[:2]
+    search.keyword_search = lambda conn, question, k=20: seen.append(("keyword", question)) or candidates()[3:]
+    return seen
+
+
+@test
+def labour_rerank_failing_keeps_the_search_order_and_says_so_in_the_log():
+    search = labour_search(RuntimeError("Overloaded"))
+    with contextlib.redirect_stdout(io.StringIO()) as log:
+        assert nums(search.rerank("How many days of paid leave?", candidates())) == SEARCH_ORDER
+    assert "rerank failed (RuntimeError): search order kept" in log.getvalue()
+    assert len(search.claude.calls) == 1
+
+
+@test
+def labour_rewrite_failing_searches_with_the_users_own_words_and_tries_again_next_time():
+    search = labour_search(RuntimeError("Overloaded"), "congés payés durée")
+    seen = searches_seen(search)
+    with contextlib.redirect_stdout(io.StringIO()) as log:
+        assert nums(search.multi_query_search(None, "How many days of paid leave?")) == ["L3141-1", "L3141-3"]
+    assert seen == [("vector", "How many days of paid leave?")]                     # no keyword search on English words
+    assert "query rewrite failed (RuntimeError): searching with the user's words only" in log.getvalue()
+    seen.clear()
+    search.multi_query_search(None, "How many days of paid leave?")                    # a failure is not cached
+    assert seen == [("vector", "How many days of paid leave?"), ("vector", "congés payés durée"), ("keyword", "congés payés durée")]
+
+
+@test
+def labour_rewrite_and_rerank_have_a_10_second_timeout_one_retry_and_temperature_0():
+    search = labour_search(TimeoutError("Request timed out."), TimeoutError("Request timed out."))
+    assert search.claude.options == {"timeout": 10, "max_retries": 1}
+    searches_seen(search)
+    with contextlib.redirect_stdout(io.StringIO()) as log:
+        assert nums(search.reranked_search(None, "How many days of paid leave?")) == ["L3141-1", "L3141-3"]   # timed out twice: still articles
+    assert "query rewrite failed (TimeoutError)" in log.getvalue() and "rerank failed (TimeoutError)" in log.getvalue()
+    assert [call["temperature"] for call in search.claude.calls] == [0, 0]
+    search = labour_search("congés payés durée", "2,1")
+    searches_seen(search)
+    with contextlib.redirect_stdout(io.StringIO()):
+        search.search_for_agent(None, "How many days of paid leave?", None)
+    assert [(call["max_tokens"], call["temperature"]) for call in search.claude.calls] == [(60, 0), (150, 0)]
+
+
+@test
+def labour_agent_search_still_returns_articles_when_every_haiku_step_fails():
+    search = labour_search(RuntimeError("Overloaded"), RuntimeError("Overloaded"), RuntimeError("Overloaded"))
+    seen = searches_seen(search)
+    with contextlib.redirect_stdout(io.StringIO()):
+        results = search.search_for_agent(None, "How many days of paid leave?", "paid leave entitlement per year")
+    assert nums(results) == ["L3141-1", "L3141-3"]
+    assert [kind for kind, _ in seen] == ["vector", "vector"] and len(search.claude.calls) == 3    # two rewrites and the rerank, all failed
+
+
+@test
+def labour_rerank_reads_only_a_plain_list_of_positions():
+    def reranked(answer):
+        search = labour_search(answer)
+        with contextlib.redirect_stdout(io.StringIO()) as log:
+            order = nums(search.rerank("How many days of paid leave?", candidates()))
+        return order, log.getvalue()
+    # the old reader took the 3 of "L3141-3" as position 3 and put L3141-12 first
+    order, log = reranked("L3141-3 answers this")
+    assert order == SEARCH_ORDER and "not a list of positions: search order kept" in log
+    for answer in ("", "[2, 1, 3]", "2,1,3.", "Ranking: 2,1,3", "2\n1\n3", "2;1;3"):
+        assert reranked(answer) == (SEARCH_ORDER, "  [labour search] rerank answer is not a list of positions: search order kept\n"), answer
+    assert reranked("2,3,1") == (["L3141-3", "L3141-12", "L3141-1"], "")
+    assert reranked(" 3, 1 \n") == (["L3141-12", "L3141-1", "L3141-3"], "")               # spaces and a final line break are fine
+    assert reranked("3,9,3,0")[0] == ["L3141-12", "L3141-1", "L3141-3"]                       # out of range and repeats ignored
+    assert reranked("2")[0] == ["L3141-3", "L3141-1", "L3141-12"]                             # what it left out keeps search order
+
+
+@test
+def labour_rerank_with_no_candidates_makes_no_call():
+    search = labour_search()
+    assert search.rerank("How many days of paid leave?", []) == []
+    assert search.claude.calls == []
+    search.vector_search = search.keyword_search = lambda conn, question, k=20: []           # the search found nothing
+    search.claude.answers = ["congés payés durée"]
+    assert search.reranked_search(None, "How many days of paid leave?") == []
+    assert len(search.claude.calls) == 1                                                       # the rewrite only, no rerank
 
 # ---------- reading the judge's answer (judge_parse.py): its text is free-form, a bad read must never pass ----------
 
