@@ -72,3 +72,10 @@ Entries marked *backfilled* were written afterwards from the code, the git histo
 - **Why:** the raw search refused plain PDFs from Chrome, Google Docs and macOS (font tags start with `/AA`). The CI unit job installs no packages, so no library.
 - **Cost:** still not a virus scan: a script in a compressed object stream, or a name with `#` escapes, gets through. A person opening the file is the real protection.
 - **Change it when:** we need a real guarantee: parse with a library or scan uploads, and refuse what cannot be parsed.
+
+### 11. Labour search: a failed Haiku step falls back to the search (PR #44, 2026-11-16)
+- **Chose:** the rewrite and the rerank get 10 s, one retry and temperature 0. A failed rewrite searches with the user's words; a failed rerank, or any answer but "4,1,7", keeps the search order ([labour_code/search.py](../labour_code/search.py)).
+- **Not chosen:** an error to the agent (the old way threw away the 20 articles found), or reading any digits in the answer (the 3 of "L3141-3" became position 3).
+- **Why:** both steps only improve an order that is already good. 3 runs before and after, production path, top 5: 49-50/50 became 50/50 every run; held-out 20/20 and situations 14/14 unchanged; the rewrite alone went from 38-41/50 to 45/50 every run.
+- **Cost:** the strict reader turns down 3 or 4 of 100 rerank answers (Haiku adds "25-1" or an explanation): those keep the search order. A search can still wait about a minute when every step times out (was up to 30 minutes per call).
+- **Change it when:** "rerank answer is not a list of positions" shows up often in the log, or recall drops: ask for structured JSON output instead.

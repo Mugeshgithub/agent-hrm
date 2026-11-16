@@ -58,7 +58,8 @@ def hybrid_search(conn, question, k=20):
 
 import anthropic
 
-claude = anthropic.Anthropic()
+# the rewrite and the rerank only prepare the search: a slow or failed call falls back instead of holding up the answer
+claude = anthropic.Anthropic(timeout=10, max_retries=1)
 
 REWRITE_PROMPT = (
     "Rewrite the user's question as a short French search query for the French Code du travail. "
@@ -71,18 +72,29 @@ REWRITE_PROMPT = (
 
 
 @lru_cache(maxsize=1000)
-def rewrite_query(question):
+def _rewrite(question):
     # the model only prepares the SEARCH; it never answers here
     resp = claude.messages.create(
-        model="claude-haiku-4-5", max_tokens=60, system=REWRITE_PROMPT,
+        model="claude-haiku-4-5", max_tokens=60, temperature=0, system=REWRITE_PROMPT,
         messages=[{"role": "user", "content": question}],
     )
     return "".join(b.text for b in resp.content if b.type == "text").strip()
 
 
+def rewrite_query(question):
+    # None when the call fails or says nothing (lru_cache keeps only successes, so the next search tries again)
+    try:
+        return _rewrite(question) or None
+    except Exception as e:
+        print(f"  [labour search] query rewrite failed ({type(e).__name__}): searching with the user's words only")
+        return None
+
+
 def multi_query_search(conn, question, k=20):
     # keep the user's own words AND add the law's vocabulary; keyword search only on the French rewrite
     rewritten = rewrite_query(question)
+    if not rewritten:                           # the user's words alone found 45 of 50 test questions (top 8)
+        return vector_search(conn, question, k)
     return fuse([
         vector_search(conn, question, k),
         vector_search(conn, rewritten, k),
@@ -92,7 +104,7 @@ def multi_query_search(conn, question, k=20):
 
 def french_search(conn, question, k=20):
     # fix 1: search ONLY with the French rewrite; the English question pulled in look-alike articles
-    rewritten = rewrite_query(question)
+    rewritten = rewrite_query(question) or question
     return fuse([
         vector_search(conn, rewritten, k),
         keyword_search(conn, rewritten, k),
@@ -108,6 +120,7 @@ RERANK_PROMPT = (
     "Output only the candidate numbers, most relevant first, separated by commas (for example: 4,1,7). "
     "Include every number exactly once. No explanation."
 )
+POSITIONS = re.compile(r"\s*\d+(\s*,\s*\d+)*\s*")     # "4,1,7" or "4, 1, 7" and nothing else
 
 
 def rerank(question, rows, snippet=600):
@@ -117,14 +130,23 @@ def rerank(question, rows, snippet=600):
     for r in rows:                              # one row per article, in search order
         first.setdefault(r["num"], r)
     articles = list(first.values())
+    if not articles:
+        return []
     listing = "\n\n".join(f"[{i}] {r['num']}: {r['text'][:snippet]}" for i, r in enumerate(articles, start=1))
-    resp = claude.messages.create(
-        model="claude-haiku-4-5", max_tokens=150, system=RERANK_PROMPT,
-        messages=[{"role": "user", "content": f"Question: {question}\n\nCandidates:\n\n{listing}"}],
-    )
+    try:
+        resp = claude.messages.create(
+            model="claude-haiku-4-5", max_tokens=150, temperature=0, system=RERANK_PROMPT,
+            messages=[{"role": "user", "content": f"Question: {question}\n\nCandidates:\n\n{listing}"}],
+        )
+    except Exception as e:                      # timeout, rate limit, outage: the search order is still a good answer
+        print(f"  [labour search] rerank failed ({type(e).__name__}): search order kept")
+        return articles
     text = "".join(b.text for b in resp.content if b.type == "text")
+    if not POSITIONS.fullmatch(text):           # any other text: its numbers may be parts of "L3141-3", not positions
+        print("  [labour search] rerank answer is not a list of positions: search order kept")
+        return articles
     order = []
-    for n in re.findall(r"\d+", text):          # tolerate any formatting; ignore numbers out of range
+    for n in text.split(","):                   # ignore numbers out of range and repeats
         i = int(n)
         if 1 <= i <= len(articles) and i not in order:
             order.append(i)

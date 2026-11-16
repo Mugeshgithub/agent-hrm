@@ -720,15 +720,21 @@ def run_tool(name, tool_input):
             return {"error": "The labour-law database isn't available right now."}
         try:
             # imported here, not at the top, so CI (which has no labour-code database) still runs
+            from labour_code.search import connect, search_for_agent
+            conn = connect()
+        except Exception:
+            # e.g. Docker is not running: the user gets a clear message, the agent keeps working
+            return {"error": "The labour-law database is not reachable right now. Please try again later."}
+        try:
             # multi-query finds candidates (top 20), then Haiku reranks them by "does it answer the question?"
             # recall@8 on 50 EN/FR questions: vector 45, multi-query 48, multi+rerank 50
             # search with the employee's own words AND the agent's query (the agent's rewording once hid L3141-3)
-            from labour_code.search import connect, search_for_agent
-            with connect() as conn:
+            # a failed rewrite or rerank does not land here: the search falls back to the user's words or the search order
+            with conn:
                 results = search_for_agent(conn, last_turn.get("question"), tool_input["question"], k=20)
         except Exception:
-            # e.g. Docker is not running: the user gets a clear message, the agent keeps working
-            return {"error": "The labour-law search is not reachable right now. Please try again later."}
+            # the database answered but a step failed, e.g. the embedding service
+            return {"error": "The labour-law search failed this time. Please try again later."}
         articles = {}
         for r in results:                      # keep the 5 best articles, one entry each
             # top 5: full recall on all 70 test questions (top 8 gave no extra), ~37% fewer tokens
