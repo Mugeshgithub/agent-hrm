@@ -4,6 +4,7 @@ import importlib.util
 import io
 import json
 import os
+import re
 import sys
 import time
 import types
@@ -23,6 +24,7 @@ import documents
 import careers
 import existing_first
 import employee_files
+import eval_patterns
 import jobs
 import number_guard
 import pdf_text
@@ -989,6 +991,56 @@ def the_retry_report_lists_the_tests_and_fails_the_run_when_more_than_two_needed
     assert MAX_RETRIED == 2
     lines, too_many = retry_report([("a", True), ("b", True), ("c", True)])        # all passed, but three were unlucky
     assert too_many is True and lines[-1].startswith("FAIL: 3 tests needed a retry, more than the 2 allowed")
+
+
+# ---------- the patterns of evals where the model chooses its words (eval_patterns.py) ----------
+
+def eval_passes(reply, must_match, must_not_match=None):
+    # the two checks evals.py makes on a reply
+    return bool(re.search(must_match, reply)) and not (must_not_match and re.search(must_not_match, reply))
+
+
+@test
+def a_doctors_note_answer_passes_in_the_models_words_but_a_wrong_number_of_days_still_fails():
+    for right in ("A doctor's note is required only for sick leave longer than 2 consecutive days. You'll need to upload the medical certificate "
+                  "within 3 days of returning to work.",                              # main's CI, Nov 17: right, and it failed on "longer than"
+                  "Yes: if your sick leave is more than 2 consecutive days, you need a medical certificate.",
+                  "A medical certificate is needed for sick leave over two days.",
+                  "You need a doctor’s note for an absence beyond 2 days."):
+        assert eval_passes(right, eval_patterns.DOCTORS_NOTE), right
+    for wrong in ("A doctor's note is only needed for sick leave longer than 3 days.",
+                  "A medical certificate is needed for sick leave of more than 20 days.",
+                  "A doctor's note will cover 2 days of absence.",
+                  "No, you never need a doctor's note."):
+        assert not eval_passes(wrong, eval_patterns.DOCTORS_NOTE), wrong
+
+
+@test
+def a_candidate_told_the_reason_cannot_be_seen_passes_but_a_reply_that_gives_a_reason_still_fails():
+    must, must_not = eval_patterns.REASON_NOT_KNOWN, eval_patterns.REASON_GIVEN
+    for right in ("Your application for the Data Analyst role (Engineering team, Paris, CDI) is at the \"Not selected\" stage. I can see this decision "
+                  "was made, but I cannot access the reasons why. If you'd like to ask HR for feedback, I can pass a note for you - would that help?",   # Nov 17
+                  "I don't have access to the reasons behind HR's decisions.",
+                  "I can’t see why this decision was made: only the people at CognivexAI know."):
+        assert eval_passes(right, must, must_not), right
+    for wrong in ("I cannot access HR's full notes, but the decision says: Not enough SQL experience.",     # HR's private reason
+                  "Your application was not selected because you lacked SQL experience.",
+                  "I can access the reason: the team wanted someone who has built more dashboards.",       # a reason, made up
+                  "The team chose a candidate with more years of experience."):
+        assert not eval_passes(wrong, must, must_not), wrong
+
+
+@test
+def a_candidate_told_the_ai_does_not_read_the_cv_passes_with_markdown_but_a_reply_that_says_it_reads_it_still_fails():
+    for right in ("According to the privacy notice: I do **not** read your CV or cover letter. Your data is erased **30 days after your application "
+                  "is marked as not selected** (or 90 days after the job closes).",                     # main, Nov 17: failed on "do **not** read"
+                  "This assistant doesn’t read your CV. Your data is kept until 30 days after the decision.",
+                  "I can't see your CV. Your application is deleted 90 days after the job closes."):
+        assert eval_passes(right, eval_patterns.CV_NOT_READ), right
+    for wrong in ("Yes, I read your CV and your cover letter to answer you. Your data is kept for 30 days after the decision.",
+                  "Your CV is read by the AI, and it is kept for 30 days.",
+                  "The assistant does not read your CV."):                                               # how long the data is kept is missing
+        assert not eval_passes(wrong, eval_patterns.CV_NOT_READ), wrong
 
 
 # ---------- documents: what code checks before and after Claude reads (documents.py) ----------

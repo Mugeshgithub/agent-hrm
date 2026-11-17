@@ -121,3 +121,10 @@ Entries marked *backfilled* were written afterwards from the code, the git histo
 - **Why:** the log from #48 showed the model never claimed anything: it wrote "Would it help if I passed a note to HR...?", the check sent that back, then took "nothing was sent to HR" for a claim and replaced a right answer with "I haven't passed anything to HR yet".
 - **Cost:** a real claim after a word such as "can" ("I can confirm I've passed it") is now let through; the regex still decides, not the meaning.
 - **Change it when:** the `[candidate check]` log shows a claim that got through, or an offer still sent back.
+
+### 18. Eval patterns where the model chooses its words are tested both ways (PR #51, 2026-11-17)
+- **Chose:** the patterns of 3 evals move to [eval_patterns.py](../eval_patterns.py) and accept the right answers they failed on main ("longer than 2 days", "I cannot access the reasons", "I do **not** read your CV"); unit tests check each against real right answers and wrong ones (another number of days, HR's reason or a made-up one, "I read your CV", no retention time).
+- **Not chosen:** a retry for these tests (it hides a too-narrow pattern), or any change to the assistant (the answers were right).
+- **Why:** these 3 failed right answers on main and counted towards the 2-retry limit. On 2,476 logged replies the new patterns lose none the old ones accepted.
+- **Cost:** none at run time. The doctor's-note 2 must now stand alone, so "more than 20 days" and "cover 2 days" no longer pass. A negated wrong answer ("you don't need a note for more than 2 days") still passes, as before.
+- **Change it when:** another eval fails a right answer on its wording: move its pattern here, with that answer as a test.
