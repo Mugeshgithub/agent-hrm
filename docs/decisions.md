@@ -142,3 +142,10 @@ Entries marked *backfilled* were written afterwards from the code, the git histo
 - **Why:** one message can make up to 8 model calls, and nothing stopped one session from sending hundreds. The candidate assistant already had a limit; staff did not.
 - **Cost:** kept in memory: a restart resets it, and two API processes would each allow 20. Someone testing quickly can hit it. Confirming a card is not counted.
 - **Change it when:** the API runs on more than one process (keep the counts in the database), or people hit the limit in normal use.
+
+### 21. The collective-agreement guard keeps an answer that cites an article (PR #53, 2026-11-17)
+- **Chose:** a reply that names an article of the agreement is not sent back for saying "the agreement doesn't specify" one part of the question ([collective_agreement.py](../collective_agreement.py)). A law article ("L1226-1") does not count.
+- **Not chosen:** a model to judge "silent on all of it" from "silent on part" (the article is a plain signal, and the agreement's rules ask for it); changing the note's wording (the model followed it and dropped the article).
+- **Why:** on main the eval was 46/50; all 4 failures were right answers ("Article 5 ... 90% for 60 days, then 66% ... After that, the agreement doesn't specify what happens") sent back, then rewritten as "The collective agreement does not specify ..." without the article. Now 40/40 (labour DB on 10, off 30).
+- **Cost:** none: fewer retries. A reply that cites an article and wrongly says the agreement is silent on the rest is no longer sent on to the policy.
+- **Change it when:** a cited-article answer leaves out a part the policy or the law covers: send those on to `search_policy` instead of letting them through.
