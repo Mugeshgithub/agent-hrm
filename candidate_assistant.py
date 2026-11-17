@@ -152,6 +152,20 @@ def claims_note(reply):
     return bool(_CLAIMS_NOTE.search(str(reply or "")))
 
 
+HIDDEN_REASON = "[HR's reason, hidden]"
+
+
+def report_check(app, check, replaced, reply):
+    """A check sent a reply back or replaced it: print the model's own words, the only way to tell a real false claim from a check that is too strict.
+    The person's message is not printed. HR's reasons for a decision are never given to the model, and are masked here in case one ever shows up."""
+    reply = str(reply or "")
+    for row in _rows("SELECT DISTINCT reason FROM application_events WHERE application_id = ? AND length(trim(reason)) >= 3", (app["id"],)):
+        reply = re.sub(re.escape(row["reason"].strip()), HIDDEN_REASON, reply, flags=re.I)
+    line = f"  [candidate check] {check}: {'replaced' if replaced else 'sent back'}. The model wrote: {reply}"
+    print(line)
+    return line
+
+
 def reply_problem(reply):
     """What a reply promises or compares, as the words it used, or None."""
     found = _PROMISE.search(str(reply or ""))
@@ -335,18 +349,21 @@ def answer(token, text, model):
         if response.stop_reason != "tool_use":
             reply = "".join(b.text for b in response.content if b.type == "text").strip()
             if "get_my_application" not in called and not noted:
+                report_check(app, "no lookup in this turn", lookup_retry, reply)
                 if not lookup_retry:
                     lookup_retry = True
                     messages.append({"role": "user", "content": LOOK_UP_FIRST})
                     continue
                 reply = NOT_LOOKED_UP_FR if _french(text) else NOT_LOOKED_UP
             elif claims_note(reply) and not noted:
+                report_check(app, "says a note was passed on, none was saved", note_retry, reply)
                 if not note_retry:
                     note_retry = True
                     messages.append({"role": "user", "content": NOTE_NOT_MADE})
                     continue
                 reply = NO_NOTE_FR if _french(text) else NO_NOTE
             elif (found := reply_problem(reply)):
+                report_check(app, f'promises or compares ("{found}")', promise_retry, reply)
                 if not promise_retry:
                     promise_retry = True
                     messages.append({"role": "user", "content": PROBLEM.format(found=f'"{found}"')})
@@ -354,6 +371,8 @@ def answer(token, text, model):
                 reply = NO_COMPARE_FR if _french(text) else NO_COMPARE
             else:
                 bad = number_guard.ungrounded(reply, sources, text)
+                if bad:
+                    report_check(app, f"figures no tool returned ({', '.join(bad)})", figures_retry, reply)
                 if bad and not figures_retry:
                     figures_retry = True
                     messages.append({"role": "user", "content": FIGURES.format(figures=", ".join(bad))})

@@ -1,5 +1,7 @@
 # employees_tests.py: checks the employee-record rules. No AI, no API keys, runs in CI.
 #   python employees_tests.py
+import contextlib
+import io
 import json
 import os
 import sys
@@ -2220,6 +2222,29 @@ def a_reply_that_says_a_note_was_passed_on_when_none_was_saved_is_sent_back_once
     saved = scripted(calls("note_for_hr", note="Can the role be done from home?"), says("I've passed your question to HR. They will read it; I can't say when."))
     got = candidate_assistant.answer(token, "Please tell HR to say whether I can work from home", saved)
     assert got["noted"] is True and got["reply"].startswith("I've passed your question") and len(candidate_assistant.notes("H001", cid)) == 1         # a real note: the claim is true
+
+
+@test
+def a_reply_a_check_sends_back_or_replaces_is_printed_word_for_word_without_hrs_reason_or_the_persons_message():
+    job, token = a_job_with_a_candidate()
+    jobs.move("H001", application_id(job), "not_selected", "Not enough SQL experience")
+    stubborn = scripted(calls("get_my_application"), says("I can pass a note to HR; HR will read it."), says("Your question has been passed on to HR."))
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        got = candidate_assistant.answer(token, "Why was I not selected? You can call me on 06 12 34 56 78", stubborn)
+    assert got["reply"] == candidate_assistant.NO_NOTE
+    assert [line for line in out.getvalue().splitlines() if "[candidate check]" in line] == [
+        "  [candidate check] says a note was passed on, none was saved: sent back. The model wrote: I can pass a note to HR; HR will read it.",
+        "  [candidate check] says a note was passed on, none was saved: replaced. The model wrote: Your question has been passed on to HR."]
+    assert "06 12" not in out.getvalue()                                                                          # the person's message is not printed
+    with contextlib.redirect_stdout(io.StringIO()):
+        line = candidate_assistant.report_check(careers._by_token(token), "test", True, "It was not enough sql experience, I think.")
+    assert candidate_assistant.HIDDEN_REASON in line and "sql" not in line.lower()                               # HR's reason, if it ever got there, is masked
+    fine = scripted(calls("get_my_application"), says("I don't have access to the reasons. Would you like me to pass a note to HR?"))
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        candidate_assistant.answer(token, "Why was I not selected?", fine)
+    assert "[candidate check]" not in out.getvalue()                                                             # a reply no check touches prints nothing
 
 
 @test
