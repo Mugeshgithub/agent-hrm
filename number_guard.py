@@ -2,9 +2,11 @@
 # person wrote in their own question). Like citations.py for articles. Pure functions, no AI and no third-party package, so they are
 # unit-tested in CI and the same code runs in the agent and the evals.
 #
-# In scope: "8 days", "12.5 paid leave days", "2,5 jours", "€2,195.00", "2 195 €". Out of scope: dates, article numbers, months, counts of
-# requests. There is no arithmetic here: a reply that needs a derived figure ("8 now, 6 once it is approved") gets it from the TOOL
-# (available_after_pending, balance_after_approval, available_after, short_by ...), so the check stays exact.
+# In scope: "8 days", "12.5 paid leave days", "2,5 jours", "€2,195.00", "2 195 €", and a count of things a tool listed in this turn: "Two pending
+# requests" when get_pending_requests returned three (real, main 17 Nov: it then listed all three). Out of scope: dates, article numbers, months, and
+# a count of something no tool listed in this turn. There is no arithmetic here: a reply that needs a derived figure ("8 now, 6 once it is approved")
+# gets it from the TOOL (available_after_pending, balance_after_approval, available_after, short_by ...), so the check stays exact.
+import itertools
 import json
 import re
 from decimal import Decimal, InvalidOperation
@@ -198,10 +200,103 @@ def allowed_figures(sources, user_text=""):
     return numbers, amounts
 
 
+# ---------- counts: "Two pending requests" is how many a tool listed in this turn ----------
+
+# the things a tool returns as a list, and how a reply counts them. A list is one of them when its key holds the name ("pending_requests", "my_requests")
+_COUNTED = {"request": r"requests?|demandes?", "ticket": r"tickets?", "document": r"documents?", "candidate": r"candidates?|candidat(?:e|s|es)?",
+            "job": r"jobs?|postes?", "slot": r"slots?|cr[ée]neaux|cr[ée]neau", "people": r"people|persons?|personnes?|employees?|salari[ée]e?s?"}
+_KEYS = {"people": ("people", "found", "reports")}            # "found": 2 is how many people a search found; "reports" is a manager's team
+_COUNT_WORDS = {**_WORDS, "one": 1, "un": 1, "une": 1}
+# "two pending requests", "**3** open tickets"; not "one of the requests", "two of your requests"
+_NOT_QUALIFIER = r"(?!(?:of|the|these|those|your|their|his|her|my|our|from|for|to|in|on|at|and|or|with|by|des|les|de|du|vos|ses|leurs)\b)"
+_COUNT = re.compile(r"(?<![\w.,/:€$-])\**(\d+|%s)\**\s+((?:%s[^\W\d_]+\s+){0,2}?)(?:%s)\b"
+                    % ("|".join(sorted(_COUNT_WORDS, key=len, reverse=True)), _NOT_QUALIFIER,
+                       "|".join(f"(?P<{name}>{words})" for name, words in _COUNTED.items())), re.I)
+_SENTENCE = re.compile(r"[^.!?\n]+[.!?]*")
+
+
+def _count_phrases(text):
+    """Every count the text gives of a kind of thing a tool lists: (Figure("count", ...), the kind)."""
+    out = []
+    for match in _COUNT.finditer(str(text or "")):
+        if any(word.lower() in _MONTHS for word in match.group(2).split()):
+            continue                                          # "2 December requests" is a date
+        word = match.group(1).lower()
+        value = Decimal(word) if word.isdigit() else Decimal(_COUNT_WORDS[word])
+        kind = next(name for name in _COUNTED if match.group(name))
+        out.append((Figure("count", value, re.sub(r"[*_]", "", match.group(0)).strip(), match.start(), match.end()), kind))
+    return out
+
+
+def _listed(sources, kind):
+    """What the tools returned in this turn about this kind of thing: the lists under a key that names it, and the numbers under such a key."""
+    stems = _KEYS.get(kind, (kind,))
+    lists, numbers = [], set()
+
+    def walk(node, key):
+        named = any(stem in str(key).lower() for stem in stems) and not _is_id(key)
+        if isinstance(node, dict):
+            for k, v in node.items():
+                walk(v, k)
+        elif isinstance(node, list):
+            if named:
+                lists.append(node)
+            for item in node:
+                if isinstance(item, (dict, list)):
+                    walk(item, key)
+        elif named and isinstance(node, (int, float)) and not isinstance(node, bool):
+            numbers.add(abs(Decimal(str(node))))
+    for source in sources:
+        if (data := _load(source)) is not None:
+            walk(data, "")
+    return lists, numbers
+
+
+def _named_in(value, sentence):
+    value = value.strip().lower()
+    first = value.split()[0] if value.split() else ""
+    return bool(value) and (re.search(rf"\b{re.escape(value)}\b", sentence) is not None
+                            or (len(first) >= 3 and re.search(rf"\b{re.escape(first)}\b", sentence) is not None))
+
+
+def _true_counts(lists, numbers, sentence):
+    """The counts a sentence may give: how many each list holds, and how many of them have what the sentence names (a status, a type, a
+    person: "Emma has two requests", "one pending request" in a list of five, "Hugo and Clara: two requests")."""
+    said = sentence.lower()
+    allowed = set(numbers)
+    for rows in lists:
+        allowed.add(Decimal(len(rows)))
+        rows = [row for row in rows if isinstance(row, dict)]
+        values = sorted({v.strip().lower() for row in rows for v in row.values() if isinstance(v, str) and _named_in(v, said)})[:8]
+        has = lambda row, value: any(isinstance(v, str) and v.strip().lower() == value for v in row.values())
+        for group in [*itertools.combinations(values, 1), *itertools.combinations(values, 2), tuple(values)]:
+            if group:
+                allowed.add(Decimal(sum(1 for row in rows if all(has(row, g) for g in group))))      # Emma's casual requests
+                allowed.add(Decimal(sum(1 for row in rows if any(has(row, g) for g in group))))      # Hugo's and Clara's
+    return allowed
+
+
+def counts_in(reply, turn_sources, user_text=""):
+    """Each count the reply gives of a kind of thing a tool listed in this turn, with the counts that are true. A count of something no tool listed
+    in this turn is not checked."""
+    text = str(reply or "")
+    extra = _numbers_in(str(user_text or "")) | {n for s in turn_sources if _load(s) is None for n in _numbers_in(str(s))}
+    out = []
+    for sentence in _SENTENCE.finditer(text):
+        for figure, kind in _count_phrases(sentence.group(0)):
+            lists, numbers = _listed(turn_sources, kind)
+            if lists or numbers:
+                out.append((figure._replace(start=figure.start + sentence.start(), end=figure.end + sentence.start()),
+                            _true_counts(lists, numbers, sentence.group(0)) | extra))
+    return out
+
+
 def ungrounded_figures(reply, turn_sources, user_text=""):
     """The figures in the reply that no tool returned in this turn (and the person did not write)."""
     numbers, amounts = allowed_figures(turn_sources, user_text)
-    return [f for f in figures_in(reply) if f.value not in (numbers if f.kind == "days" else amounts)]
+    out = [f for f in figures_in(reply) if f.value not in (numbers if f.kind == "days" else amounts)]
+    out += [f for f, allowed in counts_in(reply, turn_sources, user_text) if f.value not in allowed]
+    return sorted(out, key=lambda f: f.start)
 
 
 def ungrounded(reply, turn_sources, user_text=""):
@@ -242,12 +337,25 @@ def _collect(node, path, out):
             out.append(Fact("money", last[:-4].replace("_", " "), node, next(iter(amount))))
 
 
+def _collect_counts(node, out):
+    if isinstance(node, dict):
+        for key, value in node.items():
+            if isinstance(value, list) and any(stem in key.lower() for name in _COUNTED for stem in _KEYS.get(name, (name,))):
+                out.append(Fact("count", re.sub(r"^my ", "your ", key.replace("_", " ")), str(len(value)), Decimal(len(value))))
+            _collect_counts(value, out)
+    elif isinstance(node, list):
+        for item in node:
+            _collect_counts(item, out)
+
+
 def facts(sources):
-    """What the tools returned about days and money in this turn: Fact("days", "casual leave balance", "8 days", Decimal(8))."""
+    """What the tools returned about days, money and the lists it counts in this turn: Fact("days", "casual leave balance", "8 days", Decimal(8)),
+    Fact("count", "pending requests", "3", Decimal(3))."""
     out = []
     for source in sources:
         if (data := _load(source)) is not None:
             _collect(data, [], out)
+            _collect_counts(data, out)
     unique = []
     for item in out:
         if item not in unique:
@@ -267,17 +375,40 @@ def retry_message(bad, turn_sources):
     return RETRY_MESSAGE.format(figures=", ".join(bad), returned=returned)
 
 
+_ITEM = re.compile(r"^\s*(?:[-*•]|\d+[.)])\s")
+
+
+def _without_stale_lists(reply, bad, available):
+    """A list under a wrong count, when the reply also gives the right one, is the answer from before a retry written again above the new one
+    (main, 17 Nov: "Two pending requests: Hugo, Clara" above "Three pending requests: Hugo, Clara, Emma"). The count and its list both go."""
+    right = {f.value for f, _ in _count_phrases(reply)} & {item.value for item in available if item.kind == "count"}
+    lines = str(reply or "").split("\n")
+    out, skipping = [], False
+    for i, line in enumerate(lines):
+        if skipping and (not line.strip() or _ITEM.match(line)):
+            continue
+        skipping = False
+        following = next((later for later in lines[i + 1:] if later.strip()), "")
+        if right and _ITEM.match(following) and any(("count", f.value) in bad for f, _ in _count_phrases(line)):
+            skipping = True
+            continue
+        out.append(line)
+    return "\n".join(out).strip()
+
+
 def correct(reply, bad_figures, turn_sources):
     """The reply with each sentence that states an unconfirmed figure replaced: by the figures a tool returned (the first such sentence),
     or by "I can't confirm that figure" when no tool returned any. `bad_figures` is ungrounded_figures(). Nothing unconfirmed gets through."""
     bad = {(f.kind, f.value) for f in bad_figures}
-    parts = re.split(r"((?<=[.!?])\s+|\n+)", str(reply or ""))
     available = facts(turn_sources)
-    stated = {(f.kind, f.value) for f in figures_in(reply)} - bad          # figures the reply already gives that a tool confirmed
+    reply = _without_stale_lists(reply, bad, available)
+    parts = re.split(r"((?<=[.!?])\s+|\n+)", str(reply or ""))
+    given = lambda text: figures_in(text) + [f for f, _ in _count_phrases(text)]
+    stated = {(f.kind, f.value) for f in given(reply)} - bad                # figures the reply already gives that a tool confirmed
     shown = False
     for i in range(0, len(parts), 2):
         sentence = parts[i]
-        hit = [f for f in figures_in(sentence) if (f.kind, f.value) in bad]
+        hit = [f for f in given(sentence) if (f.kind, f.value) in bad]
         if not hit:
             continue
         french = bool(re.search(r"\bjours?\b|\bvous\b|\bvotre\b", sentence, re.I))

@@ -1609,6 +1609,68 @@ def the_answer_loop_asks_once_and_then_replaces_the_figure():
     assert ng.review("Hello! How can I help?", [], "Hi", False) == ("ok", "Hello! How can I help?")     # no figure in the reply: no check at all
 
 
+PENDING = result(pending_requests=[
+    {"request_id": 2, "employee_name": "Hugo Martin", "leave_type": "casual", "start": "2026-12-02", "days": 1, "balance_after_approval": 1},
+    {"request_id": 3, "employee_name": "Clara Dubois", "leave_type": "sick", "start": "2026-12-03", "days": 1, "balance_after_approval": 0},
+    {"request_id": 7, "employee_name": "Emma Laurent", "leave_type": "casual", "start": "2026-11-30", "days": 1, "balance_after_approval": 6}])
+LISTED = ("\n\n- **Hugo** (2 December): 1 casual day, balance 2 → 1 after\n- **Clara** (3 December): 1 sick day, balance 1 → 0 after"
+          "\n- **Emma** (30 November): 1 casual day, balance 7 → 6 after")
+
+
+@test
+def a_count_of_things_a_tool_listed_must_be_how_many_it_listed_or_how_many_have_what_the_sentence_names():
+    ng = number_guard
+    assert ng.ungrounded("Two pending requests:" + LISTED, [PENDING]) == ["Two pending requests"]       # main, 17 Nov: three listed, "Two" said
+    assert ng.ungrounded("Three pending requests:" + LISTED, [PENDING]) == []
+    assert ng.ungrounded("You have **3** pending requests.", [PENDING]) == []
+    assert ng.ungrounded("You have 2 pending requests.", [PENDING]) == ["2 pending requests"]
+    assert ng.ungrounded("Il y a deux demandes en attente.", [PENDING]) == ["deux demandes"]
+    # a count of what the sentence names: a person, a type, a status
+    assert ng.ungrounded("Emma has one request waiting.", [PENDING]) == []
+    assert ng.ungrounded("Two casual requests are waiting.", [PENDING]) == []
+    assert ng.ungrounded("Hugo and Clara: two requests.", [PENDING]) == []
+    assert ng.ungrounded("Emma has two requests.", [PENDING]) == ["two requests"]
+    mine = result(my_requests=[{"request_id": i, "status": s} for i, s in enumerate(["pending", "approved", "approved", "pending", "rejected"], 1)])
+    assert ng.ungrounded("You have two pending requests and five requests in all.", [mine]) == []
+    assert ng.ungrounded("You have one pending request.", [mine]) == ["one pending request"]
+    assert ng.ungrounded("I found two people named Emma.", [result(found=2, people=[{"name": "Emma Laurent"}, {"name": "Emma Roy"}])]) == []
+    me = result(found=1, people=[{"name": "Sophie Bernard", "reports": ["Emma Laurent", "Hugo Martin", "Clara Dubois"]}], this_is_the_user=True)
+    assert ng.ungrounded("Your team has three people: Emma, Hugo and Clara.", [me]) == []          # full suite, 17 Nov: "reports" is the team
+    assert ng.ungrounded("Your team has two people.", [me]) == ["two people"]
+
+
+@test
+def what_is_not_a_count_of_something_a_tool_listed_is_not_checked_and_an_id_is_not_a_count():
+    ng = number_guard
+    assert ng.ungrounded("One of the requests is Emma's, and two of your requests are casual.", [PENDING]) == []   # "one of", "two of": not a count
+    assert ng.ungrounded("You have two pending requests.", [BALANCE]) == []                          # no tool listed requests in this turn
+    assert ng.ungrounded("I have two questions for you.", [PENDING]) == []                            # questions are not something a tool listed
+    assert ng.ungrounded("You have two requests.", [result(my_requests=[{"request_id": 2, "status": "pending"}])]) == ["two requests"]   # request 2 is an id
+    assert ng.ungrounded("Your two requests are waiting.", [result(my_requests=[])], user_text="I sent two requests") == []   # the person's own number
+    assert said("You have 3 weeks, 2 months and 8 casual leave requests.") == []                      # a count is not a number of days
+
+
+@test
+def a_wrong_count_is_sent_back_once_with_how_many_the_tool_listed_then_its_sentence_is_replaced():
+    ng = number_guard
+    wrong = "Two pending requests:" + LISTED
+    action, note = ng.review(wrong, [PENDING], "any pending request", False)
+    assert action == "retry" and "Two pending requests" in note and "pending requests: 3" in note
+    action, fixed = ng.review(wrong, [PENDING], "any pending request", True)
+    assert action == "replaced" and fixed.startswith("The system shows: pending requests: 3.\n\n- **Hugo**"), fixed
+    # main, 17 Nov: after a retry the model wrote its old list again above the new one. The first time it is sent back (the person sees only the
+    # next answer); if it comes back like that again, the wrong count AND its list go, and only the corrected list is shown
+    twice = ("Two pending requests:\n\n- **Hugo** (2 December): 1 casual day, balance 2 → 1 after\n- **Clara** (3 December): 1 sick day, balance 1 → 0 after"
+             "\n\nThree pending requests:" + LISTED)
+    assert ng.review(twice, [PENDING], "any pending request", False)[0] == "retry"
+    action, fixed = ng.review(twice, [PENDING], "any pending request", True)
+    assert action == "replaced" and fixed == "Three pending requests:" + LISTED, fixed
+    assert ng.review("Three pending requests:" + LISTED, [PENDING], "any pending request", True)[0] == "ok"
+    # a list under a wrong count with no right count anywhere is kept: only its count is replaced
+    action, fixed = ng.review("Two pending requests:" + LISTED, [PENDING], "any pending request", True)
+    assert fixed.startswith("The system shows: pending requests: 3.") and "**Emma**" in fixed and "**Hugo**" in fixed
+
+
 @test
 def the_leave_tools_return_the_derived_figures_so_the_reply_never_needs_arithmetic():
     assert "pending_days" not in get_leave_balance("E001")                                           # nothing pending: the result is unchanged

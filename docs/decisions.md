@@ -128,3 +128,10 @@ Entries marked *backfilled* were written afterwards from the code, the git histo
 - **Why:** these 3 failed right answers on main and counted towards the 2-retry limit. On 2,476 logged replies the new patterns lose none the old ones accepted.
 - **Cost:** none at run time. The doctor's-note 2 must now stand alone, so "more than 20 days" and "cover 2 days" no longer pass. A negated wrong answer ("you don't need a note for more than 2 days") still passes, as before.
 - **Change it when:** another eval fails a right answer on its wording: move its pattern here, with that answer as a test.
+
+### 19. The number guard checks counts: "Two pending requests" must be how many the tool listed (PR #52, 2026-11-17)
+- **Chose:** a count of something a tool listed in this turn (requests, tickets, documents, candidates, jobs, slots, people), in digits or words, English or French, must be how many the list holds, or how many of them have what the sentence names ("Emma has two requests", "one pending request"). One retry with the tool's count, then the sentence is replaced; a list under a wrong count, when the reply also gives the right count, goes with it (the old answer written again above the new one) ([number_guard.py](../number_guard.py)).
+- **Not chosen:** a second model (the count is exact, code is enough); checking a count of something no tool listed in this turn ("I have two questions"): too many false alarms.
+- **Why:** "any pending request" was 17/20 on main: every first answer said "Two pending requests" and left Emma out; the pending-requests guard fixed the list, but 3 retries kept "Two" (once with the old list above the new one). Now 20/20.
+- **Cost:** about $0.001 and one more answer call when it fires (5 of 20 pending turns, 2 of 417 full-suite turns). Full suite 3 times: 139/139 each. One false alarm found there ("three people" for a manager's team, listed under "reports") and fixed.
+- **Change it when:** the `[guard] [...] was not returned` lines show a count that was right: add the key the tool lists it under.
