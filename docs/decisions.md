@@ -86,3 +86,10 @@ Entries marked *backfilled* were written afterwards from the code, the git histo
 - **Why:** the copy we search lacks 1,830 articles in force and has 210 out-of-date texts; the API gives everything in about 6 seconds. Recall on the new table equals today's: 50/50, 20/20, 14/14 at top 5.
 - **Cost:** sandbox data so far. Annexes (10 tables) and 62 old-code articles are left out; 53 articles with a repeated sentence are kept. $0.04 of embeddings once, then only changed chunks.
 - **Change it when:** production keys exist (`PISTE_ENV=production`), or recall on the new table falls below the live one.
+
+### 13. Nightly labour-code sync: built beside the live data, switched in one step (PR #46, 2026-11-17)
+- **Chose:** each night the whole code from Légifrance is built in `chunks_next` (a repealed article is simply not in it), checked (spot checks, size, the 84 recall questions against the live table), then swapped in one transaction ([labour_code/sync.py](../labour_code/sync.py)). Law answers end with "as of <date>", added by code ([law_status.py](../law_status.py)).
+- **Not chosen:** updating rows in place (a search could see half an update); alerting HR on failures (the developer gets them: log + GitHub issue; HR only sees data over 7 days old).
+- **Why:** on a test copy: first night applied (+1,830, 210 changed, 44 removed, recall equal 50/20/14); an unchanged night $0; a night with 5 changed articles $0.02 (314 of 322 model answers from cache); a broken spot check and Légifrance down were held and failed, live data untouched.
+- **Cost:** the first night about $0.58. The check finds missing articles, not wrong wording. Sandbox keys until production. It runs only when the machine is on (HR's notice covers that).
+- **Change it when:** normal nights trip the 2% size check, or the app moves to a server: run it from that server's scheduler.

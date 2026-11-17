@@ -152,6 +152,7 @@ export type NeedsYou = {
   policy_gaps: PolicyGap[]; new_applications: NewApplication[]; candidate_notes: WaitingCandidateNote[];
   hr_requests: { id: number; ticket: string; employee_id: string; employee_name: string; question: string; summary: string; created_at: string }[];
   paid_leave_warnings: { employee_id: string; name: string; paid_days: number; message: string }[];
+  law_data_notice?: string | null;   // HR only: the labour-law data is over a week old (law_status.py)
 };
 
 export type Adjustment = {

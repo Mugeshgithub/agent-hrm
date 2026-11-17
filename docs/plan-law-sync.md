@@ -1,6 +1,6 @@
 # Plan: keep the Labour Code up to date (nightly sync from Légifrance)
 
-Status: written 2026-11-16, API facts checked that day (sources at the end). **#45 (2026-11-17) built the first load and the comparison**: see "What #45 found" just below. The nightly job (#46) and the "as of" date (#47) are not built.
+Status: written 2026-11-16, API facts checked that day (sources at the end). **#45 (2026-11-17) built the first load and the comparison**: see "What #45 found" just below. The nightly job and the "as of" date are #46 (one PR).
 
 ## What #45 found (sandbox, 2026-11-17)
 - **One call returns the whole code with its text:** `consult/legiPart` with `{"textId": "LEGITEXT000006072050", "date": <ms>}`, 33 MB in about 6 seconds. No per-article calls, so quotas are not a problem (the response header showed about 20 calls a second and a large daily allowance).
@@ -43,41 +43,42 @@ data.gouv.fr lists the API as "restricted access", so production may need approv
   - whether each table-of-contents entry carries the article's id, number and status, or we need `getArticle` for each;
   - how large the response is.
 
-## The nightly job
-`labour_code/sync.py`, run by cron like [recruitment_jobs.py](../recruitment_jobs.py).
+## The nightly job (#46, agreed 2026-11-17)
+`labour_code/sync.py`, run by cron like [recruitment_jobs.py](../recruitment_jobs.py). Sandbox keys until the production app exists (`PISTE_ENV`).
 
-1. Take a lock so only one run happens at a time, then get a token.
-2. Fetch the whole code for **today, Paris time** (`legifrance.fetch_code`, one call). If that fails, stop, keep the current data and record the failure.
-3. Clean it (`legifrance.articles_from`) and compare article ids with the stored ones:
-   - **A new id** means a changed or new article.
-   - **A stored id that is missing** today means the article was repealed or replaced. Remove its chunks.
-   - **The same id** means skip it.
-4. Chunk the articles (`chunk.chunks_for`) and hash each chunk's text (sha256): an unchanged hash keeps its vector, so **only changed chunks are embedded** (`load_api.store` already does this).
-5. Build the result in a copy, `chunks_next` (the current table plus the changes). The live table is not touched.
-6. Run the checks before swapping:
-   - **Sanity:**
-     - Articles in force change by less than 2% in one night.
-     - No article has empty text.
-     - Every article the recall tests expect still exists. If one was repealed, that test is set aside and the alert names it, so a person can update the test.
-   - **Recall:** run [eval_retrieval.py](../labour_code/eval_retrieval.py) on `chunks_next`, using the production path ("user+agent") at top 5, on all 3 test sets (84 questions). Compare with the last accepted data. **If any set scores lower, keep the old data.**
-7. If everything passes, swap in one transaction: rename `chunks` to `chunks_prev` and `chunks_next` to `chunks`. A search never sees half a sync. Keep `chunks_prev` for one night so we can roll back by hand.
-8. Record the run in `law_sync_runs`:
-   - the date and the Légifrance date used;
-   - the articles changed, added and removed;
-   - recall per set;
-   - the result (applied, held or failed) and the reason.
-9. **On a hold or a failure, raise an alert.** Print it (cron log) and put it in HR's "Needs you", for example "Labour Code update held: recall 19 → 18 on the held-out set". Also alert when the last good sync is more than 7 days old.
+1. **One run at a time:** a Postgres advisory lock. A second run exits straight away.
+2. **Fetch** the whole code for today (`legifrance.fetch_code`, one call). If that fails: keep the live data, record "failed", alert the developer.
+3. **Clean and chunk** (`legifrance.articles_from`, `chunk.chunks_for`), as in #45.
+4. **Nothing changed?** If every chunk's text fingerprint (sha256) matches the live table, record "no change". No embedding and no recall check, so it costs $0, and the "as of" date moves to today.
+5. **Build the new data side by side** in `chunks_next`. It's the whole new code, so **repealed articles are not in it**. Only chunks whose text changed are embedded. The live table is not touched, and searches keep using it.
+6. **Checks before the switch:**
+   - **Spot checks:** L3141-3, L1225-17 and L3121-27 still say what they should.
+   - **Size:** articles in force change by less than 2% since the last applied sync. Skipped on the first sync, which replaces the old Hugging Face copy.
+   - **Recall:** the 84 test questions, production path, top 5, run on the live table and on `chunks_next` the same night. A set where the new data finds fewer than the live data **holds the switch**.
+     - A question whose expected article is no longer in the code is set aside, and the alert names it so a person can update the test.
+     - If a model call fails during the check, the night is held: we never switch on a check that didn't run.
+7. **Switch in one step:** one transaction renames `chunks` → `chunks_prev` and `chunks_next` → `chunks`, with their indexes. A search sees either the old data or the new, never half. `chunks_prev` is kept until the next switch, for a rollback by hand.
+8. **Record the run** in `law_sync_runs`:
+   - the result (applied, no change, held or failed) and the reason;
+   - articles added, changed and removed;
+   - recall per set on both tables;
+   - **tonight's cost** (embeddings plus recall check), also printed in the log.
+9. **Alerts go to the developer, not HR:**
+   - Every held or failed run is printed in the cron log.
+   - With `LAW_SYNC_GITHUB_TOKEN` and `LAW_SYNC_GITHUB_REPO` in `.env`, it also opens a GitHub issue labelled `law-sync`. If one is already open, it adds a comment instead of opening another. The next applied or unchanged night closes it.
+   - Without those settings, it only logs.
+10. **HR only hears about it when the data is more than 7 days old:** one line in "Needs you" → "Worth a look", for example "The labour-law data was last updated 9 days ago (8 Nov). The assistant still answers from it; the developer has been told." It's worked out each time the page loads, so it also shows when the job stops running.
 
-If nothing changed, there is no eval run and no cost. The job records "checked, no change", and the "as of" date moves forward.
+**Keeping the recall check cheap:** the check only runs on nights when something changed. Its model answers are cached by the exact request, at temperature 0 so the same request gives the same answer. Rewrites of the 84 questions, and reranks whose candidate list didn't change, cost nothing after the first night. On a normal night only questions touched by changed articles call the model.
 
 ## "Labour Code as of <date>" in answers
 - `<date>` is the **last successful check** (applied, or no change) from `law_sync_runs`. It is not the date the job ran, so a held or failed night leaves the date where it was, which is honest.
-- The search tool's result gets `"as_of": "2026-11-16"`. The model can then answer "how recent is this?", and the eval judge sees the date in a source.
-- **Code, not the model, adds one line** under every reply that used the labour search, for example "Code du travail (Légifrance), as of 16 November 2026." It's the same reasoning as our other guards: the model can forget a line, code can't.
+- The search tool's result gets `"as_of": "2026-11-17"`, so the model can answer "how recent is this?" and the eval judge sees the date in a source.
+- **Code, not the model, adds one line** under every reply that cites an article from this turn's labour search: "Code du travail (Légifrance), as of 17 November 2026." It's in French ("à jour au 17 novembre 2026") when the question was in French. Before the first sync there is no date, so there is no line.
 
 ## Data changes
 - `chunks`: add `article_id` (LEGIARTI), `cid` and `text_hash`.
-- New table `law_sync_runs` (see step 8).
+- New table `law_sync_runs` (see step 8), and `law_sync_cache` (the recall check's model answers, kept 90 days).
 - **First load:**
   - One full fetch from the API into `chunks_next`. Compare it with today's Hugging Face data (counts, text differences, recall) before switching.
   - The API's text formatting will differ, so this one run re-embeds nearly everything: about 2M tokens, under $0.05.
@@ -111,8 +112,7 @@ One PR at a time, each with tests against a fake API and a decisions.md entry.
 |---|---|---|
 | Before (you) | Register, make a sandbox token work, note the quotas | done 2026-11-16 (sandbox) |
 | #45 | API client (token, 429 retries), cleaning, first full load into a side table, compare with today's data. No switch. | done 2026-11-17 |
-| #46 | Nightly diff, re-embed changed articles, remove repealed ones, staging table, sanity checks, recall gate, swap, run log, "Needs you" alert, cron line | 2 to 2.5 days |
-| #47 | "as of" date in the tool result and under answers, evals | 0.5 to 1 day |
+| #46 | Nightly job: side-by-side build, repealed articles removed, checks, recall gate (cached, cost reported), one-step switch, run log, developer alerts (log + GitHub issue), HR notice after 7 days, "as of" date in law answers, cron line | 2.5 to 3 days |
 
 **Total: about 4 to 5 working days of build,** then a week of watched nightly runs before we trust it.
 

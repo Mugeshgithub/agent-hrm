@@ -35,8 +35,10 @@ import tool_guard
 import tools
 from eval_retry import MAX_RETRIED, retry_report, run_with_retry
 from judge_parse import verdict
+import law_status
 from labour_code import chunk as law_chunk
 from labour_code import legifrance
+from labour_code import sync as law_sync
 from tools import (count_working_days, apply_leave, decide_leave, cancel_leave,
                    get_leave_balance, get_team_member_balance)
 
@@ -700,6 +702,102 @@ def legifrance_fetch_is_one_call_retried_on_429_and_the_secret_goes_only_to_the_
             else:
                 os.environ[k] = v
         legifrance.RETRY_WAIT = saved[2]
+
+# ---------- the nightly labour-code sync: what holds a night, who is told, and the date in law answers (labour_code/sync.py, law_status.py) ----------
+
+@test
+def law_sync_holds_a_night_when_a_check_fails_and_switches_only_when_recall_holds():
+    known = [{"num": num, "texte": f"... {words} ..."} for num, words in legifrance.SPOT_CHECKS.items()]
+    assert law_sync.spot_verdict(known) == ""
+    assert "L3141-3" in law_sync.spot_verdict([{"num": "L3141-3", "texte": "Le salarié a droit à un congé payé."}] + known[1:])
+    assert "L1225-17" in law_sync.spot_verdict(known[:1] + known[2:])                                          # gone altogether
+    assert law_sync.size_verdict(None, 11524) == ""                                                             # the first sync replaces the old copy
+    assert law_sync.size_verdict(11524, 11600) == ""                                                            # 0.7%: a normal night
+    assert "more than 2%" in law_sync.size_verdict(11524, 9000)
+    live = {"tuning": {"hits": 50, "of": 50}, "held-out": {"hits": 20, "of": 20}}
+    assert law_sync.recall_verdict(live, {"tuning": {"hits": 50, "of": 50}, "held-out": {"hits": 20, "of": 20}}) == ""
+    assert law_sync.recall_verdict(live, {"tuning": {"hits": 50, "of": 50}, "held-out": {"hits": 19, "of": 20}}) == "recall dropped: held-out 20/20 -> 19/20"
+    assert law_sync.changes({"A": "x y", "B": "y", "C": "z"}, {"A": "x  y", "B": "y2", "D": "w"}) == {"added": 1, "changed": 1, "removed": 1}   # spacing is not a change
+    assert law_sync.cost({"haiku_in": 1_000_000, "haiku_out": 100_000, "embed": 1_000_000}) == 1.52
+
+
+@test
+def law_sync_sets_aside_a_test_question_whose_article_was_repealed_instead_of_blocking_every_night():
+    expected = {e for cases in law_sync.SETS.values() for _, _, exp in cases for e in exp.split("|")}
+    assert law_sync.set_aside(expected) == []
+    aside = law_sync.set_aside(expected - {"L3141-3"})
+    assert aside and all(set(exp.split("|")) <= {"L3141-3"} for cases in law_sync.SETS.values() for q, _, exp in cases if q in aside)
+
+
+def stand_in_github(open_issues):
+    """httpx for sync.github_issue: answers the open-issue list, records every request."""
+    calls = []
+
+    def answer(method):
+        def call(url, **request):
+            calls.append((method, url, request))
+            body = open_issues if method == "GET" else {"number": 31}
+            return types.SimpleNamespace(json=lambda: body, raise_for_status=lambda: None)
+        return call
+    return types.SimpleNamespace(get=answer("GET"), post=answer("POST"), patch=answer("PATCH"), calls=calls)
+
+
+@test
+def law_sync_alerts_the_developer_with_one_github_issue_that_a_good_night_closes():
+    names = ("LAW_SYNC_GITHUB_TOKEN", "LAW_SYNC_GITHUB_REPO")
+    saved = {k: os.environ.get(k) for k in names}
+    try:
+        for k in names:
+            os.environ.pop(k, None)
+        quiet = stand_in_github([])
+        assert law_sync.github_issue("held", "body", http=quiet).startswith("logged only") and quiet.calls == []   # not set up: the log is the alert
+        os.environ.update(LAW_SYNC_GITHUB_TOKEN="tok-1", LAW_SYNC_GITHUB_REPO="me/agent-hrm")
+        api = "https://api.github.com/repos/me/agent-hrm/issues"
+        gh = stand_in_github([])
+        assert law_sync.github_issue("Labour code sync held: recall dropped", "details", http=gh) == "opened #31"
+        assert [(m, u) for m, u, _ in gh.calls] == [("GET", api), ("POST", api)]
+        assert gh.calls[1][2]["json"] == {"title": "Labour code sync held: recall dropped", "body": "details", "labels": ["law-sync"]}
+        assert gh.calls[1][2]["headers"]["Authorization"] == "Bearer tok-1"
+        gh = stand_in_github([{"number": 12}])                                                                   # already open: a comment, not a 2nd issue
+        assert law_sync.github_issue("held again", "details", http=gh) == "commented on #12"
+        assert [(m, u) for m, u, _ in gh.calls] == [("GET", api), ("POST", api + "/12/comments")]
+        gh = stand_in_github([{"number": 12}])
+        assert law_sync.github_issue("", "Fixed.", resolved=True, http=gh) == "closed #12"
+        assert gh.calls[-1][0] == "PATCH" and gh.calls[-1][2]["json"] == {"state": "closed"}
+        assert law_sync.github_issue("", "Fixed.", resolved=True, http=stand_in_github([])) == "no open issue"
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+
+@test
+def a_law_answer_ends_with_the_date_of_the_data_that_answered_in_the_language_asked():
+    found = json.dumps({"articles": [{"article": "L3141-3", "text_fr": "..."}], "as_of": "2026-11-17", "note": "..."})
+    reply = "Under Article L3141-3 you earn 2.5 working days of paid leave per month."
+    assert law_status.line_for(reply, ["not json", found], "How many paid days do I earn?") == "Code du travail (Légifrance), as of 17 November 2026."
+    assert law_status.line_for("Selon l'article L3141-3, ...", [found], "Combien de jours de congés payés par mois ?") == \
+        "Code du travail (Légifrance), à jour au 17 novembre 2026."
+    assert law_status.line_for("Article L1225-17 says ...", [found], "maternity?") is None                       # not an article this search returned
+    assert law_status.line_for("You earn 2.5 days per month.", [found], "paid days?") is None                    # no article cited: not a law answer
+    before_first_sync = json.dumps({"articles": [{"article": "L3141-3", "text_fr": "..."}], "note": "..."})
+    assert law_status.line_for(reply, [before_first_sync], "paid days?") is None                                 # the old copy has no date to give
+
+
+@test
+def hr_hears_about_the_labour_law_data_only_when_it_is_over_a_week_old():
+    saved = law_status.READ
+    try:
+        for synced, notice in ((date(2026, 11, 17), "The labour-law data was last updated 13 days ago (17 Nov)."), (date(2026, 11, 25), None), (None, None)):
+            law_status.READ = lambda: synced
+            law_status._cache.update(at=0.0)                                                                     # read again, as after 10 minutes
+            got = law_status.hr_notice(today=date(2026, 11, 30))
+            assert (got is None) if notice is None else got.startswith(notice), (synced, got)
+    finally:
+        law_status.READ = saved
+        law_status._cache.update(at=0.0)
 
 # ---------- reading the judge's answer (judge_parse.py): its text is free-form, a bad read must never pass ----------
 

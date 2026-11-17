@@ -12,6 +12,7 @@ import contracts
 import documents
 import hr_queries
 import jobs
+import law_status
 import onboarding
 import policy_gaps
 from tools import get_employee, get_pending_requests, clean_days
@@ -63,6 +64,7 @@ def inbox(emp_id):
     return {"role": emp["role"], "leave_requests": leave, "hr_requests": tickets, "onboarding_steps": steps,
             "document_flags": flags, "contract_approvals": approvals, "policy_gaps": gaps, "new_applications": applications, "candidate_notes": notes,
             "paid_leave_warnings": paid_leave_warnings(emp),
+            "law_data_notice": law_status.hr_notice() if emp["role"] == "hr" else None,    # HR only, and only when the labour-law data is over a week old
             "waiting_on_you": len(leave) + len(tickets) + len(steps) + len(flags) + len(approvals) + len(gaps) + len(applications) + len(notes)}     # warnings are a heads-up, not a decision
 
 

@@ -20,6 +20,15 @@ def connect():
     return psycopg.connect(DB_URL, row_factory=dict_row)
 
 
+def as_of(conn):
+    # the day the live table was last checked against Légifrance (sync.py), or None before the first sync
+    if conn.execute("SELECT to_regclass('law_sync_runs') AS t").fetchone()["t"] is None:
+        return None
+    row = conn.execute("""SELECT legifrance_date FROM law_sync_runs WHERE live_table = %s AND result IN ('applied', 'no change')
+                          ORDER BY id DESC LIMIT 1""", (TABLE,)).fetchone()
+    return row["legifrance_date"] if row else None
+
+
 @lru_cache(maxsize=1000)
 def embed(question):
     return str(client.embeddings.create(model=MODEL, input=[question]).data[0].embedding)

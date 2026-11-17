@@ -18,6 +18,17 @@ HOSTS = {   # PISTE environment -> (token URL, API base). Each has its own keys;
 BOILERPLATE_MIN = 5        # the same text in this many articles or more is reported (kept: each is still a real article)
 RETRY_WAIT = 30            # seconds before the 2nd try, twice that before the 3rd
 BLOCK_TAGS = r"p|br|div|tr|td|th|li|table|tbody|thead|center|h\d"
+SPOT_CHECKS = {            # a few rules everyone knows: loaded text that no longer says them is not switched to
+    "L3141-3": "deux jours et demi ouvrables par mois",
+    "L1225-17": "six semaines avant la date présumée de l'accouchement",
+    "L3121-27": "trente-cinq heures par semaine",
+}
+
+
+def same_words(a, b):
+    # what counts as a change of wording: spacing and the kind of quote marks are only formatting
+    squash = lambda s: re.sub(r"\s+", "", re.sub(r"[“”«»]", '"', (s or "").replace("’", "'")))
+    return squash(a) == squash(b)
 
 
 def fetch_code(day, env=None, tries=3):

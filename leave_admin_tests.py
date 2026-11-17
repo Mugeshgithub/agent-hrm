@@ -5,7 +5,7 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
-from datetime import date
+from datetime import date, timedelta
 
 import db
 db.DB_PATH = os.path.join(tempfile.mkdtemp(), "leave_admin_test.db")   # throwaway database
@@ -416,6 +416,24 @@ def only_employer_decisions_are_in_the_inbox_and_employees_have_none():
     assert "error" in needs_you.inbox("E001") and "error" in needs_you.inbox("nobody")          # employees: no inbox
     assert needs_you.waiting_count("E001") == 0
     assert needs_you.inbox("H001")["leave_requests"] == []                                       # HR does not decide leave
+
+
+@test
+def hr_sees_one_line_when_the_labour_law_data_is_over_a_week_old_and_it_is_not_a_waiting_item():
+    fresh()
+    import law_status
+    saved = law_status.READ
+    try:
+        law_status.READ, law_status._cache["at"] = (lambda: None), 0.0                          # never synced, or no labour database (CI)
+        before = needs_you.inbox("H001")
+        assert before["law_data_notice"] is None
+        law_status.READ, law_status._cache["at"] = (lambda: date.today() - timedelta(days=9)), 0.0
+        box = needs_you.inbox("H001")
+        assert box["law_data_notice"].startswith("The labour-law data was last updated 9 days ago")
+        assert box["waiting_on_you"] == before["waiting_on_you"]                                 # a heads-up, like the paid-leave warnings
+        assert needs_you.inbox("M001")["law_data_notice"] is None                                # HR only: the developer gets the alerts
+    finally:
+        law_status.READ, law_status._cache["at"] = saved, 0.0
 
 
 @test
