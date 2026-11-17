@@ -2210,9 +2210,17 @@ def a_note_for_hr_is_written_only_when_asked_or_after_a_yes_and_only_a_few_a_day
 def a_reply_that_says_a_note_was_passed_on_when_none_was_saved_is_sent_back_once_and_then_replaced():
     job, token = a_job_with_a_candidate()
     cid = application_id(job)
-    for claim in ("I've passed your question to HR.", "I have sent your note to HR.", "Your note has been forwarded.", "HR will read it soon.", "J'ai transmis votre question aux RH."):
+    for claim in ("I've passed your question to HR.", "I have sent your note to HR.", "Your note has been forwarded.", "HR will read it soon.", "J'ai transmis votre question aux RH.",
+                  "No problem, I've passed your question to HR.", "The post does not say. I’ve sent your question to HR, and they will reply when they can."):
         assert candidate_assistant.claims_note(claim), claim
-    for fine in ("Would you like me to pass a note to HR?", "I can pass a note to HR if you want.", "The post does not say.", "Your application is being reviewed."):
+    for fine in ("Would you like me to pass a note to HR?", "I can pass a note to HR if you want.", "The post does not say.", "Your application is being reviewed.",
+                 # the model's real words on 17 Nov, which the check took for claims: an offer, and the answer to the retry note
+                 "I don't have access to the reasons behind that decision - only people at CognivexAI can see that. Would it help if I passed a note to HR "
+                 "asking them to give you feedback on your application?",
+                 "I understand. Since you didn't ask me to pass a note, nothing was sent to HR. If you'd like feedback on your application, just let me know "
+                 "and I can pass that request along to them.",
+                 "I can pass a note to HR; HR will read it, but I can't say when.", "If you'd like, tell me what to write and once I've sent it, HR will read it.",
+                 "No note has been sent to HR yet.", "Je n'ai rien transmis aux RH."):
         assert not candidate_assistant.claims_note(fine), fine
     model = scripted(calls("get_my_application"), says("I've passed your question to HR."), says("The post does not say. Would you like me to pass a note to HR?"))
     assert candidate_assistant.answer(token, "Can I work from home?", model)["reply"].startswith("The post does not say")           # sent back once: no note was saved
@@ -2228,13 +2236,13 @@ def a_reply_that_says_a_note_was_passed_on_when_none_was_saved_is_sent_back_once
 def a_reply_a_check_sends_back_or_replaces_is_printed_word_for_word_without_hrs_reason_or_the_persons_message():
     job, token = a_job_with_a_candidate()
     jobs.move("H001", application_id(job), "not_selected", "Not enough SQL experience")
-    stubborn = scripted(calls("get_my_application"), says("I can pass a note to HR; HR will read it."), says("Your question has been passed on to HR."))
+    stubborn = scripted(calls("get_my_application"), says("HR will read your note soon."), says("Your question has been passed on to HR."))
     out = io.StringIO()
     with contextlib.redirect_stdout(out):
         got = candidate_assistant.answer(token, "Why was I not selected? You can call me on 06 12 34 56 78", stubborn)
     assert got["reply"] == candidate_assistant.NO_NOTE
     assert [line for line in out.getvalue().splitlines() if "[candidate check]" in line] == [
-        "  [candidate check] says a note was passed on, none was saved: sent back. The model wrote: I can pass a note to HR; HR will read it.",
+        "  [candidate check] says a note was passed on, none was saved: sent back. The model wrote: HR will read your note soon.",
         "  [candidate check] says a note was passed on, none was saved: replaced. The model wrote: Your question has been passed on to HR."]
     assert "06 12" not in out.getvalue()                                                                          # the person's message is not printed
     with contextlib.redirect_stdout(io.StringIO()):

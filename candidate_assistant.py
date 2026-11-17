@@ -148,8 +148,24 @@ NOT_LOOKED_UP_FR = ("Je n'ai pas pu consulter votre candidature \u00e0 l'instant
                     "transmettre une note aux RH.")
 
 
+# an offer, a condition or "nothing was sent" is not a claim. Read sentence by sentence, the check once took "Would it help if I passed a note to HR?"
+# for one, sent a right answer back, then took "nothing was sent to HR" for one too and replaced it with NO_NOTE (17 Nov, the [candidate check] log)
+_SENTENCE = re.compile(r"[^.?!\n]+[.?!]*")
+_CONDITION = re.compile(r"\b(?:if|once|can|could|would|will|shall|should|may|might|happy to|glad to|want me to|like me to|i'd|i'll|let me|si|peux|pourrais|"
+                        r"pouvez|voulez|souhaitez|une fois)\b", re.I)
+_NEGATION = re.compile(r"\b(?:nothing|not|never|none|no (?:note|message|question|request)|rien|aucune?|pas)\b|n't\b", re.I)
+
+
 def claims_note(reply):
-    return bool(_CLAIMS_NOTE.search(str(reply or "")))
+    """True when a sentence says a note was passed on: not a question, nothing conditional or offered before the claim, and not "nothing was sent"."""
+    for sentence in _SENTENCE.findall(str(reply or "").replace("’", "'")):
+        if sentence.rstrip().endswith("?"):
+            continue
+        for found in _CLAIMS_NOTE.finditer(sentence):
+            before = sentence[:found.start()]
+            if not _CONDITION.search(before) and not _NEGATION.search(before + found.group(0)):
+                return True
+    return False
 
 
 HIDDEN_REASON = "[HR's reason, hidden]"
