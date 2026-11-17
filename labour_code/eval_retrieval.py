@@ -23,6 +23,7 @@ TOPS = [8]
 # python eval_retrieval.py situations             -> 14 "my manager says..." questions
 # python eval_retrieval.py holdout                  -> the 20 held-out questions the reranker never saw
 # python eval_retrieval.py top=5 only=multi+rerank  -> any top-k, one method (cheaper)
+# LABOUR_TABLE=chunks_api python eval_retrieval.py  -> the same questions on the Légifrance load (load_api.py)
 args = sys.argv[1:]
 if "holdout" in args:
     CASES = HOLDOUT

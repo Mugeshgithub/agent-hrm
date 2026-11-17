@@ -59,6 +59,27 @@ def split_text(text):
     return final
 
 
+def chunks_for(a):
+    # one article -> its chunks; the same cut for the Hugging Face copy and the Légifrance load (legifrance.py)
+    path = clean_path(a["fullSectionsTitre"])
+    pieces = split_text(a["texte"] or "")
+    chunks = []
+    for i, piece in enumerate(pieces, start=1):
+        part_note = f" (part {i} of {len(pieces)})" if len(pieces) > 1 else ""
+        chunks.append({
+            "chunk_id": f"{a['num']}#{i}",
+            "num": a["num"],
+            "part": "législative" if a["num"].startswith("L") else "réglementaire",
+            "path": path,
+            "etat": a["etat"],
+            "date_fin": str(to_date(a["dateFin"])),
+            "text": piece,
+            # contextual chunk header: what gets embedded and keyword-searched
+            "search_text": f"Article {a['num']}{part_note}. {path}. {piece}",
+        })
+    return chunks
+
+
 def main():
     today = date.today()
 
@@ -87,23 +108,7 @@ def main():
                 by_num[a["num"]] = max(started, key=lambda v: to_date(v["dateDebut"]) or date.min)
 
     # 3. build chunks
-    chunks = []
-    for a in by_num.values():
-        path = clean_path(a["fullSectionsTitre"])
-        pieces = split_text(a["texte"] or "")
-        for i, piece in enumerate(pieces, start=1):
-            part_note = f" (part {i} of {len(pieces)})" if len(pieces) > 1 else ""
-            chunks.append({
-                "chunk_id": f"{a['num']}#{i}",
-                "num": a["num"],
-                "part": "législative" if a["num"].startswith("L") else "réglementaire",
-                "path": path,
-                "etat": a["etat"],
-                "date_fin": str(to_date(a["dateFin"])),
-                "text": piece,
-                # contextual chunk header: what gets embedded and keyword-searched
-                "search_text": f"Article {a['num']}{part_note}. {path}. {piece}",
-            })
+    chunks = [c for a in by_num.values() for c in chunks_for(a)]
 
     with open("labour_code/chunks.jsonl", "w", encoding="utf-8") as f:
         for c in chunks:
