@@ -100,3 +100,10 @@ Entries marked *backfilled* were written afterwards from the code, the git histo
 - **Why:** on the real first night, half an answer from Légifrance would have switched before this; now it is held (28% fewer articles). Healthy data: 1,975 of 2,022 found from their opening (2.3% missed, generic openings); held above 2 or 5%.
 - **Cost:** about $0.25 on the first nights (generated questions, 50 a night) and about $0.015 on a normal night. A generic article can still be missed by the self-check without holding: it is listed in the log.
 - **Change it when:** a real breakage slips under 5%, or the generated file shows Haiku's questions are poor: tighten the limit or drop that step.
+
+### 15. Candidate assistant: a reply a check steps in on is printed word for word (PR #48, 2026-11-17)
+- **Chose:** when a check sends a reply back or replaces it (no lookup, a note claimed, a promise, a figure), print the model's own words with the check's name; the person's message is not printed, and HR's reasons are masked ([candidate_assistant.py](../candidate_assistant.py)).
+- **Not chosen:** changing the note check now, or storing these lines in the database.
+- **Why:** in CI the "why was I not selected?" eval got our fixed "I haven't passed anything to HR yet", and nothing showed what the model had written. 78 runs locally did not repeat it. Offline, the check fires on an offer like "I can pass a note to HR; HR will read it", wording our own prompt asks for after a note, so it may be too strict.
+- **Cost:** the printed line can hold what the model wrote about the job or the application; it lives in the server log, not with the application, so it is not erased with it.
+- **Change it when:** the log shows the note check firing on offers: narrow it then, with that wording as a test.
