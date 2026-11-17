@@ -10,6 +10,7 @@ policy_embeddings.json
 labour_code/articles.jsonl
 labour_code/chunks.jsonl
 labour_code/api_articles.jsonl
+labour_code/sync.log
 web/node_modules/
 web/.next/
 web/tsconfig.tsbuildinfo

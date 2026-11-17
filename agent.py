@@ -34,6 +34,7 @@ import search_first
 import tool_guard
 import needs_you
 import onboarding
+import law_status
 import policy_gaps
 from citations import ungrounded_citations, RETRY_MESSAGE, SAFE_REPLY
 from documents import asks_if_genuine, says_cannot_tell, GENUINE_ANSWER, GENUINE_RETRY
@@ -720,7 +721,7 @@ def run_tool(name, tool_input):
             return {"error": "The labour-law database isn't available right now."}
         try:
             # imported here, not at the top, so CI (which has no labour-code database) still runs
-            from labour_code.search import connect, search_for_agent
+            from labour_code.search import as_of as search_as_of, connect, search_for_agent
             conn = connect()
         except Exception:
             # e.g. Docker is not running: the user gets a clear message, the agent keeps working
@@ -732,6 +733,7 @@ def run_tool(name, tool_input):
             # a failed rewrite or rerank does not land here: the search falls back to the user's words or the search order
             with conn:
                 results = search_for_agent(conn, last_turn.get("question"), tool_input["question"], k=20)
+                as_of = search_as_of(conn)           # the day the nightly sync last checked this data against Légifrance (labour_code/sync.py)
         except Exception:
             # the database answered but a step failed, e.g. the embedding service
             return {"error": "The labour-law search failed this time. Please try again later."}
@@ -740,8 +742,12 @@ def run_tool(name, tool_input):
             # top 5: full recall on all 70 test questions (top 8 gave no extra), ~37% fewer tokens
             if r["num"] not in articles and len(articles) < 5:
                 articles[r["num"]] = r["text"]
-        return {"articles": [{"article": n, "text_fr": t} for n, t in articles.items()],
-                "note": "Official French text of the Code du travail. Cite the article number."}   
+        result = {"articles": [{"article": n, "text_fr": t} for n, t in articles.items()],
+                  "note": "Official French text of the Code du travail. Cite the article number."}
+        if as_of:                              # none before the first sync: the old copy has no date to give
+            result["as_of"] = as_of.isoformat()
+            result["note"] = f"Official French text of the Code du travail (Légifrance), as of {as_of.isoformat()}. Cite the article number."
+        return result
 
     # ---------- HR tickets ----------
 
@@ -989,6 +995,10 @@ def answer_turn(user_text):
                     reply = shown
                 if document_retry_used or agreement_retry_used or search_retry_used or contract_retry_used or booking_retry_used or decision_retry_used or existing_retry_used or card_retry_used or number_retry_used:       # a retry note was sent: the reply must not talk about it
                     reply = document_answers.strip_correction(reply)
+
+                # a law answer says how recent the law it quotes is: added by code after every guard, the model can forget a line (law_status.py)
+                if (as_of_line := law_status.line_for(reply, turn_sources, user_text)):
+                    reply = f"{reply}\n\n{as_of_line}"
 
                 # the policy does not answer it: keep the question, without a name, for HR (policy_gaps.py)
                 if policy_gaps.record_from_turn(last_turn["policy_searches"], reply):

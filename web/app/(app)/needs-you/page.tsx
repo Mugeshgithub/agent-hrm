@@ -23,16 +23,23 @@ export default function NeedsYouPage() {
   if (!allowed) return <Empty title="Needs you is for managers and HR">Your requests go to your manager, {me.manager_name}.</Empty>;
 
   const warnings = data?.paid_leave_warnings ?? [];
+  const lawNotice = data?.law_data_notice;
   return (
     <>
       <PageHeader title="Needs you"
         description="Everything waiting on a decision from you, oldest first. Your own requests aren't here: they go to your manager." />
       {error && <ErrorNote message={error.message} />}
 
-      {warnings.length > 0 && (
+      {(warnings.length > 0 || lawNotice) && (
         <section aria-labelledby="warn" className="panel mb-6 px-5 py-4">
           <h2 id="warn" className="font-medium">Worth a look</h2>
           <ul className="mt-2 space-y-1.5">
+            {lawNotice && (
+              <li className="flex items-start gap-2.5 text-sm">
+                <span className="mt-1.5 h-2 w-2 shrink-0 rounded-full bg-wait" aria-hidden />
+                <span>{lawNotice}</span>
+              </li>
+            )}
             {warnings.map((w) => (
               <li key={w.employee_id} className="flex items-start gap-2.5 text-sm">
                 <span className="mt-1.5 h-2 w-2 shrink-0 rounded-full bg-wait" aria-hidden />
