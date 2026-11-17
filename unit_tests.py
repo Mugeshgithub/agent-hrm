@@ -743,6 +743,64 @@ def stand_in_github(open_issues):
 
 
 @test
+def law_sync_first_night_holds_when_data_looks_missing_rather_than_repealed():
+    lost = law_sync.set_aside(set())                                                                            # every expected article gone
+    assert law_sync.aside_verdict(lost[:2]) == ""                                                               # one or two: a real repeal, named in the log
+    assert law_sync.aside_verdict(lost[:3]).startswith("3 recall questions lost their article")
+    assert law_sync.first_sync_verdict(9754, 11524) == ""                                                       # Légifrance has more than the old copy
+    assert law_sync.first_sync_verdict(9754, 9600) == ""                                                        # 1.6% fewer
+    assert law_sync.first_sync_verdict(9754, 9559) == ""                                                        # 1.99%: just under
+    assert law_sync.first_sync_verdict(9754, 9558).startswith("first sync: the new data has 2.0% fewer articles")
+    assert law_sync.first_sync_verdict(9754, 4877).startswith("first sync: the new data has 50.0% fewer")      # half an answer
+
+
+@test
+def law_sync_self_check_finds_each_new_article_from_its_own_opening():
+    opening = law_sync.opening
+    first = "Les seuils déterminés à l'article R. 3252-2 sont révisés chaque année."                             # "R. 3252" is not a sentence end
+    second = "Ils sont publiés par arrêté du ministre chargé du travail avant le 1er janvier de chaque année, au Journal officiel."
+    assert opening(first + " " + second + " Troisième phrase.") == first + " " + second                         # sentences up to 150 characters
+    assert opening("x" * 900) == "x" * 400
+    articles = [{"num": "A", "texte": "Un texte que seul A contient."}, {"num": "B", "texte": "Un texte que seul B contient."},
+                {"num": "C", "texte": "Un décret en Conseil d'Etat détermine les modalités."}, {"num": "D", "texte": "Un décret en Conseil d'Etat détermine les modalités."},
+                {"num": "E", "texte": "Un texte inchangé."}]
+    found = {"Un texte que seul A contient.": ["A", "X"], "Un texte que seul B contient.": ["X", "Y", "Z", "W", "V", "B"]}   # B only 6th
+    result = law_sync.self_check(articles[:4], articles, lambda text: found[text])
+    assert result == {"checked": 2, "not found": ["B"], "shared opening": 2}, result                           # C and D: same words, can't single one out
+    assert law_sync.self_check_verdict(result) == ""                                                            # one miss: listed in the log, not a hold
+    assert law_sync.self_check_verdict({"checked": 5, "not found": ["B", "C", "D"], "shared opening": 0}) == \
+        "self-check: 3 of 5 new or changed articles not found from their own opening (more than 2): B, C, D"
+    big = {"checked": 2022, "not found": [f"R{i}" for i in range(47)], "shared opening": 18}
+    assert law_sync.self_check_verdict(big) == ""                                                              # the real first night: 2.3%
+    assert law_sync.self_check_verdict({**big, "not found": [f"R{i}" for i in range(102)]}).startswith("self-check: 102 of 2022")   # over 5%
+
+
+@test
+def law_sync_keeps_only_plain_generated_questions_and_saves_each_once_for_review():
+    assert law_sync.usable_question('"How many days of paid leave do I earn each month?"\n') == "How many days of paid leave do I earn each month?"
+    assert law_sync.usable_question("Paid leave per month") is None                                             # not a question
+    assert law_sync.usable_question("What does L3141-3 say about leave?") is None                                # names the article
+    assert law_sync.usable_question("What does article L. 3141-3 say?") is None
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "unit_test_generated.jsonl")
+    try:
+        q = {"question": "How many days of paid leave do I earn each month?", "lang": "en", "expected": "L3141-3", "article_id": "A1", "written_on": "2026-11-17"}
+        assert law_sync.save_generated([q], path) == 1
+        assert law_sync.save_generated([q, {**q, "question": "Can my employer refuse my leave dates?"}], path) == 1     # the first is already there
+        assert [json.loads(line)["question"] for line in open(path, encoding="utf-8")] == [q["question"], "Can my employer refuse my leave dates?"]
+    finally:
+        os.remove(path)
+
+
+@test
+def law_sync_waits_for_approval_when_more_than_50_articles_move_and_reports_each_step_cost():
+    assert law_sync.review_verdict({"added": 30, "changed": 20, "removed": 0}) == ""
+    assert "python labour_code/sync.py approve" in law_sync.review_verdict({"added": 30, "changed": 20, "removed": 1})
+    assert law_sync.review_verdict({"added": 1830, "changed": 210, "removed": 44}).startswith("2084 articles added, changed or removed")
+    usage = {"haiku_in": 1_000_000, "haiku_out": 0, "embed": 0}
+    assert law_sync.cost_since({"haiku_in": 1_500_000, "haiku_out": 0, "embed": 2_000_000}, usage) == 0.54
+
+
+@test
 def law_sync_alerts_the_developer_with_one_github_issue_that_a_good_night_closes():
     names = ("LAW_SYNC_GITHUB_TOKEN", "LAW_SYNC_GITHUB_REPO")
     saved = {k: os.environ.get(k) for k in names}
