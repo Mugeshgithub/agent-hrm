@@ -39,11 +39,13 @@ Reply with JSON only, no other text:
 {"unsupported": [{"claim": "<the unsupported part, quoted from the reply>", "why": "<what the tool results say instead>"}]}
 Use an empty list when everything the reply says about the rules is in the tool results."""
 
+# the user's rule (17 Nov): after a retry, the answer states only what the policy says. A case the text does not name is not covered: the first wording
+# ("leave out what they do not state") let the model add "if the days are not consecutive, no note is needed", a condition the policy never gives
 RETRY = HIDDEN + ("These parts of your reply are not in what the tools returned in this turn: {parts}. If the policy sections you found are about "
                   "something else, call search_policy once more with other words (the topic's own name, such as \"paid leave\" or \"sick leave\"). Then "
-                  "answer the question again with only what the policy text and the other tool results say: leave out any reason, condition, deadline or "
-                  "consequence they do not state, and where they still do not answer something, say the policy does not say. Start with the answer itself "
-                  "and say nothing about this note.")
+                  "answer the question again stating only what the policy text and the other tool results say. Add no reason, condition, exception, "
+                  "deadline or consequence of your own, and do not say what happens in a case the text does not name. If the person's case is not "
+                  "covered, say the policy does not cover it and suggest asking HR. Start with the answer itself and say nothing about this note.")
 QUOTE = "Here is what the company policy says, word for word ({title}): \"{text}\""
 QUOTE_FR = "Voici ce que dit la politique de l'entreprise, mot pour mot ({title}) : « {text} »"
 NOT_CONFIRMED = "I can't confirm that from the company policy, so I won't guess. HR can tell you."

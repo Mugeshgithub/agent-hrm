@@ -740,6 +740,7 @@ def a_policy_answer_with_a_reason_the_policy_does_not_give_is_sent_back_once_to_
     action, note, found = policy_grounding.review("Can I take paid leave in December?", reply, [WINDOW], checker(FLAGGED), False)
     assert action == "retry" and note.startswith(document_answers.HIDDEN) and '"based on business needs"' in note and found[0]["claim"] == "based on business needs"
     assert "call search_policy once more" in note                       # the search may have missed the section: the real cause of "the policy doesn't restrict it"
+    assert "do not say what happens in a case the text does not name" in note and "the policy does not cover it and suggest asking HR" in note
     # the checker thinks aloud and corrects itself: its last verdict counts
     assert policy_grounding.review("Can I take paid leave in December?", reply, [WINDOW], checker(f"{FLAGGED} Wait, that is supported. " + '{"unsupported": []}'), False)[0] == "ok"
     # an offer or a question to the person is never a rule, whatever the checker says (a real false alarm, 17 Nov)
