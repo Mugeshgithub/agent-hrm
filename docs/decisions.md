@@ -93,3 +93,10 @@ Entries marked *backfilled* were written afterwards from the code, the git histo
 - **Why:** on a test copy: first night applied (+1,830, 210 changed, 44 removed, recall equal 50/20/14); an unchanged night $0; a night with 5 changed articles $0.02 (314 of 322 model answers from cache); a broken spot check and Légifrance down were held and failed, live data untouched.
 - **Cost:** the first night about $0.58. The check finds missing articles, not wrong wording. Sandbox keys until production. It runs only when the machine is on (HR's notice covers that).
 - **Change it when:** normal nights trip the 2% size check, or the app moves to a server: run it from that server's scheduler.
+
+### 14. More checks before the first real sync, and a human for big nights (PR #47, 2026-11-17)
+- **Chose:** hold a night when more than 2 recall questions lose their article, or when a first sync has 2% fewer articles than the live table; a self-check that finds each new or changed article from its own opening (meaning + keywords, no model); Haiku-written questions saved for review only; more than 50 articles moved waits for `sync.py approve` ([labour_code/sync.py](../labour_code/sync.py)).
+- **Not chosen:** holding on any self-check miss (it would hold every night), searching with one sentence only (89% found), vector search alone (88%), or adding generated questions to the suite automatically.
+- **Why:** on the real first night, half an answer from Légifrance would have switched before this; now it is held (28% fewer articles). Healthy data: 1,975 of 2,022 found from their opening (2.3% missed, generic openings); held above 2 or 5%.
+- **Cost:** about $0.25 on the first nights (generated questions, 50 a night) and about $0.015 on a normal night. A generic article can still be missed by the self-check without holding: it is listed in the log.
+- **Change it when:** a real breakage slips under 5%, or the generated file shows Haiku's questions are poor: tighten the limit or drop that step.

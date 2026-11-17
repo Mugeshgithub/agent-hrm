@@ -11,6 +11,7 @@ labour_code/articles.jsonl
 labour_code/chunks.jsonl
 labour_code/api_articles.jsonl
 labour_code/sync.log
+labour_code/generated_questions.jsonl
 web/node_modules/
 web/.next/
 web/tsconfig.tsbuildinfo

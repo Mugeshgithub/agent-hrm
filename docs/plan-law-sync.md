@@ -53,18 +53,21 @@ data.gouv.fr lists the API as "restricted access", so production may need approv
 5. **Build the new data side by side** in `chunks_next`. It's the whole new code, so **repealed articles are not in it**. Only chunks whose text changed are embedded. The live table is not touched, and searches keep using it.
 6. **Checks before the switch:**
    - **Spot checks:** L3141-3, L1225-17 and L3121-27 still say what they should.
-   - **Size:** articles in force change by less than 2% since the last applied sync. Skipped on the first sync, which replaces the old Hugging Face copy.
+   - **Size:** articles in force change by less than 2% since the last applied sync. **On the first sync (#47)**, which replaces the old Hugging Face copy, the night is held if the new data has 2% or more fewer articles than the live table.
    - **Recall:** the 84 test questions, production path, top 5, run on the live table and on `chunks_next` the same night. A set where the new data finds fewer than the live data **holds the switch**.
-     - A question whose expected article is no longer in the code is set aside, and the alert names it so a person can update the test.
+     - A question whose expected article is no longer in the code is set aside, and the alert names it so a person can update the test. **More than 2 set aside holds the night (#47):** that looks like missing data, not a repeal.
      - If a model call fails during the check, the night is held: we never switch on a check that didn't run.
+   - **Self-check (#47):** every new or changed article is searched with its own opening (its first sentences, at least 150 characters) on the new table, with meaning and keywords and no model. It must come back in the top 5, or the night is held. An opening that other articles share word for word can't single one out, so it is counted but not checked.
+   - **Generated questions (#47):** Haiku writes one plain-English employee question per new or changed article. The production search must bring the article back in the top 5. Questions that pass go to `labour_code/generated_questions.jsonl` (git-ignored) for a person to review, never into the suite by themselves. Failures are reported but don't hold the night, because a written question can be poor. At most 50 new questions a night; the rest follow on later nights, and written ones are cached.
+   - **Big change (#47):** more than 50 articles added, changed or removed in one night are built and tested, but not switched. The night is recorded as **review** and alerts the developer, who runs `python labour_code/sync.py approve`. That switches only if `chunks_next` is still exactly what the review night tested (a fingerprint of its chunks).
 7. **Switch in one step:** one transaction renames `chunks` → `chunks_prev` and `chunks_next` → `chunks`, with their indexes. A search sees either the old data or the new, never half. `chunks_prev` is kept until the next switch, for a rollback by hand.
 8. **Record the run** in `law_sync_runs`:
-   - the result (applied, no change, held or failed) and the reason;
+   - the result (applied, no change, review, held or failed) and the reason;
    - articles added, changed and removed;
-   - recall per set on both tables;
-   - **tonight's cost** (embeddings plus recall check), also printed in the log.
+   - recall per set on both tables, the self-check and the generated questions;
+   - **tonight's cost, step by step:** embeddings of the new data, recall check, self-check and generated questions. It's also printed in the log.
 9. **Alerts go to the developer, not HR:**
-   - Every held or failed run is printed in the cron log.
+   - Every held, failed or review run is printed in the cron log.
    - With `LAW_SYNC_GITHUB_TOKEN` and `LAW_SYNC_GITHUB_REPO` in `.env`, it also opens a GitHub issue labelled `law-sync`. If one is already open, it adds a comment instead of opening another. The next applied or unchanged night closes it.
    - Without those settings, it only logs.
 10. **HR only hears about it when the data is more than 7 days old:** one line in "Needs you" → "Worth a look", for example "The labour-law data was last updated 9 days ago (8 Nov). The assistant still answers from it; the developer has been told." It's worked out each time the page loads, so it also shows when the job stops running.
@@ -112,7 +115,8 @@ One PR at a time, each with tests against a fake API and a decisions.md entry.
 |---|---|---|
 | Before (you) | Register, make a sandbox token work, note the quotas | done 2026-11-16 (sandbox) |
 | #45 | API client (token, 429 retries), cleaning, first full load into a side table, compare with today's data. No switch. | done 2026-11-17 |
-| #46 | Nightly job: side-by-side build, repealed articles removed, checks, recall gate (cached, cost reported), one-step switch, run log, developer alerts (log + GitHub issue), HR notice after 7 days, "as of" date in law answers, cron line | 2.5 to 3 days |
+| #46 | Nightly job: side-by-side build, repealed articles removed, checks, recall gate (cached, cost reported), one-step switch, run log, developer alerts (log + GitHub issue), HR notice after 7 days, "as of" date in law answers, cron line | done 2026-11-17 |
+| #47 | Before the first real sync: first-sync size check, at most 2 recall questions set aside, self-check of new articles, generated questions for review, review and `approve` above 50 changes, cost per step | 2026-11-17 |
 
 **Total: about 4 to 5 working days of build,** then a week of watched nightly runs before we trust it.
 
