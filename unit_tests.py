@@ -27,6 +27,7 @@ import jobs
 import number_guard
 import pdf_text
 import policy_gaps
+import policy_grounding
 import retention
 import policy_store
 import recruitment_guard
@@ -702,6 +703,65 @@ def legifrance_fetch_is_one_call_retried_on_429_and_the_secret_goes_only_to_the_
             else:
                 os.environ[k] = v
         legifrance.RETRY_WAIT = saved[2]
+
+# ---------- the grounding check of policy answers (policy_grounding.py), with a scripted checker ----------
+
+WINDOW = json.dumps({"found": True, "sections": [{"title": "Paid leave (congés payés)", "text": "Paid leave is normally taken between 1 May and 31 October. "
+                     "Outside this period, paid leave can still be requested and is handled like any other leave request: your manager decides whether to approve it."}]})
+NEEDS = "Outside that period you can still request it. Your manager will decide whether to approve it based on business needs."
+FLAGGED = json.dumps({"unsupported": [{"claim": "based on business needs", "why": "the policy only says the manager decides"}]})
+CARRY = json.dumps({"found": True, "sections": [{"title": "Carry forward", "text": "Unused paid leave is not lost at the end of the year: it is carried forward in full."}]})
+
+
+def checker(*answers):
+    """A grounding checker that gives these answers in turn (an exception is raised) and remembers what it was shown."""
+    left, seen = list(answers), []
+
+    def check_model(system, text):
+        seen.append(text)
+        answer = left.pop(0)
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+    check_model.seen = seen
+    return check_model
+
+
+@test
+def a_policy_answer_with_a_reason_the_policy_does_not_give_is_sent_back_once_to_search_again_and_answer_from_the_text():
+    assert policy_grounding.applies(["get_leave_balance", "search_policy"]) and not policy_grounding.applies(["get_leave_balance"])
+    assert not policy_grounding.applies(["read_my_document", "search_policy", "search_labour_code"])           # a law answer: the check is for the policy only
+    assert not policy_grounding.applies(["search_collective_agreement", "search_policy"])
+    reply = f"Yes, you can take paid leave in December. {NEEDS}"
+    fine = checker('{"unsupported": []}')
+    assert policy_grounding.review("Can I take paid leave in December?", reply, [WINDOW], fine, False) == ("ok", reply, [])
+    shown = fine.seen[0]
+    assert "Can I take paid leave in December?" in shown and "your manager decides whether to approve it" in shown and NEEDS in shown   # question, tool results, reply
+    action, note, found = policy_grounding.review("Can I take paid leave in December?", reply, [WINDOW], checker(FLAGGED), False)
+    assert action == "retry" and note.startswith(document_answers.HIDDEN) and '"based on business needs"' in note and found[0]["claim"] == "based on business needs"
+    assert "call search_policy once more" in note                       # the search may have missed the section: the real cause of "the policy doesn't restrict it"
+    assert "do not say what happens in a case the text does not name" in note and "the policy does not cover it and suggest asking HR" in note
+    # the checker thinks aloud and corrects itself: its last verdict counts
+    assert policy_grounding.review("Can I take paid leave in December?", reply, [WINDOW], checker(f"{FLAGGED} Wait, that is supported. " + '{"unsupported": []}'), False)[0] == "ok"
+    # an offer or a question to the person is never a rule, whatever the checker says (a real false alarm, 17 Nov)
+    offer = json.dumps({"unsupported": [{"claim": "Would you like me to raise an HR ticket to ask about this?", "why": "no tool result"}]})
+    assert policy_grounding.review("Is a gym membership covered?", "The policy doesn't cover it. Would you like me to raise an HR ticket to ask about this?",
+                                   [WINDOW], checker(offer), False)[0] == "ok"
+
+
+@test
+def still_unsupported_after_the_retry_the_policy_found_is_quoted_and_a_failed_check_lets_the_reply_through():
+    action, safe, _ = policy_grounding.review("Can I take paid leave in December?", NEEDS, [json.dumps({"days": 3}), CARRY, WINDOW, WINDOW], checker(FLAGGED), True)
+    assert action == "replaced" and safe.startswith("Here is what the company policy says, word for word (Carry forward)")
+    assert "31 October" in safe and safe.count("Paid leave (congés payés)") == 1 and "business needs" not in safe          # every section found, each once
+    french = policy_grounding.review("Puis-je prendre des congés payés en décembre ?", NEEDS, [WINDOW], checker(FLAGGED), True)[1]
+    assert french.startswith("Voici ce que dit la politique de l'entreprise") and "« Paid leave is normally" in french
+    nothing = json.dumps({"found": False, "message": "No matching section in the HR policy."})
+    assert policy_grounding.review("Can I bring my dog?", "Yes, dogs are welcome on Fridays.", [nothing], checker(FLAGGED), True)[1] == policy_grounding.NOT_CONFIRMED
+    # the check itself fails: the reply goes out unchecked, and the agent logs why
+    assert policy_grounding.review("December?", NEEDS, [WINDOW], checker(TimeoutError("slow")), False) == ("unchecked", NEEDS, "TimeoutError")
+    assert policy_grounding.review("December?", NEEDS, [WINDOW], checker("I think it is fine."), False) == ("unchecked", NEEDS, "no usable answer")
+
 
 # ---------- the nightly labour-code sync: what holds a night, who is told, and the date in law answers (labour_code/sync.py, law_status.py) ----------
 

@@ -7,6 +7,7 @@ from tracing import observe, propagate_attributes
 
 import json
 import os
+import time
 from datetime import date, datetime
 import anthropic
 
@@ -36,6 +37,7 @@ import needs_you
 import onboarding
 import law_status
 import policy_gaps
+import policy_grounding
 from citations import ungrounded_citations, RETRY_MESSAGE, SAFE_REPLY
 from documents import asks_if_genuine, says_cannot_tell, GENUINE_ANSWER, GENUINE_RETRY
 from tools import (
@@ -57,10 +59,18 @@ PRICE_OUT = 5.00
 PRICE_CACHE_WRITE = 1.25   # first time a prefix is cached
 PRICE_CACHE_READ = 0.10    # every reuse after that
 
+# the grounding check of policy answers (policy_grounding.py): on 41 labelled replies x10 it flagged no good reply (0/210) and missed 4 of 200 bad ones,
+# about 1.2 s and $0.0002 a check. Low effort flagged good replies (8/210), Sonnet 5.5 more (13/210). Its own client: 10 s and one retry, then the
+# reply goes out unchecked (logged)
+GROUNDING_MODEL = "claude-haiku-5-5"
+GROUNDING_PRICE_IN = 0.10
+GROUNDING_PRICE_OUT = 0.50
+grounding_client = anthropic.Anthropic(timeout=10, max_retries=1)
+
 MAX_COST_PER_CONVERSATION = 0.10   # dollars; stop the chat if it costs more
 MAX_CALLS_PER_MESSAGE = 8          # stop runaway tool loops on one question
 
-usage = {"calls": 0, "input_tokens": 0, "output_tokens": 0, "cache_write": 0, "cache_read": 0}
+usage = {"calls": 0, "input_tokens": 0, "output_tokens": 0, "cache_write": 0, "cache_read": 0, "check_cost": 0}
 
 
 def reset_usage():
@@ -81,7 +91,15 @@ def cost_so_far():
     return (usage["input_tokens"] * PRICE_IN
             + usage["output_tokens"] * PRICE_OUT
             + usage["cache_write"] * PRICE_CACHE_WRITE
-            + usage["cache_read"] * PRICE_CACHE_READ) / 1_000_000
+            + usage["cache_read"] * PRICE_CACHE_READ) / 1_000_000 + usage["check_cost"]
+
+
+def grounding_model(system, text):
+    """One call of the grounding check (policy_grounding.py): a prompt and the text, no tools. Its cost counts in this conversation's."""
+    response = grounding_client.messages.create(model=GROUNDING_MODEL, max_tokens=3000, system=system, output_config={"effort": "medium"},
+                                                messages=[{"role": "user", "content": text}])
+    usage["check_cost"] += (response.usage.input_tokens * GROUNDING_PRICE_IN + response.usage.output_tokens * GROUNDING_PRICE_OUT) / 1_000_000
+    return "".join(b.text for b in response.content if b.type == "text")
 
 
 # fake login: in a real app this comes from the session
@@ -874,6 +892,7 @@ def answer_turn(user_text):
         existing_retry_used = False
         card_retry_used = False
         number_retry_used = False
+        grounding_retry_used = False
         last_turn["tools_called"] = []
         last_turn["refused"] = []
         last_turn["policy_searches"] = []     # what search_policy was asked and whether it found a section (policy_gaps.py)
@@ -993,7 +1012,21 @@ def answer_turn(user_text):
                 if action == "replaced":
                     print("  [guard] still not from a tool: replacing it with the tools' figures")
                     reply = shown
-                if document_retry_used or agreement_retry_used or search_retry_used or contract_retry_used or booking_retry_used or decision_retry_used or existing_retry_used or card_retry_used or number_retry_used:       # a retry note was sent: the reply must not talk about it
+
+                # guardrail in code: a policy answer gives no reason, condition, deadline or consequence that this turn's tool results do not contain;
+                # a second model reads it (policy_grounding.py). One retry naming those parts, then their sentences are taken out or the policy is quoted.
+                if policy_grounding.applies(last_turn["tools_called"]):
+                    started, spent = time.time(), usage["check_cost"]
+                    action, shown, detail = policy_grounding.review(user_text, reply, turn_sources, grounding_model, grounding_retry_used)
+                    found = f": {[f.get('claim') for f in detail]}" if action in ("retry", "replaced") else f" ({detail})" if action == "unchecked" else ""
+                    print(f"  [guard] grounding check {action} in {time.time() - started:.1f}s, ${usage['check_cost'] - spent:.5f}{found}")
+                    if action == "retry":
+                        grounding_retry_used = True
+                        messages.append({"role": "user", "content": shown})
+                        continue
+                    if action == "replaced":
+                        reply = shown
+                if document_retry_used or agreement_retry_used or search_retry_used or contract_retry_used or booking_retry_used or decision_retry_used or existing_retry_used or card_retry_used or number_retry_used or grounding_retry_used:       # a retry note was sent: the reply must not talk about it
                     reply = document_answers.strip_correction(reply)
 
                 # a law answer says how recent the law it quotes is: added by code after every guard, the model can forget a line (law_status.py)
