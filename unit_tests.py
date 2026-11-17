@@ -1658,10 +1658,17 @@ def a_wrong_count_is_sent_back_once_with_how_many_the_tool_listed_then_its_sente
     assert action == "retry" and "Two pending requests" in note and "pending requests: 3" in note
     action, fixed = ng.review(wrong, [PENDING], "any pending request", True)
     assert action == "replaced" and fixed.startswith("The system shows: pending requests: 3.\n\n- **Hugo**"), fixed
-    twice = "Two pending requests:\n\n- **Hugo** (2 December)\n- **Clara** (3 December)\n\nThree pending requests:" + LISTED   # main, 17 Nov
+    # main, 17 Nov: after a retry the model wrote its old list again above the new one. The first time it is sent back (the person sees only the
+    # next answer); if it comes back like that again, the wrong count AND its list go, and only the corrected list is shown
+    twice = ("Two pending requests:\n\n- **Hugo** (2 December): 1 casual day, balance 2 → 1 after\n- **Clara** (3 December): 1 sick day, balance 1 → 0 after"
+             "\n\nThree pending requests:" + LISTED)
+    assert ng.review(twice, [PENDING], "any pending request", False)[0] == "retry"
     action, fixed = ng.review(twice, [PENDING], "any pending request", True)
-    assert action == "replaced" and "Two" not in fixed and "Three pending requests:" in fixed        # it already says how many: the wrong count goes
+    assert action == "replaced" and fixed == "Three pending requests:" + LISTED, fixed
     assert ng.review("Three pending requests:" + LISTED, [PENDING], "any pending request", True)[0] == "ok"
+    # a list under a wrong count with no right count anywhere is kept: only its count is replaced
+    action, fixed = ng.review("Two pending requests:" + LISTED, [PENDING], "any pending request", True)
+    assert fixed.startswith("The system shows: pending requests: 3.") and "**Emma**" in fixed and "**Hugo**" in fixed
 
 
 @test

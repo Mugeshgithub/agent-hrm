@@ -375,12 +375,34 @@ def retry_message(bad, turn_sources):
     return RETRY_MESSAGE.format(figures=", ".join(bad), returned=returned)
 
 
+_ITEM = re.compile(r"^\s*(?:[-*•]|\d+[.)])\s")
+
+
+def _without_stale_lists(reply, bad, available):
+    """A list under a wrong count, when the reply also gives the right one, is the answer from before a retry written again above the new one
+    (main, 17 Nov: "Two pending requests: Hugo, Clara" above "Three pending requests: Hugo, Clara, Emma"). The count and its list both go."""
+    right = {f.value for f, _ in _count_phrases(reply)} & {item.value for item in available if item.kind == "count"}
+    lines = str(reply or "").split("\n")
+    out, skipping = [], False
+    for i, line in enumerate(lines):
+        if skipping and (not line.strip() or _ITEM.match(line)):
+            continue
+        skipping = False
+        following = next((later for later in lines[i + 1:] if later.strip()), "")
+        if right and _ITEM.match(following) and any(("count", f.value) in bad for f, _ in _count_phrases(line)):
+            skipping = True
+            continue
+        out.append(line)
+    return "\n".join(out).strip()
+
+
 def correct(reply, bad_figures, turn_sources):
     """The reply with each sentence that states an unconfirmed figure replaced: by the figures a tool returned (the first such sentence),
     or by "I can't confirm that figure" when no tool returned any. `bad_figures` is ungrounded_figures(). Nothing unconfirmed gets through."""
     bad = {(f.kind, f.value) for f in bad_figures}
-    parts = re.split(r"((?<=[.!?])\s+|\n+)", str(reply or ""))
     available = facts(turn_sources)
+    reply = _without_stale_lists(reply, bad, available)
+    parts = re.split(r"((?<=[.!?])\s+|\n+)", str(reply or ""))
     given = lambda text: figures_in(text) + [f for f, _ in _count_phrases(text)]
     stated = {(f.kind, f.value) for f in given(reply)} - bad                # figures the reply already gives that a tool confirmed
     shown = False
