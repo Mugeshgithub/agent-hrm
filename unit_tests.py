@@ -1814,6 +1814,7 @@ def applications_are_rate_limited_per_key_and_the_window_slides():
     assert [t.allow("a", 0), t.allow("a", 10), t.allow("a", 20)] == [True, True, False]
     assert t.allow("b", 20) is True                                                                      # another address is not affected
     assert t.allow("a", 61) is True and t.allow("a", 62) is False                                         # the first try left the window
+    assert t.wait("a", 62) == 8 and t.wait("b", 62) == 0                                                  # the try at 10 leaves at 70; b may try now
 
 
 @test

@@ -203,6 +203,12 @@ class Throttle:
         self.seen[key] = recent + [now]
         return True
 
+    def wait(self, key, now=None):
+        """Seconds until `key` may try again: 0 when it may now (a refused try was never counted, so it does not push this back)."""
+        now = time.time() if now is None else now
+        recent = [t for t in self.seen.get(key, []) if now - t < self.seconds]
+        return 0 if len(recent) < self.limit else recent[len(recent) - self.limit] + self.seconds - now
+
 
 def decode_cv(text):
     """The CV from the JSON body (base64), or None when it is not valid base64."""

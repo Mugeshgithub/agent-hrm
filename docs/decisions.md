@@ -135,3 +135,10 @@ Entries marked *backfilled* were written afterwards from the code, the git histo
 - **Why:** "any pending request" was 17/20 on main: every first answer said "Two pending requests" and left Emma out; the pending-requests guard fixed the list, but 3 retries kept "Two" (once with the old list above the new one). Now 20/20.
 - **Cost:** about $0.001 and one more answer call when it fires (5 of 20 pending turns, 2 of 417 full-suite turns). Full suite 3 times: 139/139 each. One false alarm found there ("three people" for a manager's team, listed under "reports") and fixed.
 - **Change it when:** the `[guard] [...] was not returned` lines show a count that was right: add the key the tool lists it under.
+
+### 20. The assistants take 20 messages per person in 10 minutes (PR #57, 2026-11-19)
+- **Chose:** one limit per signed-in person, shared by the employee and new-hire assistants. The 21st message in 10 minutes gets a 429 that says how many minutes to wait. Blank and refused messages are not counted, so asking again does not push the wait back ([server.py](../server.py), `Throttle` in [careers.py](../careers.py)).
+- **Not chosen:** a limit per address (a whole office shares one), a daily cost cap per person, or a queue.
+- **Why:** one message can make up to 8 model calls, and nothing stopped one session from sending hundreds. The candidate assistant already had a limit; staff did not.
+- **Cost:** kept in memory: a restart resets it, and two API processes would each allow 20. Someone testing quickly can hit it. Confirming a card is not counted.
+- **Change it when:** the API runs on more than one process (keep the counts in the database), or people hit the limit in normal use.
