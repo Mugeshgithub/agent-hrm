@@ -748,9 +748,10 @@ def run_tool(name, tool_input):
             # multi-query finds candidates (top 20), then Haiku reranks them by "does it answer the question?"
             # recall@8 on 50 EN/FR questions: vector 45, multi-query 48, multi+rerank 50
             # search with the employee's own words AND the agent's query (the agent's rewording once hid L3141-3)
-            # a failed rewrite or rerank does not land here: the search falls back to the user's words or the search order
+            # a failed rewrite or rerank does not land here: the search falls back to the user's words or the search order;
+            # a failed embedding neither: the French keyword search alone (keyword_fallback)
             with conn:
-                results = search_for_agent(conn, last_turn.get("question"), tool_input["question"], k=20)
+                results = search_for_agent(conn, last_turn.get("question"), tool_input["question"], k=20, keyword_fallback=True)
                 as_of = search_as_of(conn)           # the day the nightly sync last checked this data against Légifrance (labour_code/sync.py)
         except Exception:
             # the database answered but a step failed, e.g. the embedding service

@@ -533,6 +533,67 @@ def labour_agent_search_still_returns_articles_when_every_haiku_step_fails():
     assert [kind for kind, _ in seen] == ["vector", "vector"] and len(search.claude.calls) == 3    # two rewrites and the rerank, all failed
 
 
+def embedding_fails(search):
+    """Stands in for the OpenAI embedding: it fails every time, and each try is recorded. Returns the keyword searches' words."""
+    search.tries = []
+    def embed(question):
+        search.tries.append(question)
+        raise ConnectionError("Connection error.")
+    search.embed = embed
+    seen = []
+    search.keyword_search = lambda conn, question, k=20: seen.append(question) or candidates()
+    return seen
+
+
+@test
+def labour_embedding_failing_gives_the_agent_the_french_keyword_search_alone_and_says_so_in_the_log():
+    search = labour_search("congés payés durée", "droit congé payé annuel", "2,1,3")
+    seen = embedding_fails(search)
+    with contextlib.redirect_stdout(io.StringIO()) as log:
+        results = search.search_for_agent(None, "How many days of paid leave?", "paid leave entitlement per year", keyword_fallback=True)
+    assert nums(results) == ["L3141-3", "L3141-1", "L3141-12"]           # still reranked
+    assert seen == ["congés payés durée", "droit congé payé annuel"]      # French words: each question's rewrite
+    assert len(search.tries) == 1                                        # one failed embedding ends the vector search
+    assert "embedding failed (ConnectionError): French keyword search only" in log.getvalue()
+    assert "Connection error" not in log.getvalue()                      # only the kind: an OpenAI error's text can show part of the key
+    # the rewrite fails too: the keyword search gets the user's own words
+    search = labour_search(RuntimeError("Overloaded"), RuntimeError("Overloaded"), "1")
+    seen = embedding_fails(search)
+    with contextlib.redirect_stdout(io.StringIO()):
+        search.search_for_agent(None, "Combien de jours de congés payés ?", None, keyword_fallback=True)
+    assert seen == ["Combien de jours de congés payés ?"]
+
+
+@test
+def labour_embedding_failing_fails_the_nightly_checks_and_recall_measurements_instead_of_lowering_their_recall():
+    search = labour_search("congés payés durée")
+    seen = embedding_fails(search)
+    try:
+        with contextlib.redirect_stdout(io.StringIO()):
+            search.search_for_agent(None, "How many days of paid leave?", None)
+    except search.EmbeddingFailed as e:
+        assert str(e) == "ConnectionError: Connection error."           # the sync's run log keeps the whole error
+    else:
+        raise AssertionError("a failed embedding must fail the search without keyword_fallback")
+    assert seen == []
+
+
+@test
+def labour_embedding_has_a_10_second_timeout_and_one_retry():
+    class FakeOpenAI:
+        def __init__(self):
+            self.options, self.embeddings = [], self
+        def with_options(self, **options):
+            self.options.append(options)
+            return self
+        def create(self, **request):
+            return types.SimpleNamespace(data=[types.SimpleNamespace(embedding=[0.1, 0.2])])
+    search = labour_search()
+    search.client = FakeOpenAI()
+    assert search.embed("congés payés") == "[0.1, 0.2]"
+    assert search.client.options == [{"timeout": 10, "max_retries": 1}]
+
+
 @test
 def labour_rerank_reads_only_a_plain_list_of_positions():
     def reranked(answer):

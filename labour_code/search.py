@@ -29,14 +29,22 @@ def as_of(conn):
     return row["legifrance_date"] if row else None
 
 
+class EmbeddingFailed(Exception):
+    """The embedding service did not give a vector (down, timed out, key refused). The assistant's search goes on with keywords."""
+
+
 @lru_cache(maxsize=1000)
 def embed(question):
-    return str(client.embeddings.create(model=MODEL, input=[question]).data[0].embedding)
+    # 10 s and one retry, like the Haiku steps: an answer must not wait minutes for a vector (the default is 10 minutes, 2 retries)
+    return str(client.with_options(timeout=10, max_retries=1).embeddings.create(model=MODEL, input=[question]).data[0].embedding)
 
 
 def vector_search(conn, question, k=20):
     # meaning: closest embeddings first (<=> is cosine distance)
-    v = embed(question)
+    try:
+        v = embed(question)
+    except Exception as e:
+        raise EmbeddingFailed(f"{type(e).__name__}: {e}") from e
     return conn.execute(
         f"""SELECT chunk_id, num, text FROM {TABLE}
            ORDER BY embedding <=> %s::vector LIMIT %s""", (v, k)).fetchall()
@@ -170,13 +178,20 @@ def reranked_search(conn, question, k=20):
     return rerank(question, multi_query_search(conn, question, k))
 
 
-def search_for_agent(conn, user_question, agent_query, k=20):
+def search_for_agent(conn, user_question, agent_query, k=20, keyword_fallback=False):
     # the agent rewrites the user's question before calling the tool, and its wording can lose the meaning:
     # "paid holiday days per year entitlement" -> L3141-3 not in the top 20; the user's own question -> rank 2.
     # So search with BOTH, merge the candidates, and rerank against both (the agent's query keeps the
     # context of follow-ups like "And during which months?").
     queries = [q for q in dict.fromkeys([user_question, agent_query]) if q]
-    if len(queries) == 1:
-        return reranked_search(conn, queries[0], k)
-    candidates = fuse([multi_query_search(conn, q, k) for q in queries], k)
-    return rerank(f"{user_question}\n(search query: {agent_query})", candidates)
+    question = queries[0] if len(queries) == 1 else f"{user_question}\n(search query: {agent_query})"
+    try:
+        candidates = fuse([multi_query_search(conn, q, k) for q in queries], k)
+    except EmbeddingFailed as e:
+        # the assistant (keyword_fallback=True) still gets articles: the French keyword search on each rewrite, reranked.
+        # The nightly checks and the recall measurements keep the default, so a failed embedding fails them instead of lowering recall.
+        if not keyword_fallback:
+            raise
+        print(f"  [labour search] embedding failed ({type(e.__cause__).__name__}): French keyword search only")
+        candidates = fuse([keyword_search(conn, rewrite_query(q) or q, k) for q in queries], k)
+    return rerank(question, candidates)
