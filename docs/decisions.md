@@ -163,3 +163,10 @@ Entries marked *backfilled* were written afterwards from the code, the git histo
 - **Why:** every earlier question needed one article. Production path, top 5, 3 runs: 6/10 questions with both articles (16/20 articles), the same each run. Missed: the 35-hour week next to overtime pay (EN, FR), unused holiday when resigning (the agent's query named only the notice), L1225-4 (L1225-4-4 came instead).
 - **Cost:** 10 more agent queries saved. A real turn can search twice, which this does not count, so it may understate what users get.
 - **Change it when:** a fix is tried (one search per rule, or a larger top k): measure it here first. Make it a gate once it holds 10/10.
+
+### 24. Labour search: a question about two or three rules also gets one search per rule (PR #58, 2026-11-19)
+- **Chose:** a Haiku call of its own (`split_queries`, temperature 0) answers ONE for a one-rule question, or one French query per rule, at most 3. Each part gets a vector and a keyword search, merged with the usual searches before the rerank ([labour_code/search.py](../labour_code/search.py)). The rewrite prompt is unchanged.
+- **Not chosen:** asking the rewrite for one query per rule (tried first: it changed the rewrites of one-rule questions too, 81, 82 and 81 of 84 found); a larger top k (the agent reads 5).
+- **Why:** two-rule questions at top 5, 3 runs: 8/10 each run, 18/20 articles (6/10 and 16/20 before). One-rule questions: 83, 83 and 84 of 84. The one lost is "Le repos hebdomadaire doit-il être le dimanche ?": the unchanged rewrite sometimes drops "dimanche" (main: 8 of 10 tries find it).
+- **Cost:** one more Haiku call per search, a median 0.6 s and about $0.0003. It also splits 8 of the 84 one-rule questions (no recall lost there), once into a sentence instead of a query.
+- **Change it when:** the Sunday rewrite is made stable (then the 84 should hold 3 times), or two-rule recall stays below 10/10: try a rerank that asks for every rule's article.
