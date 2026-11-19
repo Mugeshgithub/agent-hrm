@@ -17,6 +17,7 @@ import leave_admin
 import checkins
 import collective_agreement
 import contracts
+import accounts
 import documents
 import employee_files
 import guard_events
@@ -43,6 +44,7 @@ def init_all(reset=False):
     onboarding.init_onboarding()
     outbox.init_outbox()
     welcome.init_welcome()
+    accounts.init_accounts()
     documents.init_documents()
     contracts.init_contracts()
     checkins.init_checkins()
@@ -72,6 +74,9 @@ def init_all(reset=False):
             conn.execute("DELETE FROM employee_file_views")
             conn.execute("DELETE FROM employee_files")
             conn.execute("DELETE FROM policy_gaps")
+            conn.execute("DELETE FROM login_events")
+            conn.execute("DELETE FROM password_links")
+            conn.execute("DELETE FROM logins")
             conn.execute("DELETE FROM guard_events")
             conn.execute("DELETE FROM policy_versions")
             conn.execute("DELETE FROM agreement_sections")

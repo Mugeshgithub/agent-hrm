@@ -177,3 +177,10 @@ Entries marked *backfilled* were written afterwards from the code, the git histo
 - **Why:** the only trace was a `print`, and the safe reply in `chat_messages` looks like any other answer: nobody could say how often a guard fires or whether its retry works.
 - **Cost:** one insert per answer a guard acted on. Days are UTC. The guards that answer before the model (recruitment ranking, weekend leave) and the role refusals in `run_tool` are not recorded yet. The rows have no retention limit.
 - **Change it when:** a guard's `retried_unfixed` count is not small (give it a fallback), or the table grows: add it to the retention job.
+
+### 27. People sign in with their work email and a password they set from HR's link (PR #61, 2026-11-20)
+- **Chose:** email and password ([accounts.py](../accounts.py)). HR sends a one-use link (7 days) to set a first or a forgotten password; it waits in the Outbox and is taken out once marked sent. Passwords are kept as scrypt hashes, links as SHA-256 hashes. 5 wrong passwords lock the account for 15 minutes, 30 tries per 10 minutes per address. A new password signs the person out everywhere. The demo picker works only with `HRM_DEMO_LOGIN=1`.
+- **Not chosen:** Google or Microsoft sign-in (needs an app registered with them and company accounts for everyone); a magic link by email (the app sends no email yet); a library like argon2 (CI's unit tests install nothing; scrypt is in Python).
+- **Why:** anyone could sign in as anyone, which rules out any real use. Picked by the user on Nov 20.
+- **Cost:** HR can read the link in the Outbox before sending it, so HR could set someone's password (the person's own link then fails, and login_events show it). No two-step check. The address limit is in memory, per process.
+- **Change it when:** the app sends its own email (send the link straight to the person), or a company asks for single sign-on.

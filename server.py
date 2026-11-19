@@ -16,6 +16,7 @@ from pydantic import BaseModel
 from starlette.concurrency import run_in_threadpool
 from starlette.middleware.sessions import SessionMiddleware
 
+import accounts
 import application_summary
 import candidate_assistant
 import interviews
@@ -63,7 +64,11 @@ def me(request: Request):
     emp_id = request.session.get("emp_id")
     emp = get_employee(emp_id) if emp_id else None
     if emp is None or not employees.is_active(emp_id):      # people who have left lose access
-        raise HTTPException(401, "Choose who you are to continue.")
+        raise HTTPException(401, "Sign in to continue.")
+    # a demo session (no password) works only while the demo picker is on; a password session only until the password changes
+    if not (accounts.demo_login() if request.session.get("demo") else request.session.get("sv") == accounts.session_version(emp_id)):
+        request.session.clear()
+        raise HTTPException(401, "Sign in to continue.")
     return emp
 
 
@@ -82,23 +87,71 @@ def fail_on_error(result):
 
 
 class SessionIn(BaseModel):
-    employee_id: str
+    email: str = ""
+    password: str = ""
+    employee_id: str = ""       # the demo picker only (HRM_DEMO_LOGIN=1)
+
+
+class PasswordIn(BaseModel):
+    password: str
+
+
+SIGN_IN_BY_ADDRESS = careers.Throttle(30, 600)    # 30 tries per 10 minutes from one address; each account also locks after 5 wrong passwords
+
+
+def address_of(request: Request):
+    return (request.headers.get("x-forwarded-for") or (request.client.host if request.client else "?")).split(",")[0].strip()
+
+
+@app.get("/api/login-options")
+def login_options():
+    return {"demo": accounts.demo_login()}
 
 
 @app.get("/api/demo-users")
 def demo_users():
+    if not accounts.demo_login():
+        raise HTTPException(404, "Not found")
     return [{k: p[k] for k in ("id", "name", "role", "title", "department")} for p in hr_queries.people() if p["active"]]
 
 
 @app.post("/api/session")
 def login(body: SessionIn, request: Request):
-    if get_employee(body.employee_id) is None:
-        raise HTTPException(404, "Unknown person")
-    if not employees.is_active(body.employee_id):
-        raise HTTPException(403, "This person no longer works here.")
+    if body.employee_id:            # the demo picker: anyone, no password, only when it is switched on
+        if not accounts.demo_login():
+            raise HTTPException(404, "Sign in with your email and password.")
+        if get_employee(body.employee_id) is None:
+            raise HTTPException(404, "Unknown person")
+        if not employees.is_active(body.employee_id):
+            raise HTTPException(403, "This person no longer works here.")
+        request.session.clear()
+        request.session.update(emp_id=body.employee_id, demo=True)
+        return hr_queries.person(body.employee_id)
+    address = address_of(request)
+    if not SIGN_IN_BY_ADDRESS.allow(address):
+        raise HTTPException(429, f"Too many tries. Wait {max(1, round(SIGN_IN_BY_ADDRESS.wait(address) / 60))} minutes and try again.")
+    result = accounts.sign_in(body.email, body.password)
+    if "error" in result:
+        raise HTTPException(result["status"], result["error"])
     request.session.clear()
-    request.session["emp_id"] = body.employee_id
-    return hr_queries.person(body.employee_id)
+    request.session.update(emp_id=result["emp_id"], sv=result["session_version"])
+    return hr_queries.person(result["emp_id"])
+
+
+@app.get("/api/set-password/{token}")
+def password_link_state(token: str):
+    return accounts.link_state(token)
+
+
+@app.post("/api/set-password/{token}")
+def set_password(token: str, body: PasswordIn, request: Request):
+    address = address_of(request)
+    if not SIGN_IN_BY_ADDRESS.allow(address):
+        raise HTTPException(429, f"Too many tries. Wait {max(1, round(SIGN_IN_BY_ADDRESS.wait(address) / 60))} minutes and try again.")
+    result = fail_on_error(accounts.set_password(token, body.password))
+    request.session.clear()                  # signed in as the person the link was made for, never someone the browser names
+    request.session.update(emp_id=result["emp_id"], sv=result["session_version"])
+    return hr_queries.person(result["emp_id"])
 
 
 def new_hire_me(request: Request):
@@ -528,6 +581,18 @@ class AskIn(BaseModel):
 class WelcomeLoginIn(BaseModel):
     token: str
     code: str
+
+
+@app.post("/api/hr/people/{emp_id}/sign-in-link")
+def issue_sign_in_link(emp_id: str, request: Request):
+    hr = need(request, "hr")
+    return fail_on_error(accounts.issue_link(hr["id"], emp_id, APP_URL))
+
+
+@app.get("/api/hr/people/{emp_id}/sign-in")
+def sign_in_status(emp_id: str, request: Request):
+    hr = need(request, "hr")
+    return fail_on_error(accounts.status(hr["id"], emp_id))
 
 
 @app.post("/api/hr/people/{emp_id}/welcome-link")
