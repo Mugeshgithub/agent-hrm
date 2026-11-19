@@ -164,6 +164,13 @@ Entries marked *backfilled* were written afterwards from the code, the git histo
 - **Cost:** 10 more agent queries saved. A real turn can search twice, which this does not count, so it may understate what users get.
 - **Change it when:** a fix is tried (one search per rule, or a larger top k): measure it here first. Make it a gate once it holds 10/10.
 
+### 24. Labour search: a question about two or three rules also gets one search per rule (PR #58, 2026-11-19)
+- **Chose:** a Haiku call of its own (`split_queries`, temperature 0) answers ONE for a one-rule question, or one French query per rule, at most 3. Each part gets a vector and a keyword search, merged with the usual searches before the rerank ([labour_code/search.py](../labour_code/search.py)). The rewrite prompt is unchanged.
+- **Not chosen:** asking the rewrite for one query per rule (tried first: it changed the rewrites of one-rule questions too, 81, 82 and 81 of 84 found); a larger top k (the agent reads 5).
+- **Why:** two-rule questions at top 5, 3 runs: 8/10 each run, 18/20 articles (6/10 and 16/20 before). One-rule questions: 83, 83 and 84 of 84. The one lost is "Le repos hebdomadaire doit-il être le dimanche ?": the unchanged rewrite sometimes drops "dimanche" (main: 8 of 10 tries find it).
+- **Cost:** one more Haiku call per search, a median 0.6 s and about $0.0003. It also splits 8 of the 84 one-rule questions (no recall lost there), once into a sentence instead of a query.
+- **Change it when:** the Sunday rewrite is made stable (then the 84 should hold 3 times), or two-rule recall stays below 10/10: try a rerank that asks for every rule's article.
+
 ### 25. Every guard event is recorded, without the rejected reply (PR #59, 2026-11-19)
 - **Chose:** one row in `guard_events` each time a guardrail acts on a reply ([guard_events.py](../guard_events.py)): when, who, role, which guard, the outcome, the Langfuse trace id, and a short detail (the article numbers for citations, else a count). Outcomes: `retried_ok`, `retried_unfixed` (the guards that ask once and have no fallback: the final reply is checked again by the same code), `safe_reply`, `replaced`. The trace gets `guard`, `guard:<name>` and `guard:<outcome>` tags. `guard_report.py` shows them per day, with the retry and safe-reply rates over all answers.
 - **Not chosen:** keeping the rejected draft (it can hold personal data, and Langfuse already has it when tracing is on); logging failures only (then a retry that worked, the common case, is invisible); a row per retry instead of per guard and answer.
