@@ -1167,6 +1167,50 @@ def the_assistant_is_rate_limited_per_link_and_per_address():
     with_a_stand_in_agent(run)
 
 
+def with_a_stand_in_employee_agent(run):
+    """The employee and new-hire assistants' model replaced by an echo (the web job installs no Anthropic package): the endpoints' limit, not the answers."""
+    stand_in = type(sys)("agent")
+    stand_in.pending_action, stand_in.last_turn, stand_in.AWAITING_CONFIRMATION = {}, {"tools_called": []}, "(waiting)"
+    stand_in.start_session = lambda emp_id, role=None: None
+    stand_in.handle_message = lambda text: f"(an answer to {text})"
+    saved, saved_key = sys.modules.get("agent"), server.agent_user["key"]
+    sys.modules["agent"] = stand_in
+    try:
+        run()
+    finally:
+        server.agent_user["key"] = saved_key
+        if saved is None:
+            del sys.modules["agent"]
+        else:
+            sys.modules["agent"] = saved
+
+
+@test
+def each_person_may_send_the_assistant_20_messages_in_10_minutes_and_is_told_kindly_when_to_come_back():
+    def run():
+        server.ASK_BY_PERSON.seen.clear()
+        emma, lucas = as_person("E001"), as_person("M001")
+        codes = [emma.post("/api/assistant", json={"message": f"question {i}"}).status_code for i in range(21)]
+        assert codes[:20] == [200] * 20 and codes[20] == 429
+        assert emma.post("/api/assistant", json={"message": "one more"}).json()["detail"] == (
+            "You've sent the assistant 20 messages in the last 10 minutes, which is the limit for now. "
+            "Please try again in 10 minutes. Everything else in the app still works as usual.")
+        assert emma.post("/api/assistant", json={"message": "   "}).status_code == 400            # a blank message is refused first and never counted
+        assert lucas.post("/api/assistant", json={"message": "hi"}).status_code == 200            # each person has their own 20
+        server.ASK_BY_PERSON.seen["E001"] = [t - 570 for t in server.ASK_BY_PERSON.seen["E001"]]  # the first message leaves the window in 30 s
+        assert "Please try again in 1 minute." in emma.post("/api/assistant", json={"message": "now?"}).json()["detail"]
+        server.ASK_BY_PERSON.seen["E001"] = [t - 31 for t in server.ASK_BY_PERSON.seen["E001"]]
+        assert emma.post("/api/assistant", json={"message": "now?"}).status_code == 200           # the window slides; refused tries never counted
+        # a new hire's welcome assistant has the same limit
+        hr = as_person("H001")
+        token, code = open_welcome(hr, make_hire(hr, "tam.limit@cognivexai.eu", "Tam Lee"))
+        hire = TestClient(server.app)
+        assert hire.post("/api/welcome/login", json={"token": token, "code": code}).status_code == 200
+        codes = [hire.post("/api/welcome-assistant", json={"message": "hi"}).status_code for _ in range(21)]
+        assert codes[:20] == [200] * 20 and codes[20] == 429
+    with_a_stand_in_employee_agent(run)
+
+
 # ---------- the summary of an application ----------
 
 @test

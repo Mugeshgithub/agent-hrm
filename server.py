@@ -617,6 +617,7 @@ def welcome_ask(body: AskIn, request: Request):
     text = body.message.strip()
     if not text:
         raise HTTPException(400, "Type a question first.")
+    assistant_allowed(emp["id"])
     with agent_lock:
         agent = _agent_for(emp["id"], "new_hire")
         agent.pending_action.clear()
@@ -1365,6 +1366,16 @@ def run_month_accrual(request: Request):
 
 agent_lock = threading.Lock()
 agent_user = {"key": None}      # (person, role override): a welcome-link session never shares a conversation
+ASK_BY_PERSON = careers.Throttle(20, 600)     # a message can make up to 8 model calls: 20 messages per 10 minutes for one person, both assistants together
+
+
+def assistant_allowed(emp_id):
+    """A person over the limit is told kindly when to come back; a refused message is not counted, so asking again does not push it back."""
+    if not ASK_BY_PERSON.allow(emp_id):
+        minutes = max(1, -(-int(ASK_BY_PERSON.wait(emp_id)) // 60))       # rounded up: never "0 minutes"
+        raise HTTPException(429, f"You've sent the assistant {ASK_BY_PERSON.limit} messages in the last {ASK_BY_PERSON.seconds // 60} minutes, "
+                                 f"which is the limit for now. Please try again in {minutes} minute{'s' if minutes > 1 else ''}. "
+                                 "Everything else in the app still works as usual.")
 
 
 class ConfirmIn(BaseModel):
@@ -1400,6 +1411,7 @@ def ask(body: AskIn, request: Request):
     text = body.message.strip()
     if not text:
         raise HTTPException(400, "Type a question first.")
+    assistant_allowed(emp["id"])
     with agent_lock:
         agent = _agent_for(emp["id"])
         agent.pending_action.clear()
