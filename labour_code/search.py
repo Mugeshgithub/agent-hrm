@@ -178,20 +178,26 @@ def reranked_search(conn, question, k=20):
     return rerank(question, multi_query_search(conn, question, k))
 
 
-def search_for_agent(conn, user_question, agent_query, k=20, keyword_fallback=False):
+def agent_questions(user_question, agent_query):
     # the agent rewrites the user's question before calling the tool, and its wording can lose the meaning:
     # "paid holiday days per year entitlement" -> L3141-3 not in the top 20; the user's own question -> rank 2.
     # So search with BOTH, merge the candidates, and rerank against both (the agent's query keeps the
     # context of follow-ups like "And during which months?").
     queries = [q for q in dict.fromkeys([user_question, agent_query]) if q]
-    question = queries[0] if len(queries) == 1 else f"{user_question}\n(search query: {agent_query})"
-    try:
-        candidates = fuse([multi_query_search(conn, q, k) for q in queries], k)
-    except EmbeddingFailed as e:
-        # the assistant (keyword_fallback=True) still gets articles: the French keyword search on each rewrite, reranked.
-        # The nightly checks and the recall measurements keep the default, so a failed embedding fails them instead of lowering recall.
-        if not keyword_fallback:
-            raise
-        print(f"  [labour search] embedding failed ({type(e.__cause__).__name__}): French keyword search only")
-        candidates = fuse([keyword_search(conn, rewrite_query(q) or q, k) for q in queries], k)
-    return rerank(question, candidates)
+    return queries, queries[0] if len(queries) == 1 else f"{user_question}\n(search query: {agent_query})"
+
+
+def search_for_agent(conn, user_question, agent_query, k=20):
+    # raises EmbeddingFailed when the embedding service is down: the nightly checks and the recall measurements fail then
+    # instead of lowering their recall; the assistant catches it and uses keyword_search_for_agent (agent.py)
+    queries, question = agent_questions(user_question, agent_query)
+    return rerank(question, fuse([multi_query_search(conn, q, k) for q in queries], k))
+
+
+def keyword_search_for_agent(conn, user_question, agent_query, failure, k=20):
+    # the assistant's search while the embedding service is down: the French keyword search on each rewrite, reranked.
+    # It misses articles the full search finds (63/84 recall questions at top 5, none of the paid-leave ones), so the agent
+    # is told the search is limited and a line under its answer says so (agent.py, law_status.limited_line)
+    print(f"  [labour search] embedding failed ({type(failure.__cause__).__name__}): French keyword search only")
+    queries, question = agent_questions(user_question, agent_query)
+    return rerank(question, fuse([keyword_search(conn, rewrite_query(q) or q, k) for q in queries], k))

@@ -54,6 +54,21 @@ def line_for(reply, sources, user_text):
     return None
 
 
+def limited_line(sources, user_text):
+    """The line code adds under an answer when this turn's labour search was keyword-only (the embedding service was down),
+    or None. The search result carries keyword_only (agent.py)."""
+    for source in sources:
+        try:
+            result = json.loads(source)
+        except (TypeError, ValueError):
+            continue
+        if isinstance(result, dict) and result.get("keyword_only"):
+            if _french(user_text):
+                return "La recherche dans le Code du travail est limitée en ce moment : cette réponse peut être incomplète."
+            return "The labour-law search is limited right now, so this answer may be incomplete."
+    return None
+
+
 def hr_notice(today=None):
     """One line for HR's "Needs you" when the data is more than a week old, else None. Worked out on every page load,
     so it also shows when the nightly job stops running."""

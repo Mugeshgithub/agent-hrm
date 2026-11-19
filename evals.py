@@ -38,7 +38,7 @@ import welcome
 from tracing import observe, propagate_attributes
 from demo_data import sample_contract, SAMPLE_AGREEMENT, SAMPLE_AGREEMENT_NAME
 from eval_retry import run_with_retry, retry_report
-from eval_patterns import CV_NOT_READ, DOCTORS_NOTE, PRIVATE_WORDS, REASON_GIVEN, REASON_NOT_KNOWN
+from eval_patterns import CV_NOT_READ, DOCTORS_NOTE, PRIVATE_WORDS, REASON_GIVEN, REASON_NOT_KNOWN, limited_paid_leave_problems
 from tools import apply_leave, cancel_leave, decide_leave, create_hr_ticket, count_working_days, count_ouvrable_days, days_for, holidays_of, when_label
 
 # tests use their own database, never the real hr.db
@@ -170,6 +170,16 @@ def labour_db_available():
         return True
     except Exception:
         return False
+
+
+def embedding_down():
+    """Every embedding call fails, as when the OpenAI service is down, until the returned function is called."""
+    from labour_code import search
+    real = search.embed
+    def refused(question):
+        raise ConnectionError("Connection error.")
+    search.embed = refused
+    return lambda: setattr(search, "embed", real)
 
 
 def reset_memory():
@@ -1530,6 +1540,18 @@ TEST_CASES = [
         "reply_must_match": r"(?is)(?=.*L\.?\s?3141-3)(?=.*(2[.,]5|deux jours et demi|30))",
     },
     {
+        # 19 Nov: with every embedding failing, the keyword search missed L3141-3 and 1 of 3 answers was built on L7213-1.
+        # The search result now says it is keyword-only: the right figure, or "can't confirm" and HR, never a confident wrong one
+        "name": "law: paid leave with the search limited (embedding down) gets no confident wrong answer",
+        "user": "E001",
+        "auto_confirm": False,
+        "needs_labour_db": True,
+        "embedding_fails": True,
+        "input": "What does French law say about how many days of paid leave I earn?",
+        "must_call": ["search_labour_code"],
+        "reply_check": limited_paid_leave_problems,
+    },
+    {
         # the labour code gives a different trial period to each category: with HR's record she hears the one that applies to her
         "name": "law: a recorded category decides which trial period applies",
         "user": "E003",
@@ -2451,7 +2473,12 @@ def attempt(case):
             got = agent.summary_answer(case["user"], token)
         reply, tools_called = json.dumps(got, ensure_ascii=False), []
     else:
-        reply, tools_called, trace_id = run_agent(case["input"], test_name=case["name"], session_role=case.get("role"))
+        restore = embedding_down() if case.get("embedding_fails") else None     # the labour search falls back to French keywords
+        try:
+            reply, tools_called, trace_id = run_agent(case["input"], test_name=case["name"], session_role=case.get("role"))
+        finally:
+            if restore:
+                restore()
 
     # a card left waiting, as in the web app: how many actions it lists, and then the person presses Confirm
     card_items = len(agent.pending_action.get("items", []))
