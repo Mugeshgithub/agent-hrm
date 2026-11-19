@@ -739,7 +739,7 @@ def run_tool(name, tool_input):
             return {"error": "The labour-law database isn't available right now."}
         try:
             # imported here, not at the top, so CI (which has no labour-code database) still runs
-            from labour_code.search import as_of as search_as_of, connect, search_for_agent
+            from labour_code.search import EmbeddingFailed, as_of as search_as_of, connect, keyword_search_for_agent, search_for_agent
             conn = connect()
         except Exception:
             # e.g. Docker is not running: the user gets a clear message, the agent keeps working
@@ -748,9 +748,13 @@ def run_tool(name, tool_input):
             # multi-query finds candidates (top 20), then Haiku reranks them by "does it answer the question?"
             # recall@8 on 50 EN/FR questions: vector 45, multi-query 48, multi+rerank 50
             # search with the employee's own words AND the agent's query (the agent's rewording once hid L3141-3)
-            # a failed rewrite or rerank does not land here: the search falls back to the user's words or the search order
+            # a failed rewrite or rerank does not land here: the search falls back to the user's words or the search order;
+            # a failed embedding neither: the French keyword search alone, and the agent is told the search is limited
             with conn:
-                results = search_for_agent(conn, last_turn.get("question"), tool_input["question"], k=20)
+                try:
+                    results, keyword_only = search_for_agent(conn, last_turn.get("question"), tool_input["question"], k=20), False
+                except EmbeddingFailed as e:
+                    results, keyword_only = keyword_search_for_agent(conn, last_turn.get("question"), tool_input["question"], e, k=20), True
                 as_of = search_as_of(conn)           # the day the nightly sync last checked this data against Légifrance (labour_code/sync.py)
         except Exception:
             # the database answered but a step failed, e.g. the embedding service
@@ -765,6 +769,13 @@ def run_tool(name, tool_input):
         if as_of:                              # none before the first sync: the old copy has no date to give
             result["as_of"] = as_of.isoformat()
             result["note"] = f"Official French text of the Code du travail (Légifrance), as of {as_of.isoformat()}. Cite the article number."
+        if keyword_only:                       # keyword search alone missed paid leave in every wording measured: no confident answer from a near miss
+            result["keyword_only"] = True
+            result["note"] += (" The search is limited right now: these articles were found by French keywords only, so they may not be "
+                               "the ones that answer. Use an article only if its text clearly answers the question. If none does, say "
+                               "you can't confirm the answer right now and suggest asking HR; never answer from an article that only "
+                               "shares words with the question. The app adds a line under your answer saying the search is limited: "
+                               "don't write one yourself.")
         return result
 
     # ---------- HR tickets ----------
@@ -1029,6 +1040,9 @@ def answer_turn(user_text):
                 if document_retry_used or agreement_retry_used or search_retry_used or contract_retry_used or booking_retry_used or decision_retry_used or existing_retry_used or card_retry_used or number_retry_used or grounding_retry_used:       # a retry note was sent: the reply must not talk about it
                     reply = document_answers.strip_correction(reply)
 
+                # the labour search was keyword-only in this turn: a line says the answer may be incomplete, added by code like the date below
+                if (limited_line := law_status.limited_line(turn_sources, user_text)):
+                    reply = f"{reply}\n\n{limited_line}"
                 # a law answer says how recent the law it quotes is: added by code after every guard, the model can forget a line (law_status.py)
                 if (as_of_line := law_status.line_for(reply, turn_sources, user_text)):
                     reply = f"{reply}\n\n{as_of_line}"

@@ -533,6 +533,75 @@ def labour_agent_search_still_returns_articles_when_every_haiku_step_fails():
     assert [kind for kind, _ in seen] == ["vector", "vector"] and len(search.claude.calls) == 3    # two rewrites and the rerank, all failed
 
 
+def embedding_fails(search):
+    """Stands in for the OpenAI embedding: it fails every time, and each try is recorded. Returns the keyword searches' words."""
+    search.tries = []
+    def embed(question):
+        search.tries.append(question)
+        raise ConnectionError("Connection error.")
+    search.embed = embed
+    seen = []
+    search.keyword_search = lambda conn, question, k=20: seen.append(question) or candidates()
+    return seen
+
+
+def agent_search_with_embedding_down(search, user_question, agent_query):
+    # what agent.py does: the full search first, then on EmbeddingFailed the keyword search alone
+    try:
+        return search.search_for_agent(None, user_question, agent_query)
+    except search.EmbeddingFailed as e:
+        return search.keyword_search_for_agent(None, user_question, agent_query, e)
+
+
+@test
+def labour_embedding_failing_gives_the_agent_the_french_keyword_search_alone_and_says_so_in_the_log():
+    search = labour_search("congés payés durée", "droit congé payé annuel", "2,1,3")
+    seen = embedding_fails(search)
+    with contextlib.redirect_stdout(io.StringIO()) as log:
+        results = agent_search_with_embedding_down(search, "How many days of paid leave?", "paid leave entitlement per year")
+    assert nums(results) == ["L3141-3", "L3141-1", "L3141-12"]           # still reranked
+    assert seen == ["congés payés durée", "droit congé payé annuel"]      # French words: each question's rewrite
+    assert len(search.tries) == 1                                        # one failed embedding ends the vector search
+    assert "embedding failed (ConnectionError): French keyword search only" in log.getvalue()
+    assert "Connection error" not in log.getvalue()                      # only the kind: an OpenAI error's text can show part of the key
+    # the rewrite fails too: the keyword search gets the user's own words
+    search = labour_search(RuntimeError("Overloaded"), RuntimeError("Overloaded"), "1")
+    seen = embedding_fails(search)
+    with contextlib.redirect_stdout(io.StringIO()):
+        agent_search_with_embedding_down(search, "Combien de jours de congés payés ?", None)
+    assert seen == ["Combien de jours de congés payés ?"]
+
+
+@test
+def labour_embedding_failing_fails_the_nightly_checks_and_recall_measurements_instead_of_lowering_their_recall():
+    search = labour_search("congés payés durée")
+    seen = embedding_fails(search)
+    try:
+        with contextlib.redirect_stdout(io.StringIO()):
+            search.search_for_agent(None, "How many days of paid leave?", None)
+    except search.EmbeddingFailed as e:
+        assert str(e) == "ConnectionError: Connection error."           # the sync's run log keeps the whole error
+    else:
+        raise AssertionError("a failed embedding must fail search_for_agent: only the assistant falls back to keywords")
+    assert seen == []
+
+
+@test
+def labour_embedding_has_a_10_second_timeout_and_one_retry():
+    class FakeOpenAI:
+        def __init__(self):
+            self.options, self.embeddings = [], self
+        def with_options(self, **options):
+            self.options.append(options)
+            return self
+        def create(self, **request):
+            return types.SimpleNamespace(data=[types.SimpleNamespace(embedding=[0.1, 0.2])])
+    search = labour_search()
+    search.client = FakeOpenAI()
+    assert search.embed("congés payés") == "[0.1, 0.2]"
+    assert search.client.options == [{"timeout": 10, "max_retries": 1}]
+
+
 @test
 def labour_rerank_reads_only_a_plain_list_of_positions():
     def reranked(answer):
@@ -907,6 +976,18 @@ def a_law_answer_ends_with_the_date_of_the_data_that_answered_in_the_language_as
 
 
 @test
+def a_keyword_only_law_search_puts_a_line_under_the_answer_saying_it_may_be_incomplete():
+    limited = json.dumps({"articles": [{"article": "L7213-1", "text_fr": "..."}], "keyword_only": True, "note": "..."})
+    full = json.dumps({"articles": [{"article": "L3141-3", "text_fr": "..."}], "note": "..."})
+    assert law_status.limited_line(["not json", limited], "How many paid days do I earn?") == \
+        "The labour-law search is limited right now, so this answer may be incomplete."
+    assert law_status.limited_line([limited], "Combien de jours de congés payés par mois ?") == \
+        "La recherche dans le Code du travail est limitée en ce moment : cette réponse peut être incomplète."
+    assert law_status.limited_line([full], "paid days?") is None                                                 # the full search: no line
+    assert law_status.limited_line([], "paid days?") is None
+
+
+@test
 def hr_hears_about_the_labour_law_data_only_when_it_is_over_a_week_old():
     saved = law_status.READ
     try:
@@ -1041,6 +1122,24 @@ def a_candidate_told_the_ai_does_not_read_the_cv_passes_with_markdown_but_a_repl
                   "Your CV is read by the AI, and it is kept for 30 days.",
                   "The assistant does not read your CV."):                                               # how long the data is kept is missing
         assert not eval_passes(wrong, eval_patterns.CV_NOT_READ), wrong
+
+
+@test
+def paid_leave_with_the_search_limited_passes_the_right_figure_in_words_or_cant_confirm_but_another_figure_still_fails():
+    line = "\n\nThe labour-law search is limited right now, so this answer may be incomplete."
+    for right in ("According to Article L3141-3: \"The employee is entitled to leave of two and a half working days per month of actual work "
+                  "with the same employer. The total duration of leave due cannot exceed thirty working days.\"",       # Nov 19: right, failed on digits only
+                  "According to Article L3141-3 of the French Code du travail, you are entitled to 2.5 working days (jours ouvrables) of paid "
+                  "leave per month worked, with a maximum of 30 working days per year.",
+                  "I can't confirm the legal entitlement right now: the articles I found don't cover it. Please ask HR."):
+        assert eval_patterns.limited_paid_leave_problems(right + line) == [], right
+    for wrong in ("Under Article L7213-1 you are entitled to 24 working days of paid leave a year.",                    # a near miss, answered
+                  "According to Article L3141-3 you earn 2.5 days per month, so 25 days a year.",
+                  "Article L3141-12 says paid leave can be taken from 1 May.",                                         # neither the figure nor "can't confirm"
+                  "I can't confirm the legal entitlement right now."):                                                 # no HR
+        assert eval_patterns.limited_paid_leave_problems(wrong + line), wrong
+    assert eval_patterns.limited_paid_leave_problems("According to Article L3141-3, 2.5 working days per month.") == \
+        ["no line saying the search is limited"]
 
 
 # ---------- documents: what code checks before and after Claude reads (documents.py) ----------
