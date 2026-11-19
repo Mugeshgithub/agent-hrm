@@ -73,7 +73,7 @@ flowchart LR
 - **Every fix is measured:** the eval it targets runs at least 10 times before and after, then the full suite. For example,
   "which requests are pending?" went from 17/20 to 20/20 with the count check.
 - **Unit tests** cover everything that has no AI in it (roles, leave rules, onboarding, retention, the guardrails):
-  135 in `unit_tests.py` plus four more test files. They run on every push and pull request, with a type check and
+  136 in `unit_tests.py` plus four more test files. They run on every push and pull request, with a type check and
   a build of the web app.
 
 ## Tech stack
