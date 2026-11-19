@@ -1385,6 +1385,14 @@ def an_answer_after_the_agreement_did_not_answer_says_so_once_and_one_that_stopp
     assert nudge(["read_my_document"] + both, "Your contract says two months.") is None                                      # the contract answered alone
     assert nudge(["search_collective_agreement"], "The collective agreement does not mention a company car.") == c.SEARCH_ON   # silent, and stopped
     assert nudge(["search_collective_agreement"], "From the collective agreement (X, article 5): 90 percent for 60 days.") is None
+    # it answered from an article and says the agreement is silent on one part: not sent back (main, 17 Nov: the second answer lost Article 5)
+    answered = ("From the collective agreement (Convention collective de démonstration (bureaux d'études), Article 5 – Maladie): \"After one year of "
+                "seniority, in case of work stoppage for illness justified by a medical certificate, the employer maintains 90% of gross salary for 60 days, "
+                "then 66% for the following 30 days.\"\n\nSo if you've been with the company for at least a year, you receive 90% of your salary for the "
+                "first two months of sick leave, then 66% for the next month. After that, the agreement doesn't specify what happens, so you'd need to "
+                "check with HR about longer absences.")
+    assert c.says_agreement_silent(answered) and nudge(["search_collective_agreement"], answered) is None
+    assert nudge(["search_collective_agreement"], "The collective agreement doesn't specify it. Under Article L1226-1, ...") == c.SEARCH_ON   # a law article is not the agreement's
     assert nudge(["search_policy"], "From the company policy: 5 days.") is None and nudge([], "x") is None                    # no agreement searched: not our business
     for yes in ("The collective agreement doesn't specify it.", "The convention collective does not mention remote work.", "That is not mentioned in the collective agreement.",
                 "The agreement says nothing about it.", "Nothing in the collective agreement covers this."):

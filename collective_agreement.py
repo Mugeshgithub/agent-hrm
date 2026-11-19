@@ -330,6 +330,10 @@ SEARCH_ON = HIDDEN + ("Your reply says that the collective agreement does not sp
 
 
 FROM_POLICY_OR_LAW = re.compile(r"\b(?:company|HR)\s+policy|handbook|Code du travail|labou?r (?:code|law)", re.I)
+# a reply that names an article of the agreement answered from it, so "the agreement doesn't specify" is about one part of the question. Main, 17 Nov:
+# "Article 5 ... 90% for 60 days, then 66% ... After that, the agreement doesn't specify what happens" was sent back, and the second answer kept only
+# the silence, without the article. A law article ("L1226-1") is not one of the agreement's.
+CITES_ARTICLE = re.compile(r"\b(?:article|art\.?)\s*\d+\b", re.I)
 
 
 def says_agreement_silent(reply):
@@ -341,10 +345,9 @@ def nudge(called, reply):
     if TOOL not in called:
         return None
     later = any(t in called for t in ("search_policy", "search_labour_code"))
-    silent = says_agreement_silent(reply)
-    if silent and not later:
-        return SEARCH_ON
     reply = str(reply or "")
+    if says_agreement_silent(reply) and not later and not CITES_ARTICLE.search(reply):
+        return SEARCH_ON
     if later and not MENTIONS.search(reply) and (FROM_POLICY_OR_LAW.search(reply) or "read_my_document" not in called):
         return SAY_AGREEMENT_SILENT                    # the policy or the law answered, and not a word about the agreement it searched first
     return None
