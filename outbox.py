@@ -1,5 +1,5 @@
 # outbox.py: the messages the app would send by email. Nothing is sent yet: each one waits here, HR reads and
-# copies it, and marks it as sent. A message that carries a welcome link is scrubbed of the link once it is
+# copies it, and marks it as sent. A message that carries a welcome link or a sign-in link is scrubbed of the link once it is
 # marked as sent, so the database stops holding a working link. Only HR can see or change the outbox.
 import re
 
@@ -36,7 +36,7 @@ def scrub_links(conn, emp_id):
     # a cancelled hire: no email of theirs keeps a working link
     for row in conn.execute("SELECT id, body FROM outbox WHERE emp_id = ?", (emp_id,)).fetchall():
         conn.execute("UPDATE outbox SET body = ? WHERE id = ?",
-                     (re.sub(r"(/welcome/)[A-Za-z0-9_-]+", r"\1[link removed after sending]", row["body"]), row["id"]))
+                     (re.sub(r"(/(?:welcome|set-password)/)[A-Za-z0-9_-]+", r"\1[link removed after sending]", row["body"]), row["id"]))
 
 
 def messages(hr_id, unsent_only=False, limit=100):
@@ -64,7 +64,7 @@ def mark_sent(hr_id, message_id):
             return {"error": "No such message."}
         if row["sent_at"]:
             return {"error": "This message is already marked as sent."}
-        scrubbed = re.sub(r"(/welcome/)[A-Za-z0-9_-]+", r"\1[link removed after sending]", row["body"])
+        scrubbed = re.sub(r"(/(?:welcome|set-password)/)[A-Za-z0-9_-]+", r"\1[link removed after sending]", row["body"])
         with conn:
             conn.execute("UPDATE outbox SET sent_at = CURRENT_TIMESTAMP, sent_by = ?, body = ? WHERE id = ?",
                          (hr_id, scrubbed, message_id))

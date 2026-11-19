@@ -137,6 +137,8 @@ export default function ProfilePage({ params }: { params: { id: string } }) {
         </div>
 
         <div className="space-y-6">
+          {isHR && !leftAlready && <SignIn person={p} />}
+
           <section aria-labelledby="reports" className="panel">
             <h2 id="reports" className="px-5 pt-5 font-medium">
               {p.reports.length ? `${p.reports.length} ${p.reports.length === 1 ? "person reports" : "people report"} to ${p.id === me.id ? "you" : p.name.split(" ")[0]}` : "Direct reports"}
@@ -180,6 +182,7 @@ export default function ProfilePage({ params }: { params: { id: string } }) {
               <BalanceHistory data={leaveHistory} empty="No adjustments yet." />
             </section>
           )}
+
         </div>
       </div>
 
@@ -208,6 +211,7 @@ function describe(c: Change, nameOf: (id: string | null) => string) {
   if (c.field === "record") return "Record created";
   if (c.field === "onboarding") return `Onboarding ${c.new_value}`;
   if (c.field === "welcome link") return `Welcome link ${c.new_value}`;
+  if (c.field === "sign-in link") return `Sign-in link ${c.new_value}`;
   if (c.field.startsWith("file: ")) return `Document "${c.field.slice("file: ".length)}" ${c.new_value}`;
   if (c.field.startsWith("document: ")) return `${c.field.slice("document: ".length).replace(/^./, (x) => x.toUpperCase())}: ${c.new_value}`;
   if (c.field === "outbox") return `Outbox: email ${c.new_value}`;
@@ -248,5 +252,49 @@ function PlanPicker({ person }: { person: Profile }) {
       </select>
       {error && <span className="mt-1 block text-sm text-no">{error}</span>}
     </>
+  );
+}
+
+
+type SignInStatus = {
+  has_password: boolean; password_set_at: string | null; last_login_at: string | null; locked_until: string | null;
+  link: { state: string; created_at: string; expires_at: string } | null;
+};
+const LINK_STATE: Record<string, string> = { ready: "waiting to be used", used: "used", replaced: "replaced by a newer one", expired: "expired" };
+
+// HR sends the link to set a password (a first one, or a forgotten one). The email waits in the Outbox; HR never sees the password.
+function SignIn({ person }: { person: Profile }) {
+  const key = `/hr/people/${person.id}/sign-in`;
+  const { data } = useSWR<SignInStatus>(key, fetcher);
+  const [busy, setBusy] = useState(false);
+  const [sent, setSent] = useState("");
+  const [error, setError] = useState("");
+  async function send() {
+    setBusy(true);
+    setError("");
+    try {
+      const r = await api<{ to: string }>(`/hr/people/${person.id}/sign-in-link`, { body: {} });
+      setSent(`The email to ${r.to} is waiting in the Outbox.`);
+      await Promise.all([mutate(key), mutate(`/people/${person.id}/history`)]);
+    } catch (e) { setError((e as Error).message); }
+    finally { setBusy(false); }
+  }
+  return (
+    <section aria-labelledby="signin" className="panel px-5 py-5">
+      <h2 id="signin" className="font-medium">Sign-in</h2>
+      {!data ? <p className="mt-2 text-ink-soft">Loading…</p> : (
+        <dl className="mt-3 space-y-2 text-sm">
+          <div><dt className="text-ink-soft">Password</dt><dd>{data.has_password ? `Set ${timestamp(data.password_set_at!)}` : "Not set yet"}</dd></div>
+          {data.last_login_at && <div><dt className="text-ink-soft">Last signed in</dt><dd>{timestamp(data.last_login_at)}</dd></div>}
+          {data.locked_until && <div><dt className="text-ink-soft">Locked</dt><dd className="text-no">Too many wrong passwords, until {timestamp(data.locked_until)}</dd></div>}
+          {data.link && <div><dt className="text-ink-soft">Latest link</dt><dd>{LINK_STATE[data.link.state] ?? data.link.state}, sent {timestamp(data.link.created_at)}</dd></div>}
+        </dl>
+      )}
+      <button className="btn-quiet mt-4" onClick={send} disabled={busy}>
+        {busy ? "Sending…" : data?.has_password || data?.link ? "Send a new sign-in link" : "Send sign-in link"}
+      </button>
+      {sent && <p className="mt-2 text-sm text-ink-soft">{sent}</p>}
+      {error && <p className="mt-2 text-sm text-no">{error}</p>}
+    </section>
   );
 }

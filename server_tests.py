@@ -9,6 +9,7 @@ from datetime import date, timedelta
 
 os.environ["HRM_DB"] = os.path.join(tempfile.mkdtemp(), "server_test_hr.db")
 os.environ["HRM_FILES_DIR"] = tempfile.mkdtemp()                       # documents go to a throwaway folder
+os.environ["HRM_DEMO_LOGIN"] = "1"                                      # the tests sign in with the demo picker; the password tests turn it off
 import db
 db.DB_PATH = os.environ["HRM_DB"]
 
@@ -1321,6 +1322,127 @@ def choosing_and_cancelling_an_interview_are_rate_limited_per_link():
     codes = [public.post(f"/api/careers/track/{token}/interview/choose", json={"slot": "2031-01-01T10:00"}).status_code for _ in range(22)]
     assert codes[:20] == [404] * 20 and codes[20:] == [429, 429]
     assert "a lot of tries" in public.post(f"/api/careers/track/{token}/interview/cancel").json()["detail"]
+
+
+# ---------- signing in with a password (accounts.py) ----------
+
+class demo_off:
+    """The demo picker switched off, as on a real deployment, for the length of a test."""
+    def __enter__(self):
+        os.environ["HRM_DEMO_LOGIN"] = "0"
+        server.SIGN_IN_BY_ADDRESS.seen.clear()
+
+    def __exit__(self, *exc):
+        os.environ["HRM_DEMO_LOGIN"] = "1"
+
+
+def password_link(emp_id):
+    # HR sends the link (with the picker still on, to be HR), the email waits in the outbox: returns the token
+    hr = as_person("H001")
+    issued = hr.post(f"/api/hr/people/{emp_id}/sign-in-link")
+    assert issued.status_code == 200, issued.text
+    body = next(m["body"] for m in hr.get("/api/hr/outbox").json() if m["id"] == issued.json()["outbox_id"])
+    return re.search(r"/set-password/([A-Za-z0-9_-]+)", body).group(1)
+
+
+def email_of(emp_id):
+    conn = db.get_conn()
+    email = conn.execute("SELECT email FROM employees WHERE id = ?", (emp_id,)).fetchone()[0]
+    conn.close()
+    return email
+
+
+GOOD = "correct horse battery staple"
+
+
+@test
+def a_person_sets_a_password_from_hrs_link_and_signs_in_with_it():
+    token = password_link("E002")
+    email = email_of("E002")
+    with demo_off():
+        c = TestClient(server.app)
+        assert c.get("/api/demo-users").status_code == 404
+        assert c.post("/api/session", json={"employee_id": "E002"}).status_code == 404            # no picker on a real deployment
+        assert c.get(f"/api/set-password/{token}").json() == {"state": "ready"}
+        assert c.get("/api/set-password/not-a-token").json() == {"state": "invalid"}
+        assert c.post(f"/api/set-password/{token}", json={"password": "short"}).status_code == 400
+        assert c.post(f"/api/set-password/{token}", json={"password": email.split("@")[0] + "-and-more"}).status_code == 400
+        assert c.post(f"/api/set-password/{token}", json={"password": GOOD}).status_code == 200
+        assert c.get("/api/me").json()["id"] == "E002"                                            # signed in as the link's person
+        assert "already used" in c.post(f"/api/set-password/{token}", json={"password": GOOD + "!"}).json()["detail"]
+        fresh = TestClient(server.app)
+        assert fresh.post("/api/session", json={"email": email.upper(), "password": GOOD}).status_code == 200
+        assert fresh.get("/api/me").json()["id"] == "E002"
+        wrong = fresh.post("/api/session", json={"email": email, "password": GOOD + "x"})
+        unknown = fresh.post("/api/session", json={"email": "nobody@example.com", "password": GOOD})
+        no_password = fresh.post("/api/session", json={"email": email_of("E003"), "password": GOOD})
+        assert wrong.status_code == unknown.status_code == no_password.status_code == 401
+        assert wrong.json() == unknown.json() == no_password.json()                               # nothing says which part was wrong
+        assert as_person_fails("H001")                                                            # a demo session stops working too
+    conn = db.get_conn()
+    stored = conn.execute("SELECT password_hash FROM logins WHERE emp_id = 'E002'").fetchone()[0]
+    conn.close()
+    assert stored.startswith("scrypt$") and GOOD not in stored
+
+
+def as_person_fails(emp_id):
+    # a session from the demo picker, made while it was on, is refused once it is off
+    os.environ["HRM_DEMO_LOGIN"] = "1"
+    c = as_person(emp_id)
+    os.environ["HRM_DEMO_LOGIN"] = "0"
+    return c.get("/api/me").status_code == 401
+
+
+@test
+def five_wrong_passwords_lock_the_account():
+    token = password_link("M001")
+    email = email_of("M001")
+    with demo_off():
+        c = TestClient(server.app)
+        assert c.post(f"/api/set-password/{token}", json={"password": GOOD}).status_code == 200
+        codes = [c.post("/api/session", json={"email": email, "password": f"wrong {n} wrong wrong"}).status_code for n in range(5)]
+        assert codes == [401] * 5
+        locked = c.post("/api/session", json={"email": email, "password": GOOD})                 # even the right one, while locked
+        assert locked.status_code == 429 and "Too many wrong passwords" in locked.json()["detail"]
+        conn = db.get_conn()
+        with conn:
+            conn.execute("UPDATE logins SET locked_until = '2000-01-01 00:00:00' WHERE emp_id = 'M001'")   # the 15 minutes are over
+        conn.close()
+        assert c.post("/api/session", json={"email": email, "password": GOOD}).status_code == 200
+
+
+@test
+def a_new_password_signs_the_person_out_everywhere():
+    first = password_link("E004")
+    email = email_of("E004")
+    with demo_off():
+        laptop = TestClient(server.app)
+        assert laptop.post(f"/api/set-password/{first}", json={"password": GOOD}).status_code == 200
+        assert laptop.get("/api/me").status_code == 200
+    second = password_link("E004")                                                                # forgot it: HR sends a new link
+    with demo_off():
+        phone = TestClient(server.app)
+        assert phone.post(f"/api/set-password/{second}", json={"password": GOOD + " again"}).status_code == 200
+        assert phone.get("/api/me").status_code == 200
+        assert laptop.get("/api/me").status_code == 401                                           # the older session ends
+        assert phone.post("/api/session", json={"email": email, "password": GOOD}).status_code == 401
+
+
+@test
+def only_hr_sends_links_and_sees_sign_in_status_never_the_link():
+    for who in ("E001", "M001"):
+        c = as_person(who)
+        assert c.post("/api/hr/people/E003/sign-in-link").status_code == 403, who
+        assert c.get("/api/hr/people/E003/sign-in").status_code == 403, who
+    hr = as_person("H001")
+    assert hr.get("/api/hr/people/E003/sign-in").json()["has_password"] is False
+    newer = password_link("E003")
+    older_links = [m for m in hr.get("/api/hr/outbox").json() if m["kind"] == "password_link" and m["emp_id"] == "E003"]
+    status = hr.get("/api/hr/people/E003/sign-in").json()
+    assert status["link"]["state"] == "ready" and newer not in json.dumps(status) and "scrypt" not in json.dumps(status)
+    assert hr.post(f"/api/hr/outbox/{older_links[0]['id']}/sent").status_code == 200              # HR sent it: the link leaves the database
+    body = next(m["body"] for m in hr.get("/api/hr/outbox").json() if m["id"] == older_links[0]["id"])
+    assert newer not in body and "/set-password/[link removed after sending]" in body
 
 
 if __name__ == "__main__":
