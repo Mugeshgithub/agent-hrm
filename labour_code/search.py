@@ -109,6 +109,39 @@ def rewrite_query(question):
         return None
 
 
+SPLIT_PROMPT = (
+    "You prepare searches in the French Code du travail. "
+    "If the user's question asks about two or three separate rules (for example the notice period AND the severance pay), "
+    "write one short French search query per rule, one per line, at most 3 lines, each at most 10 words, "
+    "using the specific legal terms the code uses. "
+    "If it asks about one rule, even with details, an example or several facts, output only: ONE"
+)
+MAX_PARTS = 3
+
+
+@lru_cache(maxsize=1000)
+def _split(question):
+    resp = claude.messages.create(
+        model="claude-haiku-4-5", max_tokens=100, temperature=0, system=SPLIT_PROMPT,
+        messages=[{"role": "user", "content": question}],
+    )
+    return "".join(b.text for b in resp.content if b.type == "text").strip()
+
+
+def split_queries(question):
+    # one French query per rule when the question asks about two or three, else [] (also when the call fails).
+    # A call of its own: asking the rewrite for one query per rule changed the rewrites of one-rule questions too
+    # (3 of 84 recall questions lost their article at top 5)
+    try:
+        text = _split(question)
+    except Exception as e:
+        print(f"  [labour search] question split failed ({type(e).__name__}): searching it whole")
+        return []
+    lines = [re.sub(r"^(?:[-•*]|\d+[.)])\s*", "", line.strip()) for line in text.splitlines()]   # "1. ..." or "- ..." if it lists them
+    parts = [line for line in dict.fromkeys(lines) if line and line.upper() != "ONE"][:MAX_PARTS]
+    return parts if len(parts) > 1 else []
+
+
 def multi_query_search(conn, question, k=20):
     # keep the user's own words AND add the law's vocabulary; keyword search only on the French rewrite
     rewritten = rewrite_query(question)
@@ -190,8 +223,12 @@ def agent_questions(user_question, agent_query):
 def search_for_agent(conn, user_question, agent_query, k=20):
     # raises EmbeddingFailed when the embedding service is down: the nightly checks and the recall measurements fail then
     # instead of lowering their recall; the assistant catches it and uses keyword_search_for_agent (agent.py)
+    # a question about two or three rules also gets one search per rule, all merged before the rerank: one search for
+    # both found both articles in the top 5 for 6 of 10 two-rule questions (the 35-hour week next to overtime pay was lost)
     queries, question = agent_questions(user_question, agent_query)
-    return rerank(question, fuse([multi_query_search(conn, q, k) for q in queries], k))
+    lists = [multi_query_search(conn, q, k) for q in queries]
+    lists += [search(conn, part, k) for part in split_queries(queries[0]) for search in (vector_search, keyword_search)]
+    return rerank(question, fuse(lists, k))
 
 
 def keyword_search_for_agent(conn, user_question, agent_query, failure, k=20):
@@ -200,4 +237,6 @@ def keyword_search_for_agent(conn, user_question, agent_query, failure, k=20):
     # is told the search is limited and a line under its answer says so (agent.py, law_status.limited_line)
     print(f"  [labour search] embedding failed ({type(failure.__cause__).__name__}): French keyword search only")
     queries, question = agent_questions(user_question, agent_query)
-    return rerank(question, fuse([keyword_search(conn, rewrite_query(q) or q, k) for q in queries], k))
+    lists = [keyword_search(conn, rewrite_query(q) or q, k) for q in queries]
+    lists += [keyword_search(conn, part, k) for part in split_queries(queries[0])]
+    return rerank(question, fuse(lists, k))

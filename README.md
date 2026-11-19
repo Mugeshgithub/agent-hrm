@@ -69,11 +69,11 @@ flowchart LR
 - **Labour-law search recall:** on 50 test questions in English and French, vector search alone found the right
   article for 45. With the rewrite and the re-ordering it finds all 50, also when the assistant gets only the top 5.
   A held-out set it was never tuned on: 20/20. Workplace situations: 14/14.
-  Questions that need two articles (a benchmark, not a gate): both in the top 5 for 6 of 10.
+  Questions that need two articles (a benchmark, not a gate): both in the top 5 for 8 of 10.
 - **Every fix is measured:** the eval it targets runs at least 10 times before and after, then the full suite. For example,
   "which requests are pending?" went from 17/20 to 20/20 with the count check.
 - **Unit tests** cover everything that has no AI in it (roles, leave rules, onboarding, retention, the guardrails):
-  136 in `unit_tests.py` plus four more test files. They run on every push and pull request, with a type check and
+  137 in `unit_tests.py` plus four more test files. They run on every push and pull request, with a type check and
   a build of the web app.
 
 ## Tech stack

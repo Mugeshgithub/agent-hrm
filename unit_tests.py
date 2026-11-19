@@ -507,6 +507,32 @@ def labour_rewrite_failing_searches_with_the_users_own_words_and_tries_again_nex
     assert seen == [("vector", "How many days of paid leave?"), ("vector", "congés payés durée"), ("keyword", "congés payés durée")]
 
 
+
+@test
+def labour_question_about_two_rules_also_gets_one_search_per_rule_and_a_one_rule_question_is_searched_as_before():
+    search = labour_search("préavis indemnité licenciement", "1. préavis de licenciement\n2. indemnité de licenciement", "1,2,3")
+    seen = searches_seen(search)
+    question = "I'm being dismissed after two years: how much notice do I get, and am I owed severance pay?"
+    with contextlib.redirect_stdout(io.StringIO()):
+        assert nums(search.search_for_agent(None, question, None)) == ["L3141-1", "L3141-12", "L3141-3"]   # merged, each article once
+    assert seen == [("vector", question), ("vector", "préavis indemnité licenciement"), ("keyword", "préavis indemnité licenciement"),
+                    ("vector", "préavis de licenciement"), ("keyword", "préavis de licenciement"),     # "1. " taken off
+                    ("vector", "indemnité de licenciement"), ("keyword", "indemnité de licenciement")]
+    assert [call["system"] for call in search.claude.calls] == [search.REWRITE_PROMPT, search.SPLIT_PROMPT, search.RERANK_PROMPT]
+    # one rule: the split says ONE, and the searches are the ones made before the split existed
+    search = labour_search("congés payés durée", "ONE", "1")
+    seen = searches_seen(search)
+    with contextlib.redirect_stdout(io.StringIO()):
+        search.search_for_agent(None, "How many days of paid leave?", None)
+    assert seen == [("vector", "How many days of paid leave?"), ("vector", "congés payés durée"), ("keyword", "congés payés durée")]
+    # at most 3, blank lines and repeats left out; one line is one rule; a failed split searches the question whole
+    search = labour_search("a\n\n- b\nc\nd\na", "congés payés", RuntimeError("Overloaded"))
+    assert search.split_queries("four rules?") == ["a", "b", "c"]
+    assert search.split_queries("one rule?") == []
+    with contextlib.redirect_stdout(io.StringIO()) as log:
+        assert search.split_queries("notice?") == []
+    assert "question split failed (RuntimeError): searching it whole" in log.getvalue()
+
 @test
 def labour_rewrite_and_rerank_have_a_10_second_timeout_one_retry_and_temperature_0():
     search = labour_search(TimeoutError("Request timed out."), TimeoutError("Request timed out."))
@@ -516,21 +542,21 @@ def labour_rewrite_and_rerank_have_a_10_second_timeout_one_retry_and_temperature
         assert nums(search.reranked_search(None, "How many days of paid leave?")) == ["L3141-1", "L3141-3"]   # timed out twice: still articles
     assert "query rewrite failed (TimeoutError)" in log.getvalue() and "rerank failed (TimeoutError)" in log.getvalue()
     assert [call["temperature"] for call in search.claude.calls] == [0, 0]
-    search = labour_search("congés payés durée", "2,1")
+    search = labour_search("congés payés durée", "ONE", "2,1")
     searches_seen(search)
     with contextlib.redirect_stdout(io.StringIO()):
         search.search_for_agent(None, "How many days of paid leave?", None)
-    assert [(call["max_tokens"], call["temperature"]) for call in search.claude.calls] == [(60, 0), (150, 0)]
+    assert [(call["max_tokens"], call["temperature"]) for call in search.claude.calls] == [(60, 0), (100, 0), (150, 0)]   # rewrite, split, rerank
 
 
 @test
 def labour_agent_search_still_returns_articles_when_every_haiku_step_fails():
-    search = labour_search(RuntimeError("Overloaded"), RuntimeError("Overloaded"), RuntimeError("Overloaded"))
+    search = labour_search(*[RuntimeError("Overloaded")] * 4)
     seen = searches_seen(search)
     with contextlib.redirect_stdout(io.StringIO()):
         results = search.search_for_agent(None, "How many days of paid leave?", "paid leave entitlement per year")
     assert nums(results) == ["L3141-1", "L3141-3"]
-    assert [kind for kind, _ in seen] == ["vector", "vector"] and len(search.claude.calls) == 3    # two rewrites and the rerank, all failed
+    assert [kind for kind, _ in seen] == ["vector", "vector"] and len(search.claude.calls) == 4    # two rewrites, the split and the rerank, all failed
 
 
 def embedding_fails(search):
@@ -555,7 +581,7 @@ def agent_search_with_embedding_down(search, user_question, agent_query):
 
 @test
 def labour_embedding_failing_gives_the_agent_the_french_keyword_search_alone_and_says_so_in_the_log():
-    search = labour_search("congés payés durée", "droit congé payé annuel", "2,1,3")
+    search = labour_search("congés payés durée", "droit congé payé annuel", "ONE", "2,1,3")
     seen = embedding_fails(search)
     with contextlib.redirect_stdout(io.StringIO()) as log:
         results = agent_search_with_embedding_down(search, "How many days of paid leave?", "paid leave entitlement per year")
@@ -565,7 +591,7 @@ def labour_embedding_failing_gives_the_agent_the_french_keyword_search_alone_and
     assert "embedding failed (ConnectionError): French keyword search only" in log.getvalue()
     assert "Connection error" not in log.getvalue()                      # only the kind: an OpenAI error's text can show part of the key
     # the rewrite fails too: the keyword search gets the user's own words
-    search = labour_search(RuntimeError("Overloaded"), RuntimeError("Overloaded"), "1")
+    search = labour_search(RuntimeError("Overloaded"), RuntimeError("Overloaded"), "ONE", "1")
     seen = embedding_fails(search)
     with contextlib.redirect_stdout(io.StringIO()):
         agent_search_with_embedding_down(search, "Combien de jours de congés payés ?", None)
