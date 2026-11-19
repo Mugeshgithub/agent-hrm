@@ -163,3 +163,10 @@ Entries marked *backfilled* were written afterwards from the code, the git histo
 - **Why:** every earlier question needed one article. Production path, top 5, 3 runs: 6/10 questions with both articles (16/20 articles), the same each run. Missed: the 35-hour week next to overtime pay (EN, FR), unused holiday when resigning (the agent's query named only the notice), L1225-4 (L1225-4-4 came instead).
 - **Cost:** 10 more agent queries saved. A real turn can search twice, which this does not count, so it may understate what users get.
 - **Change it when:** a fix is tried (one search per rule, or a larger top k): measure it here first. Make it a gate once it holds 10/10.
+
+### 25. Every guard event is recorded, without the rejected reply (PR #59, 2026-11-19)
+- **Chose:** one row in `guard_events` each time a guardrail acts on a reply ([guard_events.py](../guard_events.py)): when, who, role, which guard, the outcome, the Langfuse trace id, and a short detail (the article numbers for citations, else a count). Outcomes: `retried_ok`, `retried_unfixed` (the guards that ask once and have no fallback: the final reply is checked again by the same code), `safe_reply`, `replaced`. The trace gets `guard`, `guard:<name>` and `guard:<outcome>` tags. `guard_report.py` shows them per day, with the retry and safe-reply rates over all answers.
+- **Not chosen:** keeping the rejected draft (it can hold personal data, and Langfuse already has it when tracing is on); logging failures only (then a retry that worked, the common case, is invisible); a row per retry instead of per guard and answer.
+- **Why:** the only trace was a `print`, and the safe reply in `chat_messages` looks like any other answer: nobody could say how often a guard fires or whether its retry works.
+- **Cost:** one insert per answer a guard acted on. Days are UTC. The guards that answer before the model (recruitment ranking, weekend leave) and the role refusals in `run_tool` are not recorded yet. The rows have no retention limit.
+- **Change it when:** a guard's `retried_unfixed` count is not small (give it a fallback), or the table grows: add it to the retention job.

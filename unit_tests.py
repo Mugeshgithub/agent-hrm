@@ -23,6 +23,7 @@ import document_answers
 import documents
 import careers
 import existing_first
+import guard_events
 import employee_files
 import eval_patterns
 import jobs
@@ -2353,6 +2354,151 @@ def a_person_is_told_about_dates_they_already_asked_for_from_the_tools_not_the_o
     assert nudge("employee", "casual", nocard, ["cancel_leave"], []) is None
     assert nudge("employee", "ok", nocard, [], [], card_open=True) is None                                     # a card from an earlier turn is still waiting
     assert nudge("employee", "casual", "Your request was submitted.", [], []) is None
+
+
+# ---------- guard events: one row each time a guard acts on a reply (guard_events.py) ----------
+
+def fresh_guard_events():
+    # init_db(reset=True) keeps this table (and the chat): each test starts with none
+    guard_events.init_events()
+    conn = db.get_conn()
+    with conn:
+        conn.execute("DELETE FROM guard_events")
+    conn.close()
+
+
+def guard_rows():
+    conn = db.get_conn()
+    rows = [dict(r) for r in conn.execute("SELECT * FROM guard_events ORDER BY id").fetchall()]
+    conn.close()
+    return rows
+
+
+@test
+def guard_turn_outcomes():
+    fresh_guard_events()
+    turn = guard_events.Turn()
+    assert turn.write("E001", "employee") == {} and guard_rows() == []                       # no guard acted: nothing written
+    turn.retried("citation", ["L9999-9"])                                                      # the loop checks again itself
+    turn.retried("search", recheck=lambda: None)                                               # the final reply passes it
+    turn.retried("booking", recheck=lambda: "book it")                                         # it still fails it
+    turn.retried("card", recheck=lambda: 1 / 0)                                                # a broken recheck can't claim a fix
+    turn.retried("number", {"figures": 1})
+    turn.ended("number", "replaced", {"figures": 1})
+    found = turn.write("E001", "employee", "trace-1")
+    assert found == {"citation": "retried_ok", "search": "retried_ok", "booking": "retried_unfixed", "card": "retried_unfixed",
+                     "number": "replaced"}, found
+    rows = guard_rows()
+    assert len(rows) == 5 and {r["turn"] for r in rows} == {turn.id} and {r["trace_id"] for r in rows} == {"trace-1"}
+    assert {r["guard"]: json.loads(r["detail"]) if r["detail"] else None for r in rows} == {
+        "citation": ["L9999-9"], "search": None, "booking": None, "card": None, "number": {"figures": 1}}
+    assert guard_events.tags(found) == ["guard", "guard:booking", "guard:card", "guard:citation", "guard:number", "guard:search",
+                                        "guard:replaced", "guard:retried_ok", "guard:retried_unfixed"]
+    assert guard_events.tags({}) == []
+
+
+@test
+def guard_events_never_break_the_answer():
+    turn = guard_events.Turn()
+    turn.retried("citation", ["L9999-9"])
+    conn = db.get_conn()
+    with conn:
+        conn.execute("DROP TABLE IF EXISTS guard_events")                                     # the table is missing: the write fails
+    conn.close()
+    with contextlib.redirect_stdout(io.StringIO()) as out:
+        assert turn.write("E001", "employee") == {"citation": "retried_ok"}
+    assert "could not record" in out.getvalue()
+
+
+@test
+def guard_report_counts_per_day_and_rates():
+    import memory
+    memory.init_memory()
+    fresh_guard_events()
+    conn = db.get_conn()
+    with conn:
+        conn.execute("DELETE FROM chat_messages")
+    conn.close()
+    for _ in range(4):
+        memory.save_message("E001", "assistant", "an answer")
+    memory.save_message("E001", "user", "a question")                                          # not an answer
+    both = guard_events.Turn()                                                                 # two guards on one answer: one retried answer
+    both.retried("citation", ["L9999-9"])
+    both.ended("citation", "safe_reply", ["L9999-9"])
+    both.retried("search", recheck=lambda: None)
+    both.write("E001", "employee")
+    fixed = guard_events.Turn()
+    fixed.retried("citation", ["L1234-5"])
+    fixed.write("E001", "employee")
+    report = guard_events.per_day(1)
+    assert len(report) == 1, report
+    day = next(iter(report.values()))
+    assert day["guards"]["citation"] == {"retried_ok": 1, "retried_unfixed": 0, "safe_reply": 1, "replaced": 0}, day
+    assert day["guards"]["search"]["retried_ok"] == 1
+    assert (day["answers"], day["retried"], day["safe"]) == (4, 2, 1), day
+    assert day["retry_rate"] == 0.5 and day["safe_reply_rate"] == 0.25, day
+
+
+def load_agent():
+    """agent.py with a fake Claude. Its libraries are stand-ins (CI's unit-test job installs no packages), put back after loading;
+    so are the embedding functions it hands to other modules."""
+    stand_ins = {name: types.ModuleType(name) for name in ("dotenv", "openai", "anthropic")}
+    stand_ins["dotenv"].load_dotenv = lambda *args, **kwargs: None
+    stand_ins["openai"].OpenAI = lambda **options: None
+    stand_ins["anthropic"].Anthropic = lambda **options: None
+    saved = {name: sys.modules.get(name) for name in (*stand_ins, "agent")}
+    saved_embed = policy_gaps.EMBED, collective_agreement.EMBED_MANY
+    sys.modules.update(stand_ins)
+    try:
+        spec = importlib.util.spec_from_file_location("agent", os.path.join(os.path.dirname(os.path.abspath(__file__)), "agent.py"))
+        agent = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(agent)
+    finally:
+        for name, module in saved.items():
+            if module is None:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = module
+        policy_gaps.EMBED, collective_agreement.EMBED_MANY = saved_embed
+    return agent
+
+
+class FakeAgentClaude:
+    """Answers each call of the agent loop with the next reply text, no tool calls."""
+    def __init__(self, replies):
+        self.replies, self.calls = list(replies), []
+        self.messages = self
+
+    def create(self, **request):
+        self.calls.append(request)
+        usage = types.SimpleNamespace(input_tokens=10, output_tokens=10, cache_creation_input_tokens=0, cache_read_input_tokens=0)
+        return types.SimpleNamespace(content=[types.SimpleNamespace(type="text", text=self.replies.pop(0))], stop_reason="end_turn", usage=usage)
+
+
+@test
+def forced_citation_failure_writes_one_row():
+    import demo_data
+    with contextlib.redirect_stdout(io.StringIO()):
+        demo_data.init_all()
+        fresh_guard_events()
+        agent = load_agent()
+        made_up = "It is Article L9999-9 of the labour code."   # an article no tool returned, twice
+        agent.client = fake = FakeAgentClaude([made_up, made_up])
+        agent.LOGGED_IN_ID, agent.LOGGED_IN_ROLE = "E001", None
+        agent.state.update(messages=[{"role": "user", "content": "Which article of the labour code is that?"}], summary=None)
+        reply = agent.answer_turn("Which article of the labour code is that?")
+    assert len(fake.calls) == 2, len(fake.calls)                                                # the first answer and one retry
+    assert reply.startswith(agent.SAFE_REPLY), reply
+    rows = guard_rows()
+    assert len(rows) == 1, rows
+    row = rows[0]
+    assert (row["guard"], row["outcome"], row["employee_id"]) == ("citation", "safe_reply", "E001"), row
+    assert json.loads(row["detail"]) == ["L9999-9"], row
+    assert made_up not in json.dumps(row)                                                       # the rejected reply is not kept
+    conn = db.get_conn()
+    saved = conn.execute("SELECT content FROM chat_messages WHERE employee_id = 'E001' AND role = 'assistant' ORDER BY id DESC").fetchone()
+    conn.close()
+    assert saved["content"] == reply                                                             # the person got the safe reply
 
 
 if __name__ == "__main__":

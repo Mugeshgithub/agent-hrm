@@ -33,6 +33,13 @@ def current_trace_id():
     return langfuse.get_current_trace_id() if ENABLED else None
 
 
+def tag_trace(tags):
+    # adds tags to the trace we're inside, next to the ones it has (propagate_attributes merges them and sets them on the current span)
+    if ENABLED and tags:
+        with propagate_attributes(tags=list(tags)):
+            pass
+
+
 def score_trace(trace_id, passed, comment=""):
     # "passed" = 1 or 0: a number, so Langfuse can chart the pass rate over time
     # "result" = "pass" or "fail": a label, easy to read and filter in the table
