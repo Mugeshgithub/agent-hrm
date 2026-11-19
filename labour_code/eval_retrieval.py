@@ -1,7 +1,7 @@
 # labour_code/eval_retrieval.py: recall@8 for each search method, in English and French
 import sys
 
-from retrieval_cases import CASES, HOLDOUT, SITUATIONS
+from retrieval_cases import CASES, HOLDOUT, SITUATIONS, MULTI, groups_found, needed
 from search import (connect, vector_search, keyword_search, hybrid_search,
                     multi_query_search, french_search, reranked_search, search_for_agent, rewrite_query)
 
@@ -22,6 +22,7 @@ TOPS = [8]
 # python eval_retrieval.py                          -> the 50 tuning questions, all methods, top 8
 # python eval_retrieval.py situations             -> 14 "my manager says..." questions
 # python eval_retrieval.py holdout                  -> the 20 held-out questions the reranker never saw
+# python eval_retrieval.py multi top=5 only=user+agent -> the 10 two-rule questions: a hit needs every article
 # python eval_retrieval.py top=5 only=multi+rerank  -> any top-k, one method (cheaper)
 # LABOUR_TABLE=chunks_api python eval_retrieval.py  -> the same questions on the Légifrance load (load_api.py)
 args = sys.argv[1:]
@@ -31,6 +32,9 @@ if "holdout" in args:
 if "situations" in args:                                   # python eval_retrieval.py situations
     CASES = SITUATIONS
     print("SITUATION-STYLE SET\n")
+if "multi" in args:
+    CASES = MULTI
+    print("TWO-RULE SET (a hit needs every article; a benchmark, not a gate)\n")
 for a in args:
     if a.startswith("top="):
         TOPS = [int(k) for k in a.split("=")[1].split(",")]   # top=3,5,8 -> measured in one pass
@@ -58,16 +62,18 @@ with connect() as conn:
     for name, search in METHODS.items():
         hits = {"en": 0, "fr": 0}
         chars = 0
-        per_k = {k: {"hits": 0, "chars": 0} for k in TOPS}
+        per_k = {k: {"hits": 0, "chars": 0, "articles": 0} for k in TOPS}
         for question, lang, expected in CASES:
             results = search(conn, question)
             found = top_articles(results)
             chars += sum(len(r["text"]) for r in top_rows(results, TOP))   # what the agent would read
             for k in TOPS:
-                if any(e in top_articles(results, k) for e in expected.split("|")):
+                got = groups_found(expected, top_articles(results, k))     # "A|B" = either article; "A&B" = both are needed
+                per_k[k]["articles"] += got
+                if got == len(needed(expected)):
                     per_k[k]["hits"] += 1
                 per_k[k]["chars"] += sum(len(r["text"]) for r in top_rows(results, k))
-            if any(e in found for e in expected.split("|")):   # "A|B" = either article is a correct answer
+            if groups_found(expected, found) == len(needed(expected)):
                 hits[lang] += 1
             else:
                 misses.setdefault(name, {})[question] = (expected, found)
@@ -76,10 +82,11 @@ with connect() as conn:
         avg = chars // len(CASES)
         print(f"{name:15}  {total:>3}/{len(CASES)}   {hits['en']:>3}/{per_lang}    {hits['fr']:>3}/{per_lang}"
               f"    ~{avg:,} chars (~{avg // 4:,} tokens) sent per question")
-        if len(TOPS) > 1:
+        if len(TOPS) > 1 or CASES is MULTI:
             for k in TOPS:
                 a = per_k[k]["chars"] // len(CASES)
-                print(f"   top {k}:  {per_k[k]['hits']:>3}/{len(CASES)}    ~{a // 4:,} tokens per question")
+                articles = sum(len(needed(e)) for _, _, e in CASES)
+                print(f"   top {k}:  {per_k[k]['hits']:>3}/{len(CASES)}    {per_k[k]['articles']}/{articles} articles found    ~{a // 4:,} tokens per question")
 
     for name, missed in misses.items():
         print(f"\n{name} misses:")

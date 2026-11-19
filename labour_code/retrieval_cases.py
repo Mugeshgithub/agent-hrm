@@ -110,6 +110,39 @@ SITUATIONS = [
     ("Mon responsable m'a écrit que je suis licencié à partir de demain, sans entretien. Il peut faire ça ?", "fr", "L1232-2|L1232-6"),
 ]
 
+
+# two-rule questions (19 Nov): one question, two articles, and the answer needs BOTH ("A&B": all of them, each may be "A|C").
+# Chosen and checked against the article texts before the first run; not used to tune the search or the reranker.
+# A benchmark, reported by `eval_retrieval.py multi`, never a gate: not in the nightly recall check (sync.SETS) or in CI.
+# Production path at top 5 on 19 Nov: 6/10 questions, 16/20 articles.
+MULTI = [
+    # how long (L1225-17), and no dismissal during it (L1225-4)
+    ("I'm pregnant: how long is my maternity leave, and can my employer fire me during it?", "en", "L1225-17&L1225-4"),
+    ("Je suis enceinte : combien dure mon congé maternité, et mon employeur peut-il me licencier pendant ce congé ?", "fr", "L1225-17&L1225-4"),
+    # the notice (L1234-1), and the severance pay after 8 months (L1234-9)
+    ("I'm being dismissed after two years: how much notice do I get, and am I owed severance pay?", "en", "L1234-1&L1234-9"),
+    ("Je suis licencié après deux ans d'ancienneté : quel préavis ai-je, et ai-je droit à une indemnité de licenciement ?", "fr", "L1234-1&L1234-9"),
+    # 10 hours a day (L3121-18), 48 hours a week (L3121-20)
+    ("What is the most I can be made to work in one day, and in one week?", "en", "L3121-18&L3121-20"),
+    ("Quelle est la durée maximale de travail par jour, et par semaine ?", "fr", "L3121-18&L3121-20"),
+    # overtime starts after 35 hours (L3121-27) and is paid 25% more, then 50% (L3121-36)
+    ("After how many hours a week does overtime start, and how much extra is it paid?", "en", "L3121-27&L3121-36"),
+    ("À partir de combien d'heures par semaine commencent les heures supplémentaires, et de combien sont-elles majorées ?", "fr", "L3121-27&L3121-36"),
+    # the notice when resigning (L1237-1), and the unused holiday paid out (L3141-28)
+    ("I'm resigning: how much notice do I have to give, and will my unused holiday be paid?", "en", "L1237-1&L3141-28"),
+    ("Je démissionne : quel préavis dois-je faire, et mes congés non pris me seront-ils payés ?", "fr", "L1237-1&L3141-28"),
+]
+
+
+def needed(expected):
+    """'A|B&C' -> [['A', 'B'], ['C']]: every group must be found, and any article of a group counts."""
+    return [part.split("|") for part in expected.split("&")]
+
+
+def groups_found(expected, articles):
+    """How many of the expected groups have an article among these (the articles found, in order)."""
+    return sum(any(a in articles for a in group) for group in needed(expected))
+
 if __name__ == "__main__":
     texts = {}
     with open("labour_code/chunks.jsonl", encoding="utf-8") as f:
@@ -118,10 +151,10 @@ if __name__ == "__main__":
             texts.setdefault(c["num"], c["text"])   # first piece is enough to check
 
     missing = 0
-    for num in dict.fromkeys(a for _, _, n in CASES + HOLDOUT + SITUATIONS for a in n.split("|")):   # each article once
+    for num in dict.fromkeys(a for _, _, n in CASES + HOLDOUT + SITUATIONS + MULTI for group in needed(n) for a in group):   # each article once
         if num not in texts:
             missing += 1
             print(f"MISSING {num}: not in the in-force chunks!\n")
         else:
             print(f"{num}: {texts[num][:300]}\n")
-    print(f"{len(CASES)} + {len(HOLDOUT)} held-out questions, {missing} expected articles missing")
+    print(f"{len(CASES)} + {len(HOLDOUT)} held-out + {len(SITUATIONS)} situations + {len(MULTI)} two-rule questions, {missing} expected articles missing")
