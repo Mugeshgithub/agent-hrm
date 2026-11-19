@@ -15,7 +15,7 @@ TOOL = "apply_leave"
 # a request to book (not a question about leave): "book", "apply", "submit", "put me down", "I want leave on ..." (and the French ones)
 _REQUEST = re.compile(
     r"\b(?:book|apply|submit|put me down|r[ée]serv\w*|poser)\b"
-    r"|\bi (?:want|need|wish|would like|'d like)\b[^.?!]{0,30}\b(?:leave|time off|days? off|holidays?|vacation)\b"
+    r"|\bi(?: want| need| wish| would like|'d like)\b[^.?!]{0,30}\b(?:leave|time off|days? off|holidays?|vacation)\b"
     r"|\bje (?:veux|voudrais|souhaite)\b[^.?!]{0,30}\bcong[ée]s?\b", re.I)
 # a question about leave, not a request: it is answered, not booked
 _ONLY_ASKING = re.compile(r"\b(?:how many|how much|what if|if i|can i|could i|may i|am i allowed|do i have|check|combien|puis-je|est-ce que je peux)\b", re.I)

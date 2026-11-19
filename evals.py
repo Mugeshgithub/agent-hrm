@@ -69,6 +69,15 @@ def say(d):
     return d.strftime("%-d %B %Y")        # 17 November 2026, how a user would type it
 
 
+def card_weekdays(weekdays):
+    # the card waiting books one request from the first weekday to the second (0 = Monday), starting within the next two weeks
+    items = agent.pending_action.get("items") or []
+    if len(items) != 1:
+        return False
+    start, end = (date.fromisoformat(items[0]["input"][k]) for k in ("start_date", "end_date"))
+    return (start.weekday(), end.weekday()) == weekdays and 0 < (end - start).days < 7 and 0 <= (start - date.today()).days <= 14
+
+
 def say_no_year(d):
     return d.strftime("%-d %B")           # 17 November
 
@@ -1673,6 +1682,26 @@ TEST_CASES = [
         "input": f"I want casual leave on {say_no_year(MONDAY)}.",
         "must_call": ["apply_leave"],
         "expected_requests": 1,
+    },
+    {
+        # real, Thu 19 Nov: "Book me casual leave next Thursday and Friday" made a card for Fri 27 and Sat 28 Nov (1 working day). The card goes to
+        # the dates the person named: a Thursday to the Friday after it, within the next two weeks.
+        "name": "booking: next Thursday and Friday are booked on a Thursday and a Friday",
+        "user": "E001",
+        "auto_confirm": agent.AWAITING_CONFIRMATION,
+        "setup": lambda: agent.pending_action.clear(),
+        "input": "Book me casual leave next Thursday and Friday",
+        "must_call": ["apply_leave"],
+        "check": lambda: card_weekdays((3, 4)),
+    },
+    {
+        "name": "booking: Monday to Wednesday next week is booked from a Monday to the Wednesday after it",
+        "user": "E001",
+        "auto_confirm": agent.AWAITING_CONFIRMATION,
+        "setup": lambda: agent.pending_action.clear(),
+        "input": "I'd like casual leave from Monday to Wednesday next week",
+        "must_call": ["apply_leave"],
+        "check": lambda: card_weekdays((0, 2)),
     },
     {
         # real, 10 Nov: "i want to take leave on saturday ?" -> "Which Saturday would you like? The next ones are November 28th and December 5th."

@@ -23,6 +23,7 @@ import document_answers
 import documents
 import careers
 import existing_first
+import named_days
 import guard_events
 import employee_files
 import eval_patterns
@@ -2525,6 +2526,47 @@ def forced_citation_failure_writes_one_row():
     saved = conn.execute("SELECT content FROM chat_messages WHERE employee_id = 'E001' AND role = 'assistant' ORDER BY id DESC").fetchone()
     conn.close()
     assert saved["content"] == reply                                                             # the person got the safe reply
+
+
+# ---------- named weekdays: the dates fall on the days the person named (named_days.py) ----------
+
+@test
+def named_days_are_checked_against_the_dates():
+    thu = date(2026, 11, 19)                                                     # the real case: a Thursday
+    mismatch = named_days.mismatch
+    ask = "Book me casual leave next Thursday and Friday"
+    assert named_days.named(ask) == {3, 4} and named_days.named("du lundi au mercredi") == {0, 2}
+    assert named_days.named("Fri 27 Nov, sat") == set() and named_days.named("Mondays") == {0}   # full names only; plurals count
+    note = mismatch(ask, date(2026, 11, 27), date(2026, 11, 28), thu)                         # what the model booked: Fri and Sat
+    assert note and "2026-11-28 is a Saturday" in note and "2026-11-27" not in note.split("but")[1].split(".")[0], note
+    assert "Thursday 2026-11-26, Friday 2026-11-27" in note and "Today is Thursday 2026-11-19" in note, note
+    assert mismatch(ask, date(2026, 11, 26), date(2026, 11, 27), thu) is None
+    assert mismatch(ask, date(2026, 11, 19), date(2026, 11, 20), thu) is None                  # "next" is not judged, only the weekdays
+    assert mismatch("Monday to Wednesday next week", date(2026, 11, 23), date(2026, 11, 25), thu) is None
+    assert mismatch("Monday to Wednesday next week", date(2026, 11, 24), date(2026, 11, 26), thu)
+    # one day named: the start or the end falls on it
+    assert mismatch("from tomorrow until Friday", date(2026, 11, 20), date(2026, 11, 27), thu) is None
+    assert mismatch("Monday for three days", date(2026, 11, 23), date(2026, 11, 25), thu) is None
+    assert mismatch("leave on Friday", date(2026, 11, 21), date(2026, 11, 21), thu)
+    assert mismatch("leave on 3 December", date(2026, 12, 3), date(2026, 12, 3), thu) is None  # no day named: nothing to check
+    assert mismatch("jeudi et vendredi", date(2026, 11, 26), date(2026, 11, 27), thu) is None
+
+
+@test
+def the_words_checked_are_this_message_or_the_one_before():
+    words = named_days.words_naming_days
+    assert words(["casual", "Book me leave next Thursday and Friday"]) == "Book me leave next Thursday and Friday"
+    assert words(["Friday please", "Monday?"]) == "Friday please"
+    assert words(["book 3 December", "can I take Monday off?"]) == ""                         # a date of its own: the older words don't count
+    assert words(["casual", "hello", "Monday"]) == ""                                          # only the one before
+    assert words([]) == ""
+
+
+@test
+def booking_guard_hears_i_d_like():
+    assert booking_first._REQUEST.search("I'd like casual leave from Monday to Wednesday next week")
+    assert booking_first._REQUEST.search("I would like some time off on Friday")
+    assert not booking_first._REQUEST.search("How many days would I like to keep?")
 
 
 if __name__ == "__main__":
