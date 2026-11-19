@@ -845,6 +845,7 @@ def a_two_rule_question_is_found_only_when_every_article_it_needs_is_found():
     assert retrieval_cases.groups_found("L1225-17&L1225-4", top5) == 1                # one of two is not a hit
     assert retrieval_cases.groups_found("L1471-1|L1235-7", ["L1235-7"]) == 1          # a one-rule question reads as before
     assert len(retrieval_cases.MULTI) == 10 and all(len(retrieval_cases.needed(e)) == 2 for _, _, e in retrieval_cases.MULTI)
+    assert not any(cases is retrieval_cases.MULTI for cases in law_sync.SETS.values())  # a reported benchmark: never holds a night
 
 
 # ---------- the nightly labour-code sync: what holds a night, who is told, and the date in law answers (labour_code/sync.py, law_status.py) ----------

@@ -158,8 +158,8 @@ Entries marked *backfilled* were written afterwards from the code, the git histo
 - **Change it when:** the log shows the fallback often: add a second embedding service rather than relying on keywords.
 
 ### 23. Two-rule questions in the labour search's answer key (PR #56, 2026-11-19)
-- **Chose:** 10 questions (5 English, 5 French) that each need two articles; one counts as found only when both are in the top 5 (`"A&B"` in [labour_code/retrieval_cases.py](../labour_code/retrieval_cases.py), `eval_retrieval.py multi`). Picked and checked against the article texts before the first run.
-- **Not chosen:** adding them to the nightly recall gate yet, or tuning the search or the reranker on them.
+- **Chose:** 10 questions (5 English, 5 French) that each need two articles; one counts as found only when both are in the top 5 (`"A&B"` in [labour_code/retrieval_cases.py](../labour_code/retrieval_cases.py), `eval_retrieval.py multi`). Picked and checked against the article texts before the first run. A reported benchmark, not a gate (a unit test keeps it out of the nightly check).
+- **Not chosen:** a gate (nightly or CI) at 6/10: it would hold every night or turn main red; tuning the search or the reranker on them.
 - **Why:** every earlier question needed one article. Production path, top 5, 3 runs: 6/10 questions with both articles (16/20 articles), the same each run. Missed: the 35-hour week next to overtime pay (EN, FR), unused holiday when resigning (the agent's query named only the notice), L1225-4 (L1225-4-4 came instead).
 - **Cost:** 10 more agent queries saved. A real turn can search twice, which this does not count, so it may understate what users get.
-- **Change it when:** a fix is tried (one search per rule, or a larger top k): measure it here first, then add the set to the nightly gate.
+- **Change it when:** a fix is tried (one search per rule, or a larger top k): measure it here first. Make it a gate once it holds 10/10.

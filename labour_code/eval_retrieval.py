@@ -34,7 +34,7 @@ if "situations" in args:                                   # python eval_retriev
     print("SITUATION-STYLE SET\n")
 if "multi" in args:
     CASES = MULTI
-    print("TWO-RULE SET (a hit needs every article)\n")
+    print("TWO-RULE SET (a hit needs every article; a benchmark, not a gate)\n")
 for a in args:
     if a.startswith("top="):
         TOPS = [int(k) for k in a.split("=")[1].split(",")]   # top=3,5,8 -> measured in one pass

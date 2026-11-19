@@ -113,6 +113,8 @@ SITUATIONS = [
 
 # two-rule questions (19 Nov): one question, two articles, and the answer needs BOTH ("A&B": all of them, each may be "A|C").
 # Chosen and checked against the article texts before the first run; not used to tune the search or the reranker.
+# A benchmark, reported by `eval_retrieval.py multi`, never a gate: not in the nightly recall check (sync.SETS) or in CI.
+# Production path at top 5 on 19 Nov: 6/10 questions, 16/20 articles.
 MULTI = [
     # how long (L1225-17), and no dismissal during it (L1225-4)
     ("I'm pregnant: how long is my maternity leave, and can my employer fire me during it?", "en", "L1225-17&L1225-4"),
