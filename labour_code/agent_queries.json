@@ -82,5 +82,15 @@
  "We work 7-hour shifts without any break at all. Is that allowed?": "rest periods and breaks during working hours",
  "On fait des journées de 7 heures sans aucune pause. Est-ce autorisé ?": "journée de 7 heures sans pause autorisée",
  "My manager emailed me that I'm fired from tomorrow, without any meeting. Can he do that?": "dismissal without meeting notice period",
- "Mon responsable m'a écrit que je suis licencié à partir de demain, sans entretien. Il peut faire ça ?": "licenciement sans entretien préalable sans motif"
+ "Mon responsable m'a écrit que je suis licencié à partir de demain, sans entretien. Il peut faire ça ?": "licenciement sans entretien préalable sans motif",
+ "I'm pregnant: how long is my maternity leave, and can my employer fire me during it?": "maternity leave duration how long",
+ "Je suis enceinte : combien dure mon congé maternité, et mon employeur peut-il me licencier pendant ce congé ?": "durée du congé maternité",
+ "I'm being dismissed after two years: how much notice do I get, and am I owed severance pay?": "dismissal notice period two years employment",
+ "Je suis licencié après deux ans d'ancienneté : quel préavis ai-je, et ai-je droit à une indemnité de licenciement ?": "préavis licenciement et indemnité de licenciement après deux ans d'ancienneté",
+ "What is the most I can be made to work in one day, and in one week?": "maximum working hours per day and per week",
+ "Quelle est la durée maximale de travail par jour, et par semaine ?": "durée maximale de travail par jour et par semaine",
+ "After how many hours a week does overtime start, and how much extra is it paid?": "overtime hours per week threshold and overtime pay rate",
+ "À partir de combien d'heures par semaine commencent les heures supplémentaires, et de combien sont-elles majorées ?": "À partir de combien d'heures par semaine commencent les heures supplémentaires et de combien sont-elles majorées",
+ "I'm resigning: how much notice do I have to give, and will my unused holiday be paid?": "notice period for resignation",
+ "Je démissionne : quel préavis dois-je faire, et mes congés non pris me seront-ils payés ?": "préavis de démission"
 }

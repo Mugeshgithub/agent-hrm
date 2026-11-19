@@ -834,6 +834,19 @@ def still_unsupported_after_the_retry_the_policy_found_is_quoted_and_a_failed_ch
     assert policy_grounding.review("December?", NEEDS, [WINDOW], checker("I think it is fine."), False) == ("unchecked", NEEDS, "no usable answer")
 
 
+# ---------- the labour search's answer key: a two-rule question needs every article it names (labour_code/retrieval_cases.py) ----------
+
+@test
+def a_two_rule_question_is_found_only_when_every_article_it_needs_is_found():
+    import retrieval_cases                                  # labour_code/ is on the path once sync.py is imported
+    assert retrieval_cases.needed("L1225-17&L1225-4|L1225-5") == [["L1225-17"], ["L1225-4", "L1225-5"]]
+    top5 = ["L1225-17", "L1225-1", "L3141-3", "L1225-5", "L1234-9"]
+    assert retrieval_cases.groups_found("L1225-17&L1225-4|L1225-5", top5) == 2      # both: the second by its alternative
+    assert retrieval_cases.groups_found("L1225-17&L1225-4", top5) == 1                # one of two is not a hit
+    assert retrieval_cases.groups_found("L1471-1|L1235-7", ["L1235-7"]) == 1          # a one-rule question reads as before
+    assert len(retrieval_cases.MULTI) == 10 and all(len(retrieval_cases.needed(e)) == 2 for _, _, e in retrieval_cases.MULTI)
+
+
 # ---------- the nightly labour-code sync: what holds a night, who is told, and the date in law answers (labour_code/sync.py, law_status.py) ----------
 
 @test

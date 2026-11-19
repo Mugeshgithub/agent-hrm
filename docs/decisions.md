@@ -156,3 +156,10 @@ Entries marked *backfilled* were written afterwards from the code, the git histo
 - **Why:** an OpenAI outage took every law answer down, and the keyword search needs only Postgres. But keywords alone find less: top 5, production path, 37/50, 17/20, 9/14 (full search 50/50, 20/20, 14/14), and no paid-leave wording found L3141-3; before the flag, 1 of 3 runs with every embedding failing answered from L7213-1. With it, the new eval (paid leave, every embedding failing): 20 runs, no wrong figure: 18 right from a second search, 2 "can't confirm, please ask HR".
 - **Cost:** while it lasts, a quarter of questions get no right article, and answers are slower: the agent searches again (24 searches in 10 runs) and the number guard sends back figures no search returned. The log gives only the error's kind: an OpenAI key error's text shows part of the key.
 - **Change it when:** the log shows the fallback often: add a second embedding service rather than relying on keywords.
+
+### 23. Two-rule questions in the labour search's answer key (PR #56, 2026-11-19)
+- **Chose:** 10 questions (5 English, 5 French) that each need two articles; one counts as found only when both are in the top 5 (`"A&B"` in [labour_code/retrieval_cases.py](../labour_code/retrieval_cases.py), `eval_retrieval.py multi`). Picked and checked against the article texts before the first run.
+- **Not chosen:** adding them to the nightly recall gate yet, or tuning the search or the reranker on them.
+- **Why:** every earlier question needed one article. Production path, top 5, 3 runs: 6/10 questions with both articles (16/20 articles), the same each run. Missed: the 35-hour week next to overtime pay (EN, FR), unused holiday when resigning (the agent's query named only the notice), L1225-4 (L1225-4-4 came instead).
+- **Cost:** 10 more agent queries saved. A real turn can search twice, which this does not count, so it may understate what users get.
+- **Change it when:** a fix is tried (one search per rule, or a larger top k): measure it here first, then add the set to the nightly gate.
