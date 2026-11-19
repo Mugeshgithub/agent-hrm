@@ -49,7 +49,8 @@ flowchart LR
 - **Output guardrails:** code checks each reply before it is shown. A number of days, an amount or a count that no
   tool returned this turn, a law article that wasn't retrieved, a rules question answered without searching, or
   a reason the policy doesn't contain (a second model checks that one). A failing reply is sent back once; if it
-  still fails, a safe reply replaces it.
+  still fails, a safe reply replaces it. Each time a guard acts, a row records which guard and how it ended, never
+  the rejected reply, and the Langfuse trace gets a `guard` tag. `python guard_report.py` shows them per day.
 - **Policy search (RAG):** the policy is cut at its headings and embedded with OpenAI `text-embedding-3-small`.
 - **Labour-law search (RAG):** the Code du travail in Postgres with pgvector. Meaning plus French keyword search, the
   question rewritten by Claude Haiku, the results re-ordered by Haiku, 5 articles back. Law answers say how recent
@@ -73,7 +74,7 @@ flowchart LR
 - **Every fix is measured:** the eval it targets runs at least 10 times before and after, then the full suite. For example,
   "which requests are pending?" went from 17/20 to 20/20 with the count check.
 - **Unit tests** cover everything that has no AI in it (roles, leave rules, onboarding, retention, the guardrails):
-  137 in `unit_tests.py` plus four more test files. They run on every push and pull request, with a type check and
+  141 in `unit_tests.py` plus four more test files. They run on every push and pull request, with a type check and
   a build of the web app.
 
 ## Tech stack

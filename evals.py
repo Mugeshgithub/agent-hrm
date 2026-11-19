@@ -32,6 +32,7 @@ import leave_admin
 import onboarding
 import outbox
 import policy_gaps
+import guard_events
 import policy_store
 import pdf_text
 import welcome
@@ -203,6 +204,7 @@ def reset_memory():
     contracts.init_contracts()
     employee_files.init_files()
     policy_gaps.init_gaps()
+    guard_events.init_events()
     policy_store.init_policy()
     collective_agreement.init_agreement()
     jobs.init_jobs()
@@ -227,6 +229,7 @@ def reset_memory():
         conn.execute("DELETE FROM employee_file_views")
         conn.execute("DELETE FROM employee_files")
         conn.execute("DELETE FROM policy_gaps")
+        conn.execute("DELETE FROM guard_events")
         conn.execute("DELETE FROM policy_versions")
         conn.execute("DELETE FROM agreement_sections")
         conn.execute("DELETE FROM collective_agreements")

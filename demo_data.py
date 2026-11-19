@@ -19,6 +19,7 @@ import collective_agreement
 import contracts
 import documents
 import employee_files
+import guard_events
 import jobs
 import onboarding
 import outbox
@@ -47,6 +48,7 @@ def init_all(reset=False):
     checkins.init_checkins()
     employee_files.init_files()
     policy_gaps.init_gaps()
+    guard_events.init_events()
     policy_store.init_policy()
     collective_agreement.init_agreement()
     leave_admin.init_leave_admin()   # public holidays and the balance history
@@ -70,6 +72,7 @@ def init_all(reset=False):
             conn.execute("DELETE FROM employee_file_views")
             conn.execute("DELETE FROM employee_files")
             conn.execute("DELETE FROM policy_gaps")
+            conn.execute("DELETE FROM guard_events")
             conn.execute("DELETE FROM policy_versions")
             conn.execute("DELETE FROM agreement_sections")
             conn.execute("DELETE FROM collective_agreements")

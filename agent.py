@@ -38,6 +38,7 @@ import onboarding
 import law_status
 import policy_gaps
 import policy_grounding
+import guard_events
 from citations import ungrounded_citations, RETRY_MESSAGE, SAFE_REPLY
 from documents import asks_if_genuine, says_cannot_tell, GENUINE_ANSWER, GENUINE_RETRY
 from tools import (
@@ -904,6 +905,7 @@ def answer_turn(user_text):
         card_retry_used = False
         number_retry_used = False
         grounding_retry_used = False
+        guards = guard_events.Turn()      # what each guard did in this answer, written once it is final (guard_events.py)
         last_turn["tools_called"] = []
         last_turn["refused"] = []
         last_turn["policy_searches"] = []     # what search_policy was asked and whether it found a section (policy_gaps.py)
@@ -931,15 +933,18 @@ def answer_turn(user_text):
                 if role == "new_hire" and asks_if_genuine(user_text) and not says_cannot_tell(reply):
                     if not genuine_retry_used:
                         genuine_retry_used = True
+                        guards.retried("genuine")
                         print("  [guard] asked about a document being genuine, no \"can't tell\": asking again")
                         messages.append({"role": "user", "content": GENUINE_RETRY})
                         continue
                     print("  [guard] still no \"can't tell\": replying with the fixed answer")
                     reply = GENUINE_ANSWER
+                    guards.ended("genuine", "replaced")
 
                 # guardrail in code: a question about the company's rules is searched, not asked back or handed to HR (search_first.py). One retry.
                 if not search_retry_used and (fix := search_first.nudge(role, user_text, last_turn["tools_called"])):
                     search_retry_used = True
+                    guards.retried("search", recheck=lambda: search_first.nudge(role, user_text, last_turn["tools_called"]))
                     print("  [guard] a rules question was answered without searching: asking again")
                     messages.append({"role": "user", "content": fix})
                     continue
@@ -947,6 +952,7 @@ def answer_turn(user_text):
                 # guardrail in code: a question about where a new hire's contract stands, or a request to send one, is answered from get_contract_status (contract_first.py). One retry.
                 if not contract_retry_used and (fix := contract_first.nudge(role, user_text, last_turn["tools_called"])):
                     contract_retry_used = True
+                    guards.retried("contract", recheck=lambda: contract_first.nudge(role, user_text, last_turn["tools_called"]))
                     print("  [guard] a contract question was answered without checking the contract: asking again")
                     messages.append({"role": "user", "content": fix})
                     continue
@@ -955,6 +961,7 @@ def answer_turn(user_text):
                 # book dates that use no days (booking_first.py). One retry.
                 if not booking_retry_used and (fix := booking_first.nudge(role, user_text, reply, last_turn["tools_called"], turn_sources)):
                     booking_retry_used = True
+                    guards.retried("booking", recheck=lambda: booking_first.nudge(role, user_text, reply, last_turn["tools_called"], turn_sources))
                     print("  [guard] asked before booking, or offered to book dates that use no days: asking again")
                     messages.append({"role": "user", "content": fix})
                     continue
@@ -964,6 +971,7 @@ def answer_turn(user_text):
                 # one was made (existing_first.py). One retry.
                 if not existing_retry_used and (fix := existing_first.nudge(role, user_text, reply, last_turn["tools_called"], turn_sources, bool(pending_action))):
                     existing_retry_used = True
+                    guards.retried("existing", recheck=lambda: existing_first.nudge(role, user_text, reply, last_turn["tools_called"], turn_sources, bool(pending_action)))
                     print("  [guard] the reply about existing requests or the card does not match the tools: asking again")
                     messages.append({"role": "user", "content": fix})
                     continue
@@ -973,6 +981,7 @@ def answer_turn(user_text):
                 # (approval_first.py). One retry.
                 if not decision_retry_used and (fix := approval_first.nudge(role, user_text, reply, last_turn["tools_called"], turn_sources)):
                     decision_retry_used = True
+                    guards.retried("approval", recheck=lambda: approval_first.nudge(role, user_text, reply, last_turn["tools_called"], turn_sources))
                     print("  [guard] the reply does not match the requests pending now (asked to decide one, or left one out of the list): asking again")
                     messages.append({"role": "user", "content": fix})
                     continue
@@ -980,6 +989,7 @@ def answer_turn(user_text):
                 # guardrail in code: the app shows ONE card, however many items it lists: the reply never talks about several cards (confirm_batch.py). One retry.
                 if not card_retry_used and (fix := confirm_batch.nudge(pending_action, reply)):
                     card_retry_used = True
+                    guards.retried("card", recheck=lambda: confirm_batch.nudge(pending_action, reply))
                     print("  [guard] the reply talks about several cards and the app shows one: asking again")
                     messages.append({"role": "user", "content": fix})
                     continue
@@ -988,6 +998,7 @@ def answer_turn(user_text):
                 # gives the policy or the law, labelled (see document_answers.py). One retry.
                 if not document_retry_used and (fix := document_answers.nudge(last_turn["tools_called"], reply)):
                     document_retry_used = True
+                    guards.retried("document", recheck=lambda: document_answers.nudge(last_turn["tools_called"], reply))
                     print("  [guard] the answer about the document needs another part: asking again")
                     messages.append({"role": "user", "content": fix})
                     continue
@@ -995,6 +1006,7 @@ def answer_turn(user_text):
                 # guardrail in code: the collective agreement was searched and did not answer: the reply says so (collective_agreement.py). One retry.
                 if not agreement_retry_used and (fix := collective_agreement.nudge(last_turn["tools_called"], reply)):
                     agreement_retry_used = True
+                    guards.retried("agreement", recheck=lambda: collective_agreement.nudge(last_turn["tools_called"], reply))
                     print("  [guard] the answer does not say what the collective agreement says: asking again")
                     messages.append({"role": "user", "content": fix})
                     continue
@@ -1003,26 +1015,31 @@ def answer_turn(user_text):
                 bad = ungrounded_citations(reply, turn_sources)
                 if bad and not citation_retry_used:
                     citation_retry_used = True
+                    guards.retried("citation", bad)
                     print(f"  [guard] ungrounded citation {bad}: asking the agent to search first")
                     messages.append({"role": "user", "content": RETRY_MESSAGE.format(articles=", ".join(bad))})
                     continue
                 if bad:
                     print(f"  [guard] still ungrounded {bad}: replying safely instead")
                     reply = SAFE_REPLY
+                    guards.ended("citation", "safe_reply", bad)
 
                 # guardrail in code: never show a number of days or an amount that no tool returned in this turn (number_guard.py).
                 # One retry with the tools' own figures, then the sentence is replaced by them.
                 action, shown = number_guard.review(reply, turn_sources, user_text, number_retry_used)
                 if action != "ok":
-                    print(f"  [guard] {number_guard.ungrounded(reply, turn_sources, user_text)} was not returned by any tool in this turn")
+                    figures = number_guard.ungrounded(reply, turn_sources, user_text)
+                    print(f"  [guard] {figures} was not returned by any tool in this turn")
                 if action == "retry":
                     number_retry_used = True
+                    guards.retried("number", {"figures": len(figures)})
                     print("  [guard] asking the agent to use the tools' figures")
                     messages.append({"role": "user", "content": shown})
                     continue
                 if action == "replaced":
                     print("  [guard] still not from a tool: replacing it with the tools' figures")
                     reply = shown
+                    guards.ended("number", "replaced", {"figures": len(figures)})
 
                 # guardrail in code: a policy answer gives no reason, condition, deadline or consequence that this turn's tool results do not contain;
                 # a second model reads it (policy_grounding.py). One retry naming those parts, then their sentences are taken out or the policy is quoted.
@@ -1033,12 +1050,19 @@ def answer_turn(user_text):
                     print(f"  [guard] grounding check {action} in {time.time() - started:.1f}s, ${usage['check_cost'] - spent:.5f}{found}")
                     if action == "retry":
                         grounding_retry_used = True
+                        guards.retried("grounding", {"claims": len(detail)})
                         messages.append({"role": "user", "content": shown})
                         continue
                     if action == "replaced":
                         reply = shown
+                        guards.ended("grounding", "replaced", {"claims": len(detail)})
                 if document_retry_used or agreement_retry_used or search_retry_used or contract_retry_used or booking_retry_used or decision_retry_used or existing_retry_used or card_retry_used or number_retry_used or grounding_retry_used:       # a retry note was sent: the reply must not talk about it
                     reply = document_answers.strip_correction(reply)
+
+                # every guard that acted on this answer: one row each, and a tag on the Langfuse trace (guard_events.py)
+                if (found := guards.write(LOGGED_IN_ID, role, tracing.current_trace_id())):
+                    tracing.tag_trace(guard_events.tags(found))
+                    print(f"  [guard events] {found}")
 
                 # the labour search was keyword-only in this turn: a line says the answer may be incomplete, added by code like the date below
                 if (limited_line := law_status.limited_line(turn_sources, user_text)):
@@ -1157,4 +1181,5 @@ if __name__ == "__main__":
     hr_queries.init_profiles()   # job details, used by lookup_colleague
     employees.init_records()
     leave_admin.init_leave_admin()   # public holidays and the balance history
+    guard_events.init_events()       # one row each time a guard acts on a reply
     chat()
