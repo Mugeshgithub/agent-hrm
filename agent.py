@@ -14,7 +14,7 @@ import anthropic
 import payslips
 from roles import tools_for, allowed
 from db import init_db
-from memory import init_memory, init_summaries, save_message, build_context
+from memory import init_memory, init_summaries, save_message, build_context, load_recent
 from notifications import init_notifications, notify_decision, notify_ticket_reply, show_unread
 from policy import search_policy, embed as embed_texts
 import application_summary
@@ -36,6 +36,7 @@ import tool_guard
 import needs_you
 import onboarding
 import law_status
+import named_days
 import policy_gaps
 import policy_grounding
 import guard_events
@@ -574,6 +575,13 @@ def run_pending(accept):
 
 
 @observe()   # each tool call shows up as a step inside the trace
+def days_named_by_person():
+    """The person's own words that name the days to check dates against (named_days.py): this message, or the one before it. From the saved
+    chat, so the app's notes to the assistant never count."""
+    said = [m["content"] for m in reversed(load_recent(LOGGED_IN_ID, 6)) if m["role"] == "user"]
+    return named_days.words_naming_days(said)
+
+
 def run_tool(name, tool_input):
     # defence in depth: even if a tool call gets through, the role and the source rules must allow it
     if (refused := tool_guard.refusal(current_role(), name, last_turn["tools_called"], collective_agreement.on_file())):
@@ -597,6 +605,9 @@ def run_tool(name, tool_input):
         if start < date.today():
             return {"error": f"Start date {start} is in the past. Today is {date.today()}. "
                              "If the user didn't give a year, use the next upcoming date."}
+        # the dates fall on the weekdays the person named ("next Thursday and Friday"): the model gets the weekday wrong (named_days.py)
+        if (wrong := named_days.mismatch(days_named_by_person(), start, end, date.today())):
+            return {"error": wrong}
         kind = tool_input.get("leave_type") or "casual"
         if kind not in LEAVE_TYPES:
             return {"error": f"Unknown leave type '{kind}'"}
@@ -624,6 +635,9 @@ def run_tool(name, tool_input):
             return {"error": f"Leave cannot start in the past. Today is {date.today()}."}
         if end < start:
             return {"error": "End date is before start date"}
+        # refuse BEFORE asking: dates on other weekdays than the ones the person named never get a card (named_days.py)
+        if (wrong := named_days.mismatch(days_named_by_person(), start, end, date.today())):
+            return {"error": f"{wrong} Nothing was submitted and no confirmation was shown."}
         # refuse BEFORE asking: dates that already have a pending or approved request never get a card (the refusal used to come only after Confirm)
         if (found := existing_request(LOGGED_IN_ID, start.isoformat(), end.isoformat())):
             return {"error": f"You already have request {found['id']} ({found['status']}), {found['leave_type']} leave, "
