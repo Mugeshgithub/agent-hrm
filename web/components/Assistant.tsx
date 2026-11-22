@@ -5,6 +5,7 @@ import { ArrowUp, X } from "lucide-react";
 import { api, fetcher } from "@/lib/api";
 import { leaveLabel, range } from "@/lib/format";
 import { useMe } from "./Me";
+import { MicButton, useSpeechSupported } from "./MicButton";
 
 type Item = { input: Record<string, any>; details: Record<string, any> };
 // one card, however many actions it lists: `details` and `input` are the first item's, `items` is every one, in order
@@ -27,6 +28,8 @@ export function Assistant({ open, onClose }: { open: boolean; onClose: () => voi
   const [msgs, setMsgs] = useState<Msg[] | null>(null);
   const [text, setText] = useState("");
   const [busy, setBusy] = useState(false);
+  const [voiceProblem, setVoiceProblem] = useState<string | null>(null);
+  const speech = useSpeechSupported();            // no speech recognition in this browser (Firefox): no mic button
   const end = useRef<HTMLDivElement>(null);
   const input = useRef<HTMLTextAreaElement>(null);
 
@@ -114,8 +117,15 @@ export function Assistant({ open, onClose }: { open: boolean; onClose: () => voi
           <textarea ref={input} rows={1} value={text} onChange={(e) => setText(e.target.value)} placeholder="Ask a question…"
                     onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(text); } }}
                     className="max-h-32 flex-1 resize-none bg-transparent outline-none placeholder:text-ink-faint" aria-label="Your question" />
+          {speech && <MicButton text={text} disabled={busy} onProblem={setVoiceProblem}
+                                onText={setText} />}
           <button className="btn-primary h-8 w-8 px-0" disabled={!text.trim() || busy} aria-label="Send"><ArrowUp size={16} /></button>
         </div>
+        {speech && (
+          <p className="mt-1.5 text-xs text-ink-soft" role={voiceProblem ? "alert" : undefined}>
+            {voiceProblem ?? "Your browser's speech service transcribes it. We only get what you send."}
+          </p>
+        )}
       </form>
     </aside>
   );

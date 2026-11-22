@@ -261,6 +261,13 @@ Known weak spots, measured and not fixed yet. Remove a line when its fix merges.
 - **Cost:** a name with digits, a comma or a colon is refused; existing names are not changed. Eval: a name that is an instruction, 3/3, and 3/3 too with the tags turned off (the model ignored it by itself): the tags are defence in depth, not shown to be what stops it. The welcome prompt also lists only the new hire's own steps when asked what is missing ("welcome: after a reminder" 10/10, main 6/10).
 - **Change it when:** a real candidate cannot type their name.
 
+### 37. Voice input: the browser's speech recognition fills the chat box, and nothing more (PR #67, 2026-11-22)
+- **Chose:** a hold-to-talk mic in the assistant's input ([MicButton.tsx](../web/components/MicButton.tsx)) using the browser's Web Speech API. The transcript goes into the text box; the person edits it and presses Send. It never sends, and it cannot reach a card: a spoken "Confirm" is an ordinary message, which expires a waiting card (server test). Hidden where the browser has no speech recognition (Firefox). Language: French when the page or the browser is French, English otherwise (the app has no French UI yet). No spoken replies.
+- **Not chosen:** recording audio and transcribing it on our server (we would hold voice data); auto-send; voice commands for cards.
+- **Why:** the smallest version that keeps the confirmation card a click.
+- **Cost:** the audio goes to the browser's speech service (Google for Chrome, Apple for Safari), not to us; the notice under the box says so. Not tested on a real phone.
+- **Change it when:** people need it where the browser has no speech service, or the app gets a French UI (the language then follows the page).
+
 ### 38. Dates: code works out the days a person names, the prompt gets a dated list, and a reply's weekdays are checked (PR #68, 2026-11-22)
 - **Chose:** [date_check.py](../date_check.py). The prompt gets today and the next 14 days, each with its weekday and week (this week, next week, the week after next). Code works out the days a person names and adds them to their message: a weekday on its own is the first one after today; "next Friday" is next week's, "the Friday after next" the week after's; "Monday to Wednesday next week" is next week's; "vendredi prochain" is the first one after today. A reply that pairs a weekday with a date is checked with real date maths: one retry, then a safe reply. `app_clock.today()` lets the evals fix today.
 - **Not chosen:** rules in the prompt alone (with the dated list and rules, 315/350: on a Monday the model booked next week's Thursday for "next Thursday" whatever the rule said, and this week's Friday for "the Friday after next", 0-1/10).
