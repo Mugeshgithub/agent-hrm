@@ -44,6 +44,7 @@ import search_first
 import tool_guard
 import tools
 import date_check
+import sensitive
 import untrusted
 from eval_retry import MAX_RETRIED, retry_report, run_with_retry
 from judge_parse import verdict
@@ -298,7 +299,7 @@ def fake_tools():
              "get_pending_requests", "get_team_member_balance", "decide_leave",
              "get_open_tickets", "reply_to_ticket", "search_labour_code", "lookup_colleague", "get_balance_history", "get_holidays",
              "get_needs_attention", "get_my_onboarding", "get_contract_status", "get_my_documents", "read_my_document", "search_collective_agreement",
-             "get_job_pipeline"]
+             "get_job_pipeline", "escalate_to_hr"]
     tools = [{"name": n, "description": n, "input_schema": {"type": "object", "properties": {}}}
              for n in names]
     for t in tools:
@@ -328,14 +329,14 @@ def names_for(role):
 def employee_gets_no_manager_or_hr_tools():
     names = names_for("employee")
     assert not names & (MANAGER_ONLY | HR_ONLY | STAFF_ONLY), names
-    assert "apply_leave" in names and len(names) == 18, names
+    assert "apply_leave" in names and "escalate_to_hr" in names and len(names) == 19, names
 
 
 @test
 def manager_gets_team_tools_but_not_hr_tools():
     names = names_for("manager")
     assert MANAGER_ONLY <= names and not names & HR_ONLY, names
-    assert len(names) == 23 and "get_job_pipeline" in names, names
+    assert len(names) == 24 and "get_job_pipeline" in names and "escalate_to_hr" in names, names
 
 
 @test
@@ -3064,6 +3065,29 @@ def a_weekday_written_next_to_a_date_is_checked_and_a_named_day_is_worked_out_by
     rows = date_check.table(sunday)
     assert "- Sunday 22 November 2026 (2026-11-22), this week (today)" in rows and "- Monday 23 November 2026 (2026-11-23), next week" in rows
     assert "- Sunday 6 December 2026 (2026-12-06), the week after next" in rows and rows.count("\n- ") == date_check.DAYS_AHEAD + 1
+
+
+@test
+def a_sensitive_matter_goes_to_hr_and_a_routine_question_does_not():
+    kinds = {"My manager keeps making comments about me": "harassment", "je suis en arrêt maladie, on peut me licencier ?": "dismissal",
+             "A colleague touched me at the party and I felt uncomfortable": "harassment", "I think I wasn't promoted because I'm pregnant": "discrimination",
+             "Mon manager m'humilie devant toute l'équipe": "harassment", "I've been burned out and depressed for weeks, I can't cope": "health",
+             "I got a written warning yesterday, what happens now?": "disciplinary", "Clara is paid more than me for the same job": "pay_dispute",
+             "Can I fire Hugo for being late all the time?": "dismissal", "On m'a convoqué à un entretien préalable": "dismissal",
+             "Je suis payée moins que mon collègue pour le même poste": "pay_dispute", "My team lead yells at me in meetings": "harassment",
+             "J'ai reçu un avertissement de mon manager": "disciplinary", "I'm being treated differently because of my accent": "discrimination"}
+    for said, kind in kinds.items():
+        assert sensitive.classify("employee", said) == kind and sensitive.classify("manager", said) == kind, said
+        assert sensitive.classify("hr", said) is None and sensitive.classify("new_hire", said) is None, said      # HR are the people it goes to
+    for said in ["How many sick days do I have?", "Do I need a medical certificate for 3 days off?", "Book me sick leave tomorrow, I have a fever",
+                 "What is my notice period if I resign?", "Combien de jours de congé maladie me reste-t-il ?", "My overtime is missing from my October 2026 payslip.",
+                 "Why is my pay lower this month?", "What is Hugo's salary?", "Is there a policy on harassment training?", "When is the next fire drill?",
+                 "Can I see my team's pending leave requests?", "Book me Friday off as casual leave", "", None]:
+        assert sensitive.classify("employee", said) is None, said
+    fr = sensitive.reply("dismissal", "je suis en arrêt maladie, on peut me licencier ?", "HR-0042", ("Narmadha", "narmadha@cognivexai.eu"))
+    assert "transmets aux RH" in fr and "HR-0042" in fr and "narmadha@cognivexai.eu" in fr and "3114" not in fr
+    en = sensitive.reply("health", "I feel suicidal", None, ("HR", ""))
+    assert "passing it to HR" in en and "3114" in en                                    # self-harm: the crisis line, at once
 
 
 if __name__ == "__main__":

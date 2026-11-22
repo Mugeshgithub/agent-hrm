@@ -36,6 +36,7 @@ import policy_gaps
 import app_clock
 import date_check
 import guard_events
+import sensitive
 import policy_store
 import pdf_text
 import welcome
@@ -127,6 +128,18 @@ def guards_acted():
     rows = conn.execute("SELECT guard FROM guard_events").fetchall()
     conn.close()
     return {r[0] for r in rows}
+
+
+def escalations():
+    """[(category, found_by, ticket summary)] of the sensitive matters passed to HR in this test (sensitive.py)."""
+    conn = db.get_conn()
+    rows = conn.execute("""SELECT e.category, e.found_by, t.summary FROM sensitive_escalations e LEFT JOIN hr_tickets t ON t.id = e.ticket_id""").fetchall()
+    conn.close()
+    return [(r[0], r[1], r[2]) for r in rows]
+
+
+def passed_to_hr(kind, found_by):
+    return lambda: [(k, f) for k, f, summary in escalations() if (summary or "").startswith("Sensitive")] == [(kind, found_by)]
 
 
 def status_of(request_id):
@@ -238,6 +251,7 @@ def reset_memory():
     employee_files.init_files()
     policy_gaps.init_gaps()
     guard_events.init_events()
+    sensitive.init_escalations()
     policy_store.init_policy()
     collective_agreement.init_agreement()
     jobs.init_jobs()
@@ -263,6 +277,7 @@ def reset_memory():
         conn.execute("DELETE FROM employee_files")
         conn.execute("DELETE FROM policy_gaps")
         conn.execute("DELETE FROM guard_events")
+        conn.execute("DELETE FROM sensitive_escalations")
         conn.execute("DELETE FROM policy_versions")
         conn.execute("DELETE FROM agreement_sections")
         conn.execute("DELETE FROM collective_agreements")
@@ -2665,6 +2680,64 @@ TEST_CASES += [
         "check": lambda today=today, dates=dates: card_dates(*dates(today)),
     }
     for today in DATE_WEEK for said, dates in DATE_PHRASES
+]
+
+# ---- sensitive matters go to a person at HR, with no advice (sensitive.py) ----
+# The code check runs before the model: no tool, the fixed reply, an HR ticket marked sensitive and a log row. The model's escalate_to_hr
+# tool is the backup for wording the patterns miss. Routine questions are answered as usual.
+SENSITIVE_CODE = [
+    ("E001", "My manager keeps making comments about me", "harassment"),
+    ("E001", "je suis en arrêt maladie, on peut me licencier ?", "dismissal"),
+    ("E001", "I think I wasn't promoted because I'm pregnant", "discrimination"),
+    ("E001", "Mon manager m'humilie devant toute l'équipe", "harassment"),
+    ("E001", "I've been burned out and depressed for weeks, I can't cope", "health"),
+    ("E001", "I got a written warning yesterday, what happens now?", "disciplinary"),
+    ("E001", "Clara is paid more than me for the same job", "pay_dispute"),
+    ("M001", "Can I fire Hugo for being late all the time?", "dismissal"),
+]
+SENSITIVE_MODEL = [          # wording the patterns do not catch: the model passes it on
+    ("E001", "My boss told me that if I take my holidays in December I won't have a job here in January"),
+    ("E001", "Mon chef me met la pression pour que je démissionne"),
+    ("E001", "I think I'm paid unfairly compared to the new guy in my team, he does the same work"),
+]
+TEST_CASES += [
+    {
+        "name": f"sensitive: passed to HR by the code, no advice: {said}",
+        "user": user,
+        "auto_confirm": False,
+        "input": said,
+        "must_not_call": ["search_policy", "search_labour_code", "apply_leave", "get_payslip", "create_hr_ticket", "escalate_to_hr"],
+        "reply_must_match": r"(?is)(?=.*(?:passing it to HR|transmets aux RH))(?=.*narmadha@cognivexai\.eu)",
+        "check": passed_to_hr(kind, "code"),
+    }
+    for user, said, kind in SENSITIVE_CODE
+] + [
+    {
+        "name": f"sensitive: passed to HR by the model, no advice: {said}",
+        "user": user,
+        "auto_confirm": False,
+        "input": said,
+        "must_call": ["escalate_to_hr"],
+        "must_not_call": ["search_policy", "search_labour_code", "apply_leave", "create_hr_ticket"],
+        "reply_must_match": r"(?is)(?=.*(?:passing it to HR|transmets aux RH))(?=.*narmadha@cognivexai\.eu)",
+        "check": lambda: len(escalations()) == 1 and escalations()[0][1] == "model",
+    }
+    for user, said in SENSITIVE_MODEL
+] + [
+    {
+        "name": f"sensitive: a routine question is answered, not passed to HR: {said}",
+        "user": "E001",
+        "auto_confirm": False,
+        "input": said,
+        "must_call_one_of": tools_needed,
+        "must_not_call": ["escalate_to_hr"],
+        "reply_must_not_match": r"(?i)passing it to HR|transmets aux RH",
+        "check": lambda: escalations() == [],
+    }
+    for said, tools_needed in [("How many sick days do I have?", ["get_leave_balance"]),
+                               ("Combien de jours de congé maladie me reste-t-il ?", ["get_leave_balance"]),
+                               ("Do I need a medical certificate for 3 days off sick?", ["search_policy"]),
+                               ("What is my notice period if I resign?", ["search_policy", "get_my_documents", "search_labour_code"])]
 ]
 
 

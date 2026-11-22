@@ -268,6 +268,13 @@ Known weak spots, measured and not fixed yet. Remove a line when its fix merges.
 - **Cost:** about 600 more tokens in the cached prompt. "Next Friday" on a Monday is read as next week's Friday, not this week's: people use both, and this one is now fixed in code.
 - **Change it when:** people say the app picks the wrong one of two readings, or another phrase ("in two weeks", "le 1er") needs working out.
 
+### 39. Sensitive matters go to a person at HR, decided in code before the model (PR #69, 2026-11-22)
+- **Chose:** [sensitive.py](../sensitive.py). Harassment, discrimination, a person's health, disciplinary matters, dismissal and pay disputes about a specific person (English and French patterns, indirect wording included) get a fixed reply before the model is called: it is passed to HR, with HR's contact (the first active HR person); an HR ticket marked "Sensitive" carries the person's words; a row goes in `sensitive_escalations`. Nothing is searched or booked. The model's `escalate_to_hr` tool is the backup for wording the patterns miss; it runs alone and the app gives the reply. A mention of self-harm adds 3114 and 112.
+- **Not chosen:** the model alone deciding (a miss gives advice on a dismissal or a harassment case); a second model on every message (cost, and the patterns catch the measured wording).
+- **Why:** these need a person, and an answer from the policy or the law can do harm.
+- **Cost:** not for HR (the people it hands over to), a new hire's chat or a candidate. "My overtime is missing from my payslip" stays a payslip question (ticket offered); "pay dispute" means pay about a specific person. The patterns can catch a routine question with the same words ("dismiss"); the backup can search first (1 in 10 before the prompt said "first, before any search", then 30/30).
+- **Change it when:** a routine question gets passed to HR, or HR wants these somewhere other than the ticket inbox.
+
 ### 42. employees_tests run in UTC (PR #72, 2026-11-24)
 - **Chose:** `TZ=UTC` set at the top of [employees_tests.py](../employees_tests.py), like CI and the server.
 - **Not chosen:** freezing the date in each test (6 tests, more code); changing the app's dates (a separate fix: see below).
