@@ -32,6 +32,7 @@ HOME = json.dumps({"found": True, "sections": [
      "is not counted as leave."}]}, ensure_ascii=False)
 DEC = "Can I take paid leave in December?"
 FRIDAYS = "And can I work from home on Fridays?"
+HUGO = "Does Hugo's contract allow remote work?"
 SICK = "If I am off sick for 3 days, do I need a medical certificate?"
 
 CASES = jt.CASES + [
@@ -98,6 +99,18 @@ CASES = jt.CASES + [
     ("good: carry-forward, silent on two years in a row", True, "Can I carry forward casual leave two years in a row?",
      "Up to 5 unused casual leave days can be carried forward to the next year. The policy does not say whether that can happen two years in a row, so HR "
      "can confirm.", [jt.POLICY_CARRY]),
+    # 22 Nov: HR asked "Does Hugo's contract allow remote work?"; no tool reads his contract. The assistant's own access is not a rule
+    ("good: the assistant can't read the contract, then the policy (real, 22 Nov)", True, HUGO,
+     "I can't read Hugo's employment contract here; HR can open it in the app. The company policy says employees may work from home up to 2 days per "
+     "week with manager approval.", [HOME]),
+    ("good: the assistant can't read the contract, the policy labelled", True, HUGO,
+     "I don't have access to other people's documents, so I can't tell you what Hugo's contract says. From the company policy (Work from home): up to 2 "
+     "days per week, with manager approval.", [HOME]),
+    ("bad: the policy said to apply unless the contract differs (real, 22 Nov)", False, HUGO,
+     "I can't read Hugo's contract. The policy allows up to 2 days per week with manager approval, so this is what applies unless his contract says "
+     "something different.", [HOME]),
+    ("bad: the contract said to allow it", False, HUGO,
+     "I can't open Hugo's contract, but it will allow remote work in line with the policy: up to 2 days per week with manager approval.", [HOME]),
     ("good: the search missed, and the reply says so", True, DEC,
      "The policy sections I found don't say whether paid leave can be taken in December. Would you like me to raise an HR ticket to ask?", [MISSED]),
 ]

@@ -3,6 +3,11 @@
 One entry for each choice that is hard to undo or that someone will ask "why?" about. Every merged PR gets an entry.
 Entries marked *backfilled* were written afterwards from the code, the git history and what we measured. Where we never tried the other option, the entry says so.
 
+## Open items
+Known weak spots, measured and not fixed yet. Remove a line when its fix merges.
+- **Grounding check: "decided on a case-by-case basis" is caught 2 to 4 times in 10** (grounding_tests.py, 22 Nov; 3/10 on main before #63). An invented basis for the manager's decision can reach the person. See entry 29.
+- **Eval "category: when HR has not set it the assistant says so and gives each case" fails about 1 time in 10** (9/10 on main, 8/10 on #64's branch, 22 Nov; one CI retry on #64). The reply sometimes gives one notice period and mentions the other only as an "unless". Not fixed: CI's one retry covers it.
+
 ### 1. Our own agent loop, not LangChain (backfilled, 2026-10-29)
 - **Chose:** a plain loop in [agent.py](../agent.py) on the Anthropic API: ask the model, run its tools, repeat, stop after 8 calls.
 - **Not chosen:** an agent framework such as LangChain or LangGraph (never tried, so this is a judgment, not a measurement).
@@ -212,3 +217,10 @@ Entries marked *backfilled* were written afterwards from the code, the git histo
 - **Why:** "approve: the request pending now gets the card" had no retries in 40 main runs, then 2 in a row; "employee is not offered manager features" had none before #62, whose forced search fired on "Can I see my team's pending leave requests?" every time.
 - **Cost:** `about_others` is a regex: a capitalised word before "'s leave" or after "leave for" counts as a name, except holiday words, weekdays and months. A rules question about a named person ("Does Hugo's contract allow…") is not searched by the code; the model can still search.
 - **Change it when:** a rules question goes unsearched because it names someone, or a French phrasing about the team gets a forced search.
+
+### 31. The forced search skips other people's data for employees only; finding a person is not a rules lookup (PR #65, 2026-11-22)
+- **Chose:** `about_others` applies to the employee role only ([search_first.py](../search_first.py)): a manager or HR asking "Does Hugo's contract allow remote work?" is searched. `lookup_colleague` and `get_contract_status` no longer count as having looked the rules up. The grounding check no longer reports what the assistant can or cannot read ("I can't read Hugo's contract").
+- **Not chosen:** keeping the skip for every role (#64): HR's rules questions naming someone went unsearched.
+- **Why:** HR's question was answered 3/3 with no search. The model looked Hugo up (or the contract's stage, "his contract hasn't been drafted yet") and offered to search. Once searched, the check flagged "I can't read Hugo's contract", and 2 of 3 replies became the bare policy quote.
+- **Cost:** grounding_tests.py with 4 new cases, 10 runs: 0/280 good flagged, 6/290 bad missed. New evals 5/5 each.
+- **Change it when:** a manager's question about their own team's data gets a forced search it does not need.

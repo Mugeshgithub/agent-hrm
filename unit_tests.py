@@ -1652,6 +1652,13 @@ def a_question_about_someone_elses_data_is_a_role_question_and_is_not_searched()
               "Peux-tu me montrer les absences de ma collègue ?", "Puis-je voir les congés des autres ?"]:
         assert search_first.about_others(q), q
         assert not search_first.needs_lookup("employee", q, []), q
+    # only an employee: a manager or HR asking a rules question that names someone is still searched
+    for q in ["Does Hugo's contract allow remote work?", "Is Emma's sick leave allowed to exceed 6 days?", "Can I approve Hugo's leave during his notice period?"]:
+        assert search_first.needs_lookup("hr", q, []) and search_first.needs_lookup("manager", q, []), q
+        assert not search_first.needs_lookup("employee", q, []), q
+    assert search_first.needs_lookup("hr", "Does Hugo's contract allow remote work?", ["lookup_colleague"])      # finding Hugo is not searching the rules
+    assert search_first.needs_lookup("hr", "Does Hugo's contract allow remote work?", ["lookup_colleague", "get_contract_status"])
+    assert not search_first.needs_lookup("hr", "Does Hugo's contract allow remote work?", ["lookup_colleague", "get_leave_balance"])
     # questions about the rules that look alike are still searched: a possessive that is not a person's data, a holiday's name
     for q in ["Do I need my manager's approval to work from home?", "Can an employee's leave be refused?", "Do I need HR's approval for unpaid leave?",
               "Can I carry my leave over to next year?", "Am I allowed to work from home on Fridays?", "How many days of sick leave do I get?",
