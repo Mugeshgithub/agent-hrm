@@ -1383,7 +1383,7 @@ TEST_CASES = [
         "input": "And can I work from home on Fridays?",
         "must_call": ["search_policy"],
         "reply_must_match": r"(?is)(?=.*\b(doesn'?t|does not|don'?t|do not|isn'?t|not)\b[^.]{0,30}\b(say|specify|specified|mention|mentioned|state|cover|set|list)\b[^.]{0,40}\b(days?|fridays?|which)\b)(?=.*\b(ask|check|speak|talk|contact|confirm|discuss|consult)\w*\b[^.]{0,40}\b(manager|HR)\b)",
-        "reply_must_not_match": r"(?i)\byes\b|fridays? (would|should|will)? ?(be )?(allowed|fine|ok|okay|possible)|\bso (you )?(can|could)\b|you (can|could) (work from home|do it|do so|choose) on fridays|any day",
+        "reply_must_not_match": r"(?i)\byes\b|fridays? (would|should|will)? ?(be )?(allowed|fine|ok|okay|possible)|\bso (you )?(can|could)\b(?! (ask|check|speak|talk|contact|confirm|discuss|consult))|you (can|could) (work from home|do it|do so|choose) on fridays|any day",
     },
     {
         "name": "policy: finds sick leave from 'doctor's note' without the word sick",
