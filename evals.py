@@ -24,6 +24,7 @@ import checkins
 import contracts
 import documents
 import collective_agreement
+import conversations
 import employee_files
 import employees
 import hr_queries
@@ -197,8 +198,10 @@ def reset_memory():
     memory.init_memory()
     memory.init_summaries()
     notifications.init_notifications()
+    conversations.init_conversations()
     conn = db.get_conn()
     with conn:
+        conn.execute("DELETE FROM daily_spend")          # the daily cap must not stop a long run of tests as one person
         conn.execute("DELETE FROM chat_messages")
         conn.execute("DELETE FROM chat_summaries")
         conn.execute("DELETE FROM notifications")
@@ -263,11 +266,16 @@ from citations import ungrounded_citations
 from judge import judge   # LLM-as-judge: every claim supported by this turn's tool results (tested in judge_tests.py)
 
 
+# a reply that only announces a search ("I'll search the policy first") instead of answering
+SEARCHING_FIRST = r"(?i)\b(I'll|I will|let me|I need to|I'm going to)\s+(first\s+)?(search|check|look)"
+
+
 @observe(name="eval-test")   # one trace per test, with every Claude call and tool inside
-def run_agent(user_text, test_name="", session_role=None):
+def run_agent(user_text, test_name="", session_role=None, before=()):
     """Run one user message through the REAL agent (agent.handle_message), starting from the user's
     saved history, exactly as production does. session_role is "new_hire" for a welcome-link test.
-    Returns (reply_text, tools_called, trace_id)."""
+    `before`: messages sent first in the same conversation, so their tool calls and results are in its history, as the server keeps them.
+    Returns (reply_text, tools_called, trace_id) of the last message."""
     role = session_role or agent.get_employee(agent.convo().user_id)["role"]
     # trace_name = the test's name, so you can search for it in Langfuse
     with propagate_attributes(trace_name=test_name, user_id=agent.convo().user_id,
@@ -277,6 +285,8 @@ def run_agent(user_text, test_name="", session_role=None):
         agent.start_session(agent.convo().user_id, session_role)  # load history + summary, fresh budget: like a real login
         agent.convo().session_id = RUN_ID                # keep all tests of this run in one Langfuse session
         agent.EXTRA_TAGS = ["eval"]
+        for earlier in before:
+            agent.handle_message(earlier)
         reply = agent.handle_message(user_text)
         return reply, list(agent.convo().last_turn["tools_called"]), trace_id
 
@@ -1337,6 +1347,30 @@ TEST_CASES = [
         "must_call": ["get_needs_attention"],
         "must_not_call": ["reply_to_ticket"],
         "reply_must_match": r"(?is)(?=.*\bcars?\b)(?=.*\b(3|three)\b)",
+    },
+    {
+        # Nov 22: with the whole conversation kept, this follow-up was answered from the search one message earlier, and the search guard then
+        # made the model search again, once replying only "I'll search the policy first". The earlier search answers it: no new search, no stall.
+        "name": "policy: 'And how many sick days?' after a policy answer is answered from that search",
+        "user": "E001",
+        "auto_confirm": False,
+        "before": ["What does the company policy say about casual leave and sick leave?"],
+        "input": "And how many sick days?",
+        "must_not_call": ["search_policy"],
+        "reply_must_match": r"(?<![\d.])6(?![\d.])|\bsix\b",
+        "reply_must_not_match": SEARCHING_FIRST,
+        "check": lambda: agent.convo().last_turn["earlier_sources"] or agent.convo().last_turn["tools_called"],   # backed by the earlier search, or looked up now
+    },
+    {
+        # the history searched sick leave only: working from home needs a new search, and the person never reads "I'll search first"
+        "name": "policy: a follow-up on another topic gets a new search",
+        "user": "E001",
+        "auto_confirm": False,
+        "before": ["What does the company policy say about sick leave?"],
+        "input": "And can I work from home on Fridays?",
+        "must_call": ["search_policy"],
+        "reply_must_match": r"(?i)\b(2|two)\b[^.]{0,30}\b(days?|per week|a week)",
+        "reply_must_not_match": SEARCHING_FIRST,
     },
     {
         "name": "policy: finds sick leave from 'doctor's note' without the word sick",
@@ -2507,7 +2541,7 @@ def attempt(case):
     else:
         restore = embedding_down() if case.get("embedding_fails") else None     # the labour search falls back to French keywords
         try:
-            reply, tools_called, trace_id = run_agent(case["input"], test_name=case["name"], session_role=case.get("role"))
+            reply, tools_called, trace_id = run_agent(case["input"], test_name=case["name"], session_role=case.get("role"), before=case.get("before", ()))
         finally:
             if restore:
                 restore()
@@ -2549,7 +2583,8 @@ def attempt(case):
     # wrong attributions that keyword checks miss. Leave, permission and pay tests are checked by code.
     # "judge_facts": what the assistant was told in its instructions about this person (not by a tool), so the judge knows it is true
     if case["name"].startswith(("policy:", "law:")):
-        for issue in judge(case["input"], reply, agent.convo().last_turn["sources"] + list(case.get("judge_facts", []))):
+        last = agent.convo().last_turn
+        for issue in judge(case["input"], reply, last["sources"] + last.get("earlier_sources", []) + list(case.get("judge_facts", []))):
             problems.append(f"judge: unsupported \"{issue.get('claim')}\" ({issue.get('why')})")
     if "check" in case and not case["check"]():
         problems.append("database check failed")

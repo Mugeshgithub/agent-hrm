@@ -7,6 +7,8 @@
 #                          deleted, so the next request sends the same prefix and the prompt cache keeps working, on any copy
 #   pending_actions        the confirmation card: pending -> confirmed, cancelled or expired, each by ONE conditional UPDATE, so a double click
 #                          or two copies can never run the same card twice
+#   daily_spend            what each person's messages cost today (UTC), added after every message: the daily cap holds across conversations
+#                          and copies of the server
 # Every query names the tenant AND the user: another person's conversation or card id finds nothing.
 # Plain SQL that SQLite and Postgres both run (the Postgres move changes only the id columns and the connection, in db.py).
 import json
@@ -29,8 +31,8 @@ def fresh_usage():
 
 
 def fresh_turn():
-    # refused: calls the code refused (not counted as called)
-    return {"tools_called": [], "sources": [], "refused": [], "policy_searches": []}
+    # refused: calls the code refused (not counted as called); earlier_sources: the searches from earlier messages an answer rested on (search_first.py)
+    return {"tools_called": [], "sources": [], "refused": [], "policy_searches": [], "earlier_sources": []}
 
 
 @dataclass
@@ -101,6 +103,15 @@ def init_conversations():
             )
         """)
         conn.execute("CREATE INDEX IF NOT EXISTS pending_actions_by_conversation ON pending_actions (conversation_id, status)")
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS daily_spend (
+                tenant_id TEXT NOT NULL,
+                user_id TEXT NOT NULL,
+                day TEXT NOT NULL,               -- UTC date, 2026-11-22
+                dollars REAL NOT NULL DEFAULT 0,
+                PRIMARY KEY (tenant_id, user_id, day)
+            )
+        """)
     conn.close()
 
 
@@ -210,6 +221,31 @@ def save(c, now=None):
                                       stamp(moment + timedelta(minutes=CARD_MINUTES)))).lastrowid
     conn.close()
     c.stored, c.restarted = len(c.messages), False
+
+
+def _day(now=None):
+    return f"{(now or now_utc()).astimezone(timezone.utc):%Y-%m-%d}"
+
+
+def spent_today(tenant, user_id, now=None):
+    """Dollars this person's messages cost today (UTC), in every conversation."""
+    conn = get_conn()
+    row = conn.execute("SELECT dollars FROM daily_spend WHERE tenant_id = ? AND user_id = ? AND day = ?",
+                       (tenant, user_id, _day(now))).fetchone()
+    conn.close()
+    return row["dollars"] if row else 0.0
+
+
+def add_spend(tenant, user_id, dollars, now=None):
+    """Add one message's cost to today's total, in ONE statement: two messages finishing at once both count."""
+    if dollars <= 0:
+        return
+    conn = get_conn()
+    with conn:
+        conn.execute("""INSERT INTO daily_spend (tenant_id, user_id, day, dollars) VALUES (?, ?, ?, ?)
+                        ON CONFLICT (tenant_id, user_id, day) DO UPDATE SET dollars = daily_spend.dollars + excluded.dollars""",
+                     (tenant, user_id, _day(now), dollars))
+    conn.close()
 
 
 def release(c):

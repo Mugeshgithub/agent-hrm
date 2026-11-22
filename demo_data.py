@@ -98,6 +98,7 @@ def init_all(reset=False):
             conn.execute("DELETE FROM onboarding_steps")
             conn.execute("DELETE FROM onboardings")
             conn.execute("DELETE FROM rate_events")
+            conn.execute("DELETE FROM daily_spend")
             # the chat is kept, but a card waiting from before names requests that are gone
             conn.execute("UPDATE pending_actions SET status = 'expired' WHERE status = 'pending'")
         conn.close()

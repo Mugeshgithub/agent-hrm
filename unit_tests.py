@@ -1625,27 +1625,114 @@ def a_policy_section_has_a_title_some_text_and_a_sane_size():
 
 
 @test
-def a_rules_question_answered_without_any_tool_is_sent_back_once_to_search_and_nothing_else_is():
-    nudge = search_first.nudge
+def a_rules_question_answered_without_any_tool_needs_a_lookup_and_nothing_else_does():
+    needs = search_first.needs_lookup
     for q in ["Do I need a doctor's note?", "Can I get a company car?", "How many days of sick leave do I get?", "Am I allowed to work from home on Fridays?",
-              "is there a dress code", "What happens if I am late?", "Do I have to use my casual leave before March"]:
-        assert nudge("employee", q, []) == search_first.SEARCH_FIRST, q                       # a rules question, no tool: search first
-    assert nudge("manager", "Can I get a company car?", []) and nudge("hr", "Can I get a company car?", [])
-    assert nudge("employee", "Do I need a doctor's note?", ["search_policy"]) is None        # it searched
-    assert nudge("employee", "How many days do I have left?", ["get_leave_balance"]) is None   # any tool is a look-up: not this guard's business
-    assert nudge("employee", "Can I get a company car?", ["read_my_document"]) is None
+              "is there a dress code", "What happens if I am late?", "Do I have to use my casual leave before March", "And how many sick days?"]:
+        assert needs("employee", q, []), q                                                      # a rules question, no tool: look it up
+    assert needs("manager", "Can I get a company car?", []) and needs("hr", "Can I get a company car?", [])
+    assert not needs("employee", "Do I need a doctor's note?", ["search_policy"])             # it searched
+    assert not needs("employee", "How many days do I have left?", ["get_leave_balance"])      # any tool is a look-up: not this guard's business
+    assert not needs("employee", "Can I get a company car?", ["read_my_document"])
     for q in ["Hi", "Thanks, that is all", "I need to take leave next week", "Show me my payslip for October", "What is my balance?", "Who is my manager?", ""]:
-        assert nudge("employee", q, []) is None, q                                            # not a question about the rules
-    assert nudge("new_hire", "Do I need a doctor's note?", []) is None                      # a welcome-link session cannot search the policy
-    assert nudge("employee", None, []) is None
+        assert not needs("employee", q, []), q                                                  # not a question about the rules
+    assert not needs("new_hire", "Do I need a doctor's note?", [])                            # a welcome-link session cannot search the policy
+    assert not needs("employee", None, [])
+
+
+SICK = {"title": "Sick leave", "text": "Employees get 6 sick leave days per calendar year (1 January to 31 December)."}
+CASUAL = {"title": "Casual leave", "text": "Employees get 12 casual leave days per calendar year."}
+HOME = {"title": "Work from home", "text": "Employees may work from home up to 2 days a week."}
+
+
+def searched_turn(question, result, tool="search_policy", answer="Here is what the policy says."):
+    """One earlier message of a conversation, as it is stored: the question, the search, its result and the answer."""
+    use_id = f"toolu_{abs(hash((question, tool))) % 10**8}"
+    return [{"role": "user", "content": question},
+            {"role": "assistant", "content": [{"type": "tool_use", "id": use_id, "name": tool, "input": {"question": question}}]},
+            {"role": "user", "content": [{"type": "tool_result", "tool_use_id": use_id, "content": json.dumps(result)}]},
+            {"role": "assistant", "content": [{"type": "text", "text": answer}]}]
 
 
 @test
-def the_search_first_note_is_hidden_from_the_person_and_lets_an_off_topic_question_through():
-    note = search_first.SEARCH_FIRST
-    assert "do not apologise" in note and "not from the person" in note                      # the person never sees it, so the reply must not talk about it
-    assert "search_policy" in note and "search_labour_code" in note and "ticket" in note
-    assert "ignore this note" in note                                                          # "can I bring my dog?" may be off topic: it is not forced into a search
+def the_history_answers_a_follow_up_only_when_an_earlier_search_found_the_best_section_found_now():
+    history = (searched_turn("What are the casual and sick leave rules?", {"found": True, "sections": [CASUAL, SICK]})
+               + searched_turn("My balance?", {"casual": 8, "sick": 4}, tool="get_leave_balance")
+               + [{"role": "user", "content": "And how many sick days?"}])
+    earlier = search_first.earlier_results(history)
+    assert earlier == [("search_policy", {"found": True, "sections": [CASUAL, SICK]})], earlier     # a search only: a balance may have changed since
+    assert search_first.already_found([SICK], earlier)
+    assert search_first.already_found([SICK, HOME], earlier)                                        # the runner-up is a neighbour, not the topic
+    assert search_first.already_found([], earlier)                                                  # nothing new to find: the earlier search stands
+    assert not search_first.already_found([HOME, SICK], earlier)                                    # the best match is a section it never saw: search again
+    assert not search_first.already_found([SICK], [])                                               # no search in the history
+    assert not search_first.already_found([], [])
+    assert not search_first.already_found([SICK], earlier, agreement_on_file=True)                  # the agreement comes first and was not searched
+    with_agreement = earlier + [("search_collective_agreement", {"found": False})]
+    assert search_first.already_found([SICK], with_agreement, agreement_on_file=True)
+    assert search_first.earlier_results([{"role": "user", "content": "hi"}]) == []
+
+
+class FakeChecker:
+    """The grounding check's model: says every reply is supported, and keeps what it was shown."""
+    def __init__(self):
+        self.seen = []
+        self.messages = self
+
+    def create(self, **request):
+        self.seen.append(request["messages"][0]["content"])
+        return types.SimpleNamespace(content=[FakeBlock(type="text", text='{"unsupported": []}')],
+                                     usage=types.SimpleNamespace(input_tokens=10, output_tokens=10))
+
+
+def follow_up(history, question, replies, found_now):
+    """One message through the real agent loop, with a fake Claude and a fake policy search. Returns (agent, fake Claude, checker, conversation, reply)."""
+    import demo_data
+    with contextlib.redirect_stdout(io.StringIO()):
+        demo_data.init_all()
+        agent = load_agent()
+        agent.client = fake = FakeAgentClaude(replies)
+        agent.grounding_client = checker = FakeChecker()
+        agent.search_policy = lambda q, **options: list(found_now)
+        c = agent.Conversation("E001", messages=history + [{"role": "user", "content": question}])
+        with agent.using(c):
+            reply = agent.answer_turn(question)
+    return agent, fake, checker, c, reply
+
+
+@test
+def a_rules_question_answered_without_a_search_is_searched_by_the_code_and_answered_again():
+    stalled = "I'll search the policy first."
+    agent, fake, checker, c, reply = follow_up([], "How many sick days do I get?", [stalled, "You get 6 sick leave days per calendar year."], [SICK])
+    assert reply == "You get 6 sick leave days per calendar year.", reply
+    assert len(fake.calls) == 2 and c.last_turn["tools_called"] == ["search_policy"]
+    sent = fake.calls[1]["messages"]
+    use, result = sent[-2]["content"][0], sent[-1]["content"][0]
+    assert (use["type"], use["name"], use["input"]) == ("tool_use", "search_policy", {"question": "How many sick days do I get?"}), use
+    assert result["tool_use_id"] == use["id"] and "6 sick leave days" in result["content"]
+    assert stalled not in json.dumps(sent) and stalled not in json.dumps(c.messages)          # never shown, never saved, never sent again
+    assert c.messages[-1]["content"][0]["text"] == reply and checker.seen                       # the answer after the search is grounding-checked
+
+
+@test
+def a_follow_up_answered_from_a_search_already_in_the_conversation_stands_and_is_checked_against_it():
+    history = searched_turn("What are the casual and sick leave rules?", {"found": True, "sections": [CASUAL, SICK]})
+    agent, fake, checker, c, reply = follow_up(history, "And how many sick days?", ["You get 6 sick leave days per calendar year."], [SICK])
+    assert reply == "You get 6 sick leave days per calendar year.", reply                       # the 6 is in the earlier search: the number guard lets it through
+    assert len(fake.calls) == 1 and c.last_turn["tools_called"] == []                           # no new search, no second call
+    assert "6 sick leave days" in checker.seen[0]                                               # the grounding check read the earlier search
+    assert c.last_turn["earlier_sources"] and "Sick leave" in c.last_turn["earlier_sources"][0]
+    # a figure the earlier search does not have is still caught
+    agent, fake, checker, c, reply = follow_up(history, "And how many sick days?", ["You get 9 sick days.", "You get 6 sick leave days per calendar year."], [SICK])
+    assert len(fake.calls) == 2 and reply == "You get 6 sick leave days per calendar year.", reply
+
+
+@test
+def a_follow_up_on_a_topic_the_history_never_searched_gets_a_new_search():
+    history = searched_turn("Can I work from home?", {"found": True, "sections": [HOME]})
+    agent, fake, checker, c, reply = follow_up(history, "And how many sick days do I get?", ["About 5, I think.", "You get 6 sick leave days per calendar year."], [SICK])
+    assert len(fake.calls) == 2 and c.last_turn["tools_called"] == ["search_policy"], fake.calls
+    assert reply == "You get 6 sick leave days per calendar year." and "About 5" not in json.dumps(c.messages)
 
 
 # ---------- number guard: a number of days or an amount in euros must come from a tool in this turn ----------
@@ -2843,6 +2930,51 @@ def two_peoples_turns_at_the_same_time_never_see_each_others_identity():
             t.start()
             t.join()
     assert found == {"bare": None, "copied": "E003"}, found
+
+
+# ---------- the daily cap: $0.50 a person a day, counted in the database ----------
+
+@test
+def the_daily_spend_adds_up_per_person_per_day_in_the_database():
+    conversations.init_conversations()
+    conn = db.get_conn()
+    with conn:
+        conn.execute("DELETE FROM daily_spend")
+    conn.close()
+    today, tomorrow = datetime(2026, 11, 22, 23, 0, tzinfo=timezone.utc), datetime(2026, 11, 23, 0, 30, tzinfo=timezone.utc)
+    conversations.add_spend("default", "E001", 0.25, today)
+    conversations.add_spend("default", "E001", 0.125, today)
+    conversations.add_spend("default", "E001", 0, today)
+    assert conversations.spent_today("default", "E001", today) == 0.375
+    assert conversations.spent_today("default", "E001", tomorrow) == 0.0                     # a new day (UTC) starts from nothing
+    assert conversations.spent_today("default", "E002", today) == 0.0                        # per person
+    assert conversations.spent_today("other-company", "E001", today) == 0.0                  # and per company
+    # two copies adding at the same moment: both count (one INSERT ... ON CONFLICT each, no read-then-write)
+    threads = [threading.Thread(target=conversations.add_spend, args=("default", "E002", 0.01, today)) for _ in range(10)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert abs(conversations.spent_today("default", "E002", today) - 0.10) < 1e-9
+
+
+@test
+def past_fifty_cents_today_a_person_gets_the_limit_message_without_a_model_call_and_others_carry_on():
+    import demo_data
+    with contextlib.redirect_stdout(io.StringIO()):
+        demo_data.init_all(reset=True)
+        agent = load_agent()
+        agent.client = FakeAgentClaude(["Hello Hugo!"])
+        with agent.using(agent.Conversation("E002")):
+            assert agent.handle_message("Hi") == "Hello Hugo!"
+        # 10 tokens in and 10 out at Haiku 4.5's prices: what the message cost is in Hugo's day
+        assert abs(conversations.spent_today(conversations.TENANT, "E002") - (10 * agent.PRICE_IN + 10 * agent.PRICE_OUT) / 1e6) < 1e-12
+        conversations.add_spend(conversations.TENANT, "E001", agent.MAX_COST_PER_DAY)
+        agent.client = fake = FakeAgentClaude([])
+        with agent.using(agent.Conversation("E001")):                                       # a brand-new conversation: its own budget is untouched
+            reply = agent.handle_message("How many casual days do I have?")
+    assert "today's usage limit" in reply and fake.calls == [], reply
+    assert agent.MAX_COST_PER_DAY == 0.50
 
 
 if __name__ == "__main__":

@@ -9,6 +9,7 @@ import contextvars
 import json
 import os
 import time
+import uuid
 from contextlib import contextmanager
 from datetime import date, datetime
 import anthropic
@@ -16,6 +17,7 @@ import anthropic
 import payslips
 from roles import tools_for, allowed
 from db import init_db
+import conversations
 from conversations import Conversation, fresh_usage
 from memory import init_memory, init_summaries, save_message, build_context, load_recent
 from notifications import init_notifications, notify_decision, notify_ticket_reply, show_unread
@@ -73,6 +75,7 @@ GROUNDING_PRICE_OUT = 0.50
 grounding_client = anthropic.Anthropic(timeout=10, max_retries=1)
 
 MAX_COST_PER_CONVERSATION = 0.10   # dollars; stop the chat if it costs more
+MAX_COST_PER_DAY = 0.50            # dollars per person per day (UTC), all conversations together: a new conversation every 2 hours can't go past it
 MAX_CALLS_PER_MESSAGE = 8          # stop runaway tool loops on one question
 
 
@@ -951,6 +954,24 @@ def answer_turn(user_text):
         last_turn["policy_searches"] = []     # what search_policy was asked and whether it found a section (policy_gaps.py)
         last_turn["sources"] = turn_sources
         last_turn["question"] = user_text   # the employee's own words, used by the labour-law search
+        # the search results already in this conversation (search_first.py): an answer from them is checked against them, like this turn's
+        earlier = search_first.earlier_results(messages)
+        last_turn["earlier_sources"] = []
+
+        def run_uses(uses):
+            """Run the tool calls of one assistant message (dicts: id, name, input); their results are the next user message."""
+            tool_results = []
+            for use in uses:
+                print(f"  [tool call] {use['name']} {use['input']}")
+                if tool_guard.refusal(role, use["name"], last_turn["tools_called"], collective_agreement.on_file()):
+                    last_turn["refused"].append(use["name"])         # refused by the code: it did nothing, so it is not "called"
+                else:
+                    last_turn["tools_called"].append(use["name"])
+                result = run_tool(use["name"], use["input"])          # run_tool applies the same refusal
+                turn_sources.append(json.dumps(result, ensure_ascii=False))
+                tool_results.append({"type": "tool_result", "tool_use_id": use["id"], "content": json.dumps(result)})
+            return {"role": "user", "content": tool_results}
+
         while calls_this_message < MAX_CALLS_PER_MESSAGE:
             calls_this_message += 1
             response = client.messages.create(
@@ -982,13 +1003,26 @@ def answer_turn(user_text):
                     reply = GENUINE_ANSWER
                     guards.ended("genuine", "replaced")
 
-                # guardrail in code: a question about the company's rules is searched, not asked back or handed to HR (search_first.py). One retry.
-                if not search_retry_used and (fix := search_first.nudge(role, user_text, last_turn["tools_called"])):
+                # guardrail in code: a question about the company's rules answered with no tool at all is searched by the code (search_first.py). When a
+                # search earlier in this conversation already returned what it finds, the reply stands and the checks below read those results too.
+                # Otherwise the reply is dropped (never shown, never saved), the code's search goes into the turn and the model answers again: the
+                # person never reads "I'll search the policy first". Once per message.
+                if not search_retry_used and search_first.needs_lookup(role, user_text, last_turn["tools_called"]):
                     search_retry_used = True
-                    guards.retried("search", recheck=lambda: search_first.nudge(role, user_text, last_turn["tools_called"]))
-                    print("  [guard] a rules question was answered without searching: asking again")
-                    messages.append({"role": "user", "content": fix})
-                    continue
+                    agreement = collective_agreement.on_file()
+                    if search_first.already_found(search_policy(user_text), earlier, agreement):
+                        last_turn["earlier_sources"] = [json.dumps(r, ensure_ascii=False) for _, r in earlier]
+                        print("  [guard] a rules question answered from the searches already in this conversation: checked against them")
+                    else:
+                        guards.retried("search", recheck=lambda: search_first.needs_lookup(role, user_text, last_turn["tools_called"]))
+                        print("  [guard] a rules question was answered without searching: the code searches, the model answers again")
+                        messages.pop()
+                        names = (["search_collective_agreement"] if agreement else []) + ["search_policy"]     # the agreement first, as tool_guard.py wants
+                        uses = [{"type": "tool_use", "id": f"toolu_{uuid.uuid4().hex[:24]}", "name": n, "input": {"question": user_text}} for n in names]
+                        messages.append({"role": "assistant", "content": uses})
+                        messages.append(run_uses(uses))
+                        continue
+                sources = turn_sources + last_turn["earlier_sources"]      # what this answer may rest on: this turn's results, or the earlier searches it came from
 
                 # guardrail in code: a question about where a new hire's contract stands, or a request to send one, is answered from get_contract_status (contract_first.py). One retry.
                 if not contract_retry_used and (fix := contract_first.nudge(role, user_text, last_turn["tools_called"])):
@@ -1052,8 +1086,8 @@ def answer_turn(user_text):
                     messages.append({"role": "user", "content": fix})
                     continue
 
-                # guardrail in code: never show an article the agent didn't retrieve in this turn
-                bad = ungrounded_citations(reply, turn_sources)
+                # guardrail in code: never show an article the agent didn't retrieve in this turn (or in the earlier search the answer rests on)
+                bad = ungrounded_citations(reply, sources)
                 if bad and not citation_retry_used:
                     citation_retry_used = True
                     guards.retried("citation", bad)
@@ -1065,11 +1099,11 @@ def answer_turn(user_text):
                     reply = SAFE_REPLY
                     guards.ended("citation", "safe_reply", bad)
 
-                # guardrail in code: never show a number of days or an amount that no tool returned in this turn (number_guard.py).
+                # guardrail in code: never show a number of days or an amount that no tool returned in this turn, or the earlier search the answer rests on (number_guard.py).
                 # One retry with the tools' own figures, then the sentence is replaced by them.
-                action, shown = number_guard.review(reply, turn_sources, user_text, number_retry_used)
+                action, shown = number_guard.review(reply, sources, user_text, number_retry_used)
                 if action != "ok":
-                    figures = number_guard.ungrounded(reply, turn_sources, user_text)
+                    figures = number_guard.ungrounded(reply, sources, user_text)
                     print(f"  [guard] {figures} was not returned by any tool in this turn")
                 if action == "retry":
                     number_retry_used = True
@@ -1084,9 +1118,9 @@ def answer_turn(user_text):
 
                 # guardrail in code: a policy answer gives no reason, condition, deadline or consequence that this turn's tool results do not contain;
                 # a second model reads it (policy_grounding.py). One retry naming those parts, then their sentences are taken out or the policy is quoted.
-                if policy_grounding.applies(last_turn["tools_called"]):
+                if policy_grounding.applies(last_turn["tools_called"]) or (last_turn["earlier_sources"] and policy_grounding.applies([n for n, _ in earlier])):
                     started, spent = time.time(), usage["check_cost"]
-                    action, shown, detail = policy_grounding.review(user_text, reply, turn_sources, grounding_model, grounding_retry_used)
+                    action, shown, detail = policy_grounding.review(user_text, reply, sources, grounding_model, grounding_retry_used)
                     found = f": {[f.get('claim') for f in detail]}" if action in ("retry", "replaced") else f" ({detail})" if action == "unchecked" else ""
                     print(f"  [guard] grounding check {action} in {time.time() - started:.1f}s, ${usage['check_cost'] - spent:.5f}{found}")
                     if action == "retry":
@@ -1097,7 +1131,7 @@ def answer_turn(user_text):
                     if action == "replaced":
                         reply = shown
                         guards.ended("grounding", "replaced", {"claims": len(detail)})
-                if document_retry_used or agreement_retry_used or search_retry_used or contract_retry_used or booking_retry_used or decision_retry_used or existing_retry_used or card_retry_used or number_retry_used or grounding_retry_used:       # a retry note was sent: the reply must not talk about it
+                if document_retry_used or agreement_retry_used or contract_retry_used or booking_retry_used or decision_retry_used or existing_retry_used or card_retry_used or number_retry_used or grounding_retry_used:       # a retry note was sent: the reply must not talk about it
                     reply = document_answers.strip_correction(reply)
 
                 # every guard that acted on this answer: one row each, and a tag on the Langfuse trace (guard_events.py)
@@ -1122,22 +1156,7 @@ def answer_turn(user_text):
                       f"${cost_so_far():.4f} so far")
                 return reply
 
-            tool_results = []
-            for block in response.content:
-                if block.type == "tool_use":
-                    print(f"  [tool call] {block.name} {block.input}")
-                    if tool_guard.refusal(role, block.name, last_turn["tools_called"], collective_agreement.on_file()):
-                        last_turn["refused"].append(block.name)         # refused by the code: it did nothing, so it is not "called"
-                    else:
-                        last_turn["tools_called"].append(block.name)
-                    result = run_tool(block.name, block.input)          # run_tool applies the same refusal
-                    turn_sources.append(json.dumps(result, ensure_ascii=False))
-                    tool_results.append({
-                        "type": "tool_result",
-                        "tool_use_id": block.id,
-                        "content": json.dumps(result),
-                    })
-            messages.append({"role": "user", "content": tool_results})
+            messages.append(run_uses([{"id": b.id, "name": b.name, "input": b.input} for b in response.content if b.type == "tool_use"]))
 
         print("\nAgent: Sorry, that took too many steps. Please try rephrasing.")
         return "(stopped: too many steps)"
@@ -1157,13 +1176,18 @@ def handle_message(user_text):
     """One user message, exactly as production runs it. chat(), the web server and the evals all call this,
     so the tests always check the real agent, never a copy."""
     c = convo()
-    # budget check BEFORE calling the model, so we never pay for a refused request
+    # budget checks BEFORE calling the model, so we never pay for a refused request
     if cost_so_far() >= MAX_COST_PER_CONVERSATION:
         reply = ("This conversation has reached its usage limit. "
                  "Please start a new one with 'login' or contact HR.")
         print(f"\nAgent: {reply}")
         return reply
+    if conversations.spent_today(c.tenant, c.user_id) >= MAX_COST_PER_DAY:
+        reply = "You have reached today's usage limit for the assistant. It resets at midnight (UTC); for anything urgent, contact HR."
+        print(f"\nAgent: {reply}")
+        return reply
 
+    spent = cost_so_far()      # what this message costs is added to the person's day below
     # keep the chat short mid-session: rebuild from the database when it grows
     if len(c.messages) > 20:
         c.summary, c.messages = build_context(c.user_id, client, MODEL)
@@ -1171,7 +1195,10 @@ def handle_message(user_text):
 
     c.messages.append({"role": "user", "content": user_text})
     save_message(c.user_id, "user", user_text)
-    return answer_turn(user_text)
+    try:
+        return answer_turn(user_text)
+    finally:     # counted even when the answer failed half-way: those calls were paid for
+        conversations.add_spend(c.tenant, c.user_id, cost_so_far() - spent)
 
 
 def chat():
@@ -1220,4 +1247,5 @@ if __name__ == "__main__":
     employees.init_records()
     leave_admin.init_leave_admin()   # public holidays and the balance history
     guard_events.init_events()       # one row each time a guard acts on a reply
+    conversations.init_conversations()   # the daily spend
     chat()
