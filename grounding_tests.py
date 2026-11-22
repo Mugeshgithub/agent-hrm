@@ -26,7 +26,12 @@ MISSED = json.dumps({"found": True, "sections": [
      "requires a medical certificate, uploaded within 3 days of returning to work."}]}, ensure_ascii=False)
 CARRY = json.dumps({"found": True, "sections": [json.loads(jt.POLICY_HOLIDAYS)["sections"][0], json.loads(jt.POLICY_CARRY)["sections"][0]]}, ensure_ascii=False)
 BALANCE = json.dumps({"paid": {"available": 12.5}})
+HOME = json.dumps({"found": True, "sections": [
+    {"title": "Work from home", "text": "Employees may work from home up to 2 days per week with manager approval. Work from home is not counted as leave."},
+    {"title": "Public holidays", "text": "The company follows the published public holiday calendar. If a public holiday falls during approved leave, that day "
+     "is not counted as leave."}]}, ensure_ascii=False)
 DEC = "Can I take paid leave in December?"
+FRIDAYS = "And can I work from home on Fridays?"
 SICK = "If I am off sick for 3 days, do I need a medical certificate?"
 
 CASES = jt.CASES + [
@@ -68,6 +73,31 @@ CASES = jt.CASES + [
      "No. Unused sick leave cannot be carried forward and lapses on 31 December. Only up to 5 unused casual leave days carry over to the next year.", [jt.POLICY_CARRY]),
     ("bad: the sick-leave lapse date given to casual leave (a real retry, 17 Nov)", False, "Can I carry my unused casual leave over to next year?",
      "Up to 5 unused casual leave days carry over to the next year. Any more than that will lapse on 31 December.", [jt.POLICY_CARRY]),
+    # ---- the policy is silent on a detail (which days): the silence is said, never turned into a permission or a condition (CI on main, 22 Nov) ----
+    ("bad: 'doesn't specify which days, so Fridays would be allowed if your manager agrees' (CI, 22 Nov)", False, FRIDAYS,
+     "The HR policy says you can work from home up to 2 days per week with your manager's approval. It doesn't specify which days, so Fridays would be "
+     "allowed if your manager agrees.", [HOME]),
+    ("bad: 'so yes, you could work from home on Fridays' (CI retry, 22 Nov)", False, FRIDAYS,
+     "The company policy says: Employees may work from home up to 2 days per week with manager approval. Work from home is not counted as leave. So yes, "
+     "you could work from home on Fridays if your manager approves and it fits within your 2 days per week.", [HOME]),
+    ("bad: 'any day of the week'", False, FRIDAYS,
+     "Yes. You can work from home up to 2 days per week with manager approval, on any day of the week, Fridays included.", [HOME]),
+    ("good: the days are not named, and the reply says so", True, FRIDAYS,
+     "The policy says you can work from home up to 2 days per week with your manager's approval. It doesn't say which days of the week, so ask your "
+     "manager or HR whether Fridays are possible.", [HOME]),
+    ("good: the rule, then the silence on Fridays", True, FRIDAYS,
+     "Employees may work from home up to 2 days per week with manager approval. The policy doesn't mention specific days such as Fridays; your manager or "
+     "HR can tell you.", [HOME]),
+    ("bad: 'no rule against Fridays' (not a wording the prompt quotes)", False, FRIDAYS,
+     "Working from home is limited to 2 days a week with manager approval. There is no rule against Fridays, so you can choose them once your manager approves.",
+     [HOME]),
+    ("bad: 'Mondays and Fridays are fine'", False, "Can I work from home on Mondays and Fridays?",
+     "Yes, Mondays and Fridays are fine: the policy allows up to 2 days per week with manager approval.", [HOME]),
+    ("bad: carry-forward 'every year', which the text never says", False, "Can I carry forward casual leave two years in a row?",
+     "Yes. Up to 5 unused casual leave days can be carried forward to the next year, and nothing stops you doing it every year.", [jt.POLICY_CARRY]),
+    ("good: carry-forward, silent on two years in a row", True, "Can I carry forward casual leave two years in a row?",
+     "Up to 5 unused casual leave days can be carried forward to the next year. The policy does not say whether that can happen two years in a row, so HR "
+     "can confirm.", [jt.POLICY_CARRY]),
     ("good: the search missed, and the reply says so", True, DEC,
      "The policy sections I found don't say whether paid leave can be taken in December. Would you like me to raise an HR ticket to ask?", [MISSED]),
 ]

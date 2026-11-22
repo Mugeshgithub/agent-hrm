@@ -1373,6 +1373,19 @@ TEST_CASES = [
         "reply_must_not_match": SEARCHING_FIRST,
     },
     {
+        # the same follow-up, as CI got it wrong on main (22 Nov): "It doesn't specify which days, so Fridays would be allowed if your manager agrees".
+        # The policy gives 2 days a week with manager approval and nothing about which days: the reply says that, and sends the question to the manager
+        # or HR, with no yes, no or condition about Fridays
+        "name": "policy: silent on which days: says so and suggests the manager or HR, no yes for Fridays",
+        "user": "E001",
+        "auto_confirm": False,
+        "before": ["What does the company policy say about sick leave?"],
+        "input": "And can I work from home on Fridays?",
+        "must_call": ["search_policy"],
+        "reply_must_match": r"(?is)(?=.*\b(doesn'?t|does not|don'?t|do not|isn'?t|not)\b[^.]{0,30}\b(say|specify|specified|mention|mentioned|state|cover|set|list)\b[^.]{0,40}\b(days?|fridays?|which)\b)(?=.*\b(ask|check|speak|talk|contact|confirm|discuss|consult)\w*\b[^.]{0,40}\b(manager|HR)\b)",
+        "reply_must_not_match": r"(?i)\byes\b|fridays? (would|should|will)? ?(be )?(allowed|fine|ok|okay|possible)|\bso (you )?(can|could)\b|you (can|could) (work from home|do it|do so|choose) on fridays|any day",
+    },
+    {
         "name": "policy: finds sick leave from 'doctor's note' without the word sick",
         "user": "E001",
         "auto_confirm": False,

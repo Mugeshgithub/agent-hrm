@@ -17,8 +17,9 @@ Report every REASON, CONDITION, EXCEPTION, REQUIREMENT, DEADLINE or CONSEQUENCE 
 - "your manager decides based on business needs" when the text only says the manager decides: the basis is invented;
 - "you also need HR's approval", "unless you were off sick before", "it must be signed by a doctor registered in France": new conditions;
 - "upload it by your third day back" when the text says "within 3 days of returning to work": a changed deadline;
-- "the policy doesn't restrict paid leave by month", "there is no limit", "you can take it any time" when no returned section says so: silence turned
-  into a rule (what the text does not mention is unknown, not allowed).
+- "the policy doesn't restrict paid leave by month", "there is no limit", "you can take it any time" when no returned section says so, or "it doesn't
+  specify which days, so Fridays would be allowed if your manager agrees" and "so yes, you could work from home on Fridays" when the text gives "up to 2
+  days per week with manager approval" and nothing about days: silence turned into a rule (what the text does not mention is unknown, not allowed).
 
 These are supported. Do NOT report them:
 - what the tool results say, in other words or in another language, with the same meaning. "Yes, you can take paid leave in December" is the same
@@ -45,7 +46,8 @@ RETRY = HIDDEN + ("These parts of your reply are not in what the tools returned 
                   "something else, call search_policy once more with other words (the topic's own name, such as \"paid leave\" or \"sick leave\"). Then "
                   "answer the question again stating only what the policy text and the other tool results say. Add no reason, condition, exception, "
                   "deadline or consequence of your own, and do not say what happens in a case the text does not name. If the person's case is not "
-                  "covered, say the policy does not cover it and suggest asking HR. Start with the answer itself and say nothing about this note.")
+                  "covered, say the policy does not cover it and suggest asking HR. If the text is silent on a detail they asked about (such as "
+                  "which days), say it does not say and suggest asking their manager or HR. Start with the answer itself and say nothing about this note.")
 QUOTE = "Here is what the company policy says, word for word ({title}): \"{text}\""
 QUOTE_FR = "Voici ce que dit la politique de l'entreprise, mot pour mot ({title}) : « {text} »"
 NOT_CONFIRMED = "I can't confirm that from the company policy, so I won't guess. HR can tell you."
