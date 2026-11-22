@@ -21,6 +21,9 @@ _RULES = re.compile(
     r"how (?:many|much|long|often|early|late|soon)|what happens|is there|are there)\b", re.I)
 
 SEARCH_TOOLS = ("search_policy", "search_labour_code", "search_collective_agreement")
+# tools that answer nothing about the rules: HR asked "Does Hugo's contract allow remote work?", looked Hugo up (or where a new hire's contract
+# stands) and offered to search, or said "his contract hasn't been drafted yet" (22 Nov)
+NOT_RULES_TOOLS = ("lookup_colleague", "get_contract_status")
 
 # a question about seeing or acting on someone else's data ("Can I see my team's pending leave requests?", "les congés de Hugo") is about the
 # person's role, not the rules: the role's tools and the prompt answer it, and a forced search only gave the grounding check a policy to reshape the
@@ -59,9 +62,13 @@ def asks_about_rules(text):
 
 def needs_lookup(role, user_text, called):
     """True when the reply must not go out as it is: a rules question answered with no tool at all. `called` is the tools used in this answer:
-    any tool (a balance, a document, a search) means it looked something up, so only an answer with no tool is this guard's business. A question
-    about someone else's data is a role question (about_others)."""
-    return not called and roles.allowed(role, "search_policy") and asks_about_rules(user_text) and not about_others(user_text)
+    any tool (a balance, a document, a search) means it looked something up, so only an answer with no tool is this guard's business; finding a
+    person or a contract's stage (NOT_RULES_TOOLS) is not looking up the rules. A question
+    about someone else's data is a role question for an employee (about_others), who can see only their own; a manager or HR asking a rules
+    question that names someone ("Does Hugo's contract allow remote work?") is still searched."""
+    others = role == "employee" and about_others(user_text)
+    looked_up = [t for t in called if t not in NOT_RULES_TOOLS]
+    return not looked_up and roles.allowed(role, "search_policy") and asks_about_rules(user_text) and not others
 
 
 def earlier_results(messages):

@@ -37,6 +37,7 @@ These are supported. Do NOT report them:
   else, the policy has nothing on the topic. Do not report it because the search might have missed something;
 - numbers of days, amounts and law article numbers (other checks handle them);
 - facts about the employee (name, role, category, team, balance, requests);
+- what the assistant itself can or cannot read or do ("I can't read Hugo's contract here; HR can open it in the app"): its access, not a rule;
 - greetings, questions, offers to help, advice to ask HR or the manager, and plain advice that follows from a stated rule ("so it's worth using them").
 
 Reply with JSON only, no other text:

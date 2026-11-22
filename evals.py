@@ -1147,6 +1147,31 @@ TEST_CASES = [
         "expected_requests": 0,
     },
     {
+        # an employee asking a rules question about a colleague's contract: refused politely, and the code does not force a policy search
+        "name": "employee asking about Hugo's contract is refused, with no search",
+        "user": "E001",
+        "auto_confirm": False,
+        "setup": setup_emma_and_hugo_contracts,
+        "input": "Does Hugo's contract allow remote work?",
+        "must_not_call": ["search_policy", "read_my_document"],
+        # lookup_colleague may give his job title; nothing from his contract or the policy, and the question goes to him, his manager or HR
+        "reply_must_match": r"(?i)can'?t|cannot|can not|unable|not able|only (your|see|show|access)|your own|don'?t have access|\bask\b[^.]{0,40}\b(him|hugo|manager|HR)\b",
+        "reply_must_not_match": r"(?i)trois mois|three months|3 months|up to (2|two) days|(his|hugo's) contract (allows|states|gives|permits|says he)",
+        "check": lambda: "search" not in guards_acted(),
+    },
+    {
+        # the same question from HR: a rules question that names someone is still searched for a manager or HR (search_first.py). No tool reads
+        # Hugo's contract, so the answer gives the policy's rule, labelled as the policy, and nothing about what the contract says
+        "name": "policy: HR asking whether Hugo's contract allows remote work gets the policy searched",
+        "user": "H001",
+        "auto_confirm": False,
+        "setup": setup_emma_and_hugo_contracts,
+        "input": "Does Hugo's contract allow remote work?",
+        "must_call": ["search_policy"],
+        "reply_must_match": r"(?is)(?=.*\b(2|two)\b[^.]{0,30}\b(days?|per week|a week))(?=.*polic)",
+        "reply_must_not_match": r"(?i)(?<!what )(his|hugo's) contract (allows|states|gives|permits)|trois mois|three months",
+    },
+    {
         "name": "not enough sick leave is blocked before confirmation",
         "user": "E002",            # Hugo has 4 sick days; this is about 2 weeks
         "auto_confirm": True,
