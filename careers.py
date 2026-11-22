@@ -142,7 +142,7 @@ def _text(data, key, low, high, label):
     return value if low <= len(value) <= high else {"error": label}
 
 
-NAME_PROBLEM = f"Give your name using letters, spaces, hyphens and apostrophes only (at most {untrusted.NAME_MAX} characters)."
+NAME_PROBLEM = f"Give your name using letters, spaces, hyphens, apostrophes and full stops only (at most {untrusted.NAME_MAX} characters)."
 
 
 def check_application(job_id, data, cv):

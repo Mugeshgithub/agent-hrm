@@ -489,7 +489,7 @@ def add_candidate(actor_id, job_id, data, source="added by HR"):
     email, phone = (str(data.get(k) or "").strip() for k in ("email", "phone"))
     name = untrusted.clean_name(data.get("name"))          # the same rule as the careers page: the name reaches the HR assistant
     if name is None:
-        return {"error": f"Give the candidate's name using letters, spaces, hyphens and apostrophes only (at most {untrusted.NAME_MAX} characters)."}
+        return {"error": f"Give the candidate's name using letters, spaces, hyphens, apostrophes and full stops only (at most {untrusted.NAME_MAX} characters)."}
     if not _valid_email(email.lower()):
         return {"error": "Give a valid email address."}
     if len(phone) > 40:
