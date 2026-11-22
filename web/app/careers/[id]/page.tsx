@@ -82,7 +82,7 @@ function ApplyForm({ jobId, months, onDone }: { jobId: number; months: number; o
   return (
     <form onSubmit={send} className="panel mt-6 space-y-4 px-5 py-5" aria-labelledby="apply">
       <h2 id="apply" className="font-medium">Apply</h2>
-      <label className="block"><span className="label">Name</span><input className="field" required autoComplete="name" maxLength={120} value={f.name} onChange={(e) => setF({ ...f, name: e.target.value })} /></label>
+      <label className="block"><span className="label">Name</span><input className="field" required autoComplete="name" maxLength={80} value={f.name} onChange={(e) => setF({ ...f, name: e.target.value })} /></label>
       <label className="block"><span className="label">Email</span><input className="field" type="email" required autoComplete="email" value={f.email} onChange={(e) => setF({ ...f, email: e.target.value })} /></label>
       <label className="block"><span className="label">Phone (optional)</span><input className="field" type="tel" autoComplete="tel" maxLength={40} value={f.phone} onChange={(e) => setF({ ...f, phone: e.target.value })} /></label>
       <label className="block"><span className="label">CV (PDF, up to 5 MB)</span>

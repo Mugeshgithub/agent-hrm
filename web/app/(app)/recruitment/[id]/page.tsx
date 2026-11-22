@@ -220,7 +220,7 @@ function AddCandidateDialog({ jobId, onClose }: { jobId: number; onClose: () => 
     <Dialog open onClose={onClose} title="Add a candidate">
       <form onSubmit={save} className="space-y-4">
         <p className="text-ink-soft">For someone who applied another way. They start in Applied; people who apply on the careers page will arrive here by themselves.</p>
-        <label className="block"><span className="label">Name</span><input className="field" required value={f.name} onChange={(e) => setF({ ...f, name: e.target.value })} /></label>
+        <label className="block"><span className="label">Name</span><input className="field" required maxLength={80} value={f.name} onChange={(e) => setF({ ...f, name: e.target.value })} /></label>
         <label className="block"><span className="label">Email</span><input className="field" type="email" required value={f.email} onChange={(e) => setF({ ...f, email: e.target.value })} /></label>
         <label className="block"><span className="label">Phone (optional)</span><input className="field" value={f.phone} onChange={(e) => setF({ ...f, phone: e.target.value })} /></label>
         {error && <ErrorNote message={error} />}

@@ -38,6 +38,7 @@ import number_guard
 import recruitment_guard
 import search_first
 import tool_guard
+import untrusted
 import needs_you
 import onboarding
 import law_status
@@ -1148,6 +1149,7 @@ def answer_turn(user_text):
                         guards.ended("grounding", "replaced", {"claims": len(detail)})
                 if document_retry_used or agreement_retry_used or contract_retry_used or booking_retry_used or decision_retry_used or existing_retry_used or card_retry_used or number_retry_used or grounding_retry_used:       # a retry note was sent: the reply must not talk about it
                     reply = document_answers.strip_correction(reply)
+                reply = untrusted.strip_tags(reply)          # the tags around candidate names (untrusted.py) are for the model, never shown
 
                 # every guard that acted on this answer: one row each, and a tag on the Langfuse trace (guard_events.py)
                 if (found := guards.write(me, role, tracing.current_trace_id())):

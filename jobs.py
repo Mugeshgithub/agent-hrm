@@ -16,6 +16,7 @@ from datetime import date
 import db
 import employees
 import retention
+import untrusted
 from tools import get_employee
 
 STAGES = ("applied", "screening", "interview", "offer", "hired", "not_selected")
@@ -485,9 +486,10 @@ def add_candidate(actor_id, job_id, data, source="added by HR"):
         return {"error": NOT_FOUND}
     if job["status"] != "open":
         return {"error": "Candidates can only be added to a job that is open."}
-    name, email, phone = (str(data.get(k) or "").strip() for k in ("name", "email", "phone"))
-    if len(name) < 2 or len(name) > 120:
-        return {"error": "Give the candidate's name."}
+    email, phone = (str(data.get(k) or "").strip() for k in ("email", "phone"))
+    name = untrusted.clean_name(data.get("name"))          # the same rule as the careers page: the name reaches the HR assistant
+    if name is None:
+        return {"error": f"Give the candidate's name using letters, spaces, hyphens and apostrophes only (at most {untrusted.NAME_MAX} characters)."}
     if not _valid_email(email.lower()):
         return {"error": "Give a valid email address."}
     if len(phone) > 40:
@@ -586,10 +588,10 @@ def for_assistant(actor_id, job=None):
     found = [j for j in mine if wanted == str(j["id"]) or wanted in j["title"].lower()]
     if not found:
         return {"error": "No job of that name that you can see."}
-    out = []
+    out, tag = [], untrusted.mark()
     for j in found[:3]:
         rows = _rows("SELECT * FROM applications WHERE job_id = ? AND erased_at IS NULL ORDER BY applied_at, id", (j["id"],))
         out.append({"job_id": j["id"], "title": j["title"], "status": j["status"], "hiring_manager": j["hiring_manager_name"],
-                    "candidates": [{"name": c["name"], "stage": LABELS[c["stage"]], "applied_on": c["applied_at"][:10], "days_in_stage": c["days_in_stage"]}
+                    "candidates": [{"name": untrusted.wrap(c["name"], tag), "stage": LABELS[c["stage"]], "applied_on": c["applied_at"][:10], "days_in_stage": c["days_in_stage"]}
                                    for c in (_candidate(r, False) for r in rows)]})
-    return {"jobs": out, "note": note}
+    return {"jobs": out, "note": note, "about_names": untrusted.NOTE}
