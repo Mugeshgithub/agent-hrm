@@ -1,15 +1,22 @@
 # server_tests.py: checks the web API's rules. No AI, no API keys, runs in CI.
 #   python server_tests.py
+import contextlib
+import importlib.util
+import io
 import json
 import os
 import re
+import subprocess
 import sys
 import tempfile
+import threading
+import types
 from datetime import date, timedelta
 
 os.environ["HRM_DB"] = os.path.join(tempfile.mkdtemp(), "server_test_hr.db")
 os.environ["HRM_FILES_DIR"] = tempfile.mkdtemp()                       # documents go to a throwaway folder
 os.environ["HRM_DEMO_LOGIN"] = "1"                                      # the tests sign in with the demo picker; the password tests turn it off
+os.environ["LANGFUSE_PUBLIC_KEY"] = ""                                  # the fake model calls below are never traced, even with keys in .env
 import db
 db.DB_PATH = os.environ["HRM_DB"]
 
@@ -998,8 +1005,8 @@ def an_open_careers_job(hr, title):
 
 
 def fresh_throttles():
-    server.APPLY_BY_ADDRESS.seen.clear()
-    server.APPLY_BY_EMAIL.seen.clear()
+    server.APPLY_BY_ADDRESS.clear()
+    server.APPLY_BY_EMAIL.clear()
 
 
 @test
@@ -1075,7 +1082,7 @@ def applying_is_rate_limited_per_address_and_per_email():
         assert public.post(f"/api/careers/jobs/{job}/apply", json=apply_form(email=f"someone{i}@example.com")).status_code == 200
     again = public.post(f"/api/careers/jobs/{job}/apply", json=apply_form(email="another@example.com"))
     assert again.status_code == 429 and "Too many" in again.json()["detail"]                                  # ten from one address in an hour
-    server.APPLY_BY_ADDRESS.seen.clear()
+    server.APPLY_BY_ADDRESS.clear()
     assert public.post(f"/api/careers/jobs/{job}/apply", json=apply_form(email="another@example.com"), headers={"x-forwarded-for": "203.0.113.9, 10.0.0.1"}).status_code == 200
 
 
@@ -1119,8 +1126,8 @@ def with_a_stand_in_agent(run):
 def a_candidate_talks_to_the_assistant_with_their_private_link_and_nobody_else_can_read_what_they_asked_it_to_pass_on():
     def run():
         fresh_throttles()
-        server.ASK_BY_LINK.seen.clear()
-        server.ASK_BY_ADDRESS.seen.clear()
+        server.ASK_BY_LINK.clear()
+        server.ASK_BY_ADDRESS.clear()
         hr, lucas, public = as_person("H001"), as_person("M001"), TestClient(server.app)
         job = an_open_careers_job(hr, "Chat Job")
         token = public.post(f"/api/careers/jobs/{job}/apply", json=apply_form()).json()["link"].rsplit("/", 1)[1]
@@ -1157,8 +1164,8 @@ def a_candidate_talks_to_the_assistant_with_their_private_link_and_nobody_else_c
 def the_assistant_is_rate_limited_per_link_and_per_address():
     def run():
         fresh_throttles()
-        server.ASK_BY_LINK.seen.clear()
-        server.ASK_BY_ADDRESS.seen.clear()
+        server.ASK_BY_LINK.clear()
+        server.ASK_BY_ADDRESS.clear()
         hr, public = as_person("H001"), TestClient(server.app)
         job = an_open_careers_job(hr, "Busy Job")
         token = public.post(f"/api/careers/jobs/{job}/apply", json=apply_form()).json()["link"].rsplit("/", 1)[1]
@@ -1168,18 +1175,25 @@ def the_assistant_is_rate_limited_per_link_and_per_address():
     with_a_stand_in_agent(run)
 
 
+def earlier(bucket, key, seconds):
+    """Moves a limit's tries back in time, as if they were made `seconds` ago."""
+    conn = db.get_conn()
+    with conn:
+        conn.execute("UPDATE rate_events SET at = at - ? WHERE bucket = ? AND key = ?", (seconds, bucket, key))
+    conn.close()
+
+
 def with_a_stand_in_employee_agent(run):
     """The employee and new-hire assistants' model replaced by an echo (the web job installs no Anthropic package): the endpoints' limit, not the answers."""
     stand_in = type(sys)("agent")
-    stand_in.pending_action, stand_in.last_turn, stand_in.AWAITING_CONFIRMATION = {}, {"tools_called": []}, "(waiting)"
-    stand_in.start_session = lambda emp_id, role=None: None
+    stand_in.AWAITING_CONFIRMATION, stand_in.client, stand_in.MODEL = "(waiting)", None, "stand-in"
+    stand_in.using = contextlib.nullcontext
     stand_in.handle_message = lambda text: f"(an answer to {text})"
-    saved, saved_key = sys.modules.get("agent"), server.agent_user["key"]
+    saved = sys.modules.get("agent")
     sys.modules["agent"] = stand_in
     try:
         run()
     finally:
-        server.agent_user["key"] = saved_key
         if saved is None:
             del sys.modules["agent"]
         else:
@@ -1189,7 +1203,7 @@ def with_a_stand_in_employee_agent(run):
 @test
 def each_person_may_send_the_assistant_20_messages_in_10_minutes_and_is_told_kindly_when_to_come_back():
     def run():
-        server.ASK_BY_PERSON.seen.clear()
+        server.ASK_BY_PERSON.clear()
         emma, lucas = as_person("E001"), as_person("M001")
         codes = [emma.post("/api/assistant", json={"message": f"question {i}"}).status_code for i in range(21)]
         assert codes[:20] == [200] * 20 and codes[20] == 429
@@ -1198,9 +1212,9 @@ def each_person_may_send_the_assistant_20_messages_in_10_minutes_and_is_told_kin
             "Please try again in 10 minutes. Everything else in the app still works as usual.")
         assert emma.post("/api/assistant", json={"message": "   "}).status_code == 400            # a blank message is refused first and never counted
         assert lucas.post("/api/assistant", json={"message": "hi"}).status_code == 200            # each person has their own 20
-        server.ASK_BY_PERSON.seen["E001"] = [t - 570 for t in server.ASK_BY_PERSON.seen["E001"]]  # the first message leaves the window in 30 s
+        earlier("assistant_by_person", "E001", 570)                                                # the first message leaves the window in 30 s
         assert "Please try again in 1 minute." in emma.post("/api/assistant", json={"message": "now?"}).json()["detail"]
-        server.ASK_BY_PERSON.seen["E001"] = [t - 31 for t in server.ASK_BY_PERSON.seen["E001"]]
+        earlier("assistant_by_person", "E001", 31)
         assert emma.post("/api/assistant", json={"message": "now?"}).status_code == 200           # the window slides; refused tries never counted
         # a new hire's welcome assistant has the same limit
         hr = as_person("H001")
@@ -1226,7 +1240,7 @@ def hr_and_the_hiring_manager_ask_for_a_summary_nobody_else_can_and_it_is_rate_l
     application_summary.READER = lambda data: cv_text
     try:
         fresh_throttles()
-        server.SUMMARY_BY_PERSON.seen.clear()
+        server.SUMMARY_BY_PERSON.clear()
         hr, lucas, emma, public = as_person("H001"), as_person("M001"), as_person("E001"), TestClient(server.app)
         job = an_open_careers_job(hr, "Summary Job")
         public.post(f"/api/careers/jobs/{job}/apply", json=apply_form()).raise_for_status()
@@ -1253,7 +1267,7 @@ def hr_and_the_hiring_manager_ask_for_a_summary_nobody_else_can_and_it_is_rate_l
         stub.summary_answer = lambda actor_id, application_id: (_ for _ in ()).throw(RuntimeError("no key"))
         down = lucas.post(f"/api/recruitment/candidates/{cid}/summary")
         assert down.status_code == 503 and "isn't available right now" in down.json()["detail"]
-        server.SUMMARY_BY_PERSON.seen.clear()
+        server.SUMMARY_BY_PERSON.clear()
         stub.summary_answer = lambda actor_id, application_id: {"error": application_summary.NO_CV}
         codes = [lucas.post(f"/api/recruitment/candidates/{cid}/summary").status_code for _ in range(31)]
         assert codes[:30] == [400] * 30 and codes[30] == 429
@@ -1271,7 +1285,7 @@ def hr_and_the_hiring_manager_ask_for_a_summary_nobody_else_can_and_it_is_rate_l
 @test
 def hr_and_the_hiring_manager_offer_times_the_candidate_chooses_and_each_side_can_cancel():
     fresh_throttles()
-    server.CHOOSE_BY_LINK.seen.clear()
+    server.CHOOSE_BY_LINK.clear()
     hr, lucas, emma, public = as_person("H001"), as_person("M001"), as_person("E001"), TestClient(server.app)
     job = an_open_careers_job(hr, "Interview Job")
     token = public.post(f"/api/careers/jobs/{job}/apply", json=apply_form()).json()["link"].rsplit("/", 1)[1]
@@ -1316,7 +1330,7 @@ def hr_and_the_hiring_manager_offer_times_the_candidate_chooses_and_each_side_ca
 @test
 def choosing_and_cancelling_an_interview_are_rate_limited_per_link():
     fresh_throttles()
-    server.CHOOSE_BY_LINK.seen.clear()
+    server.CHOOSE_BY_LINK.clear()
     public = TestClient(server.app)
     token = "a-link-that-does-not-exist"
     codes = [public.post(f"/api/careers/track/{token}/interview/choose", json={"slot": "2031-01-01T10:00"}).status_code for _ in range(22)]
@@ -1330,7 +1344,7 @@ class demo_off:
     """The demo picker switched off, as on a real deployment, for the length of a test."""
     def __enter__(self):
         os.environ["HRM_DEMO_LOGIN"] = "0"
-        server.SIGN_IN_BY_ADDRESS.seen.clear()
+        server.SIGN_IN_BY_ADDRESS.clear()
 
     def __exit__(self, *exc):
         os.environ["HRM_DEMO_LOGIN"] = "1"
@@ -1443,6 +1457,194 @@ def only_hr_sends_links_and_sees_sign_in_status_never_the_link():
     assert hr.post(f"/api/hr/outbox/{older_links[0]['id']}/sent").status_code == 200              # HR sent it: the link leaves the database
     body = next(m["body"] for m in hr.get("/api/hr/outbox").json() if m["id"] == older_links[0]["id"])
     assert newer not in body and "/set-password/[link removed after sending]" in body
+
+
+
+# ---------- a stateless server: many people at once, the real agent with a fake model ----------
+
+def the_real_agent(model):
+    """agent.py itself, with `model` as Claude. The web job installs no Anthropic or OpenAI package: stand-ins while it loads, put back after."""
+    import collective_agreement
+    import policy_gaps
+    stand_ins = {name: types.ModuleType(name) for name in ("openai", "anthropic")}
+    stand_ins["openai"].OpenAI = lambda **options: None
+    stand_ins["anthropic"].Anthropic = lambda **options: None
+    saved = {name: sys.modules.get(name) for name in stand_ins}
+    saved_embed = policy_gaps.EMBED, collective_agreement.EMBED_MANY
+    sys.modules.update(stand_ins)
+    try:
+        spec = importlib.util.spec_from_file_location("agent", os.path.join(os.path.dirname(os.path.abspath(__file__)), "agent.py"))
+        agent = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(agent)
+    finally:
+        for name, module in saved.items():
+            if module is None:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = module
+        policy_gaps.EMBED, collective_agreement.EMBED_MANY = saved_embed
+    agent.client = model
+    return agent
+
+
+def with_the_real_agent(model, run):
+    saved = sys.modules.get("agent")
+    sys.modules["agent"] = the_real_agent(model)          # what server.py imports: a new one each time, as after a restart
+    try:
+        with contextlib.redirect_stdout(io.StringIO()):
+            run()
+    finally:
+        if saved is None:
+            sys.modules.pop("agent", None)
+        else:
+            sys.modules["agent"] = saved
+
+
+class Block(types.SimpleNamespace):
+    def model_dump(self, exclude_none=False):
+        return {k: v for k, v in vars(self).items() if not (exclude_none and v is None)}
+
+
+class ManyPeopleClaude:
+    """A message "#E001# ..." gets a tool call (the balance, or the booking when it says "book"); the tool's result gets a text answer naming
+    the person the system prompt is about, whose #id# marks the history holds, and what the tool returned. The first call of each message
+    waits until every person's message has reached it: if the server answered one person at a time, the barrier would never fill."""
+    def __init__(self, people):
+        self.together = threading.Barrier(people, timeout=30)
+        self.requests, self.lock = {}, threading.Lock()
+        self.messages = self
+
+    def create(self, **request):
+        usage = types.SimpleNamespace(input_tokens=10, output_tokens=10, cache_creation_input_tokens=0, cache_read_input_tokens=0)
+        system = " ".join(b["text"] for b in request["system"])
+        who = re.search(r"The logged-in user is (.+?), role:", system).group(1)
+        messages = request["messages"]
+        marks = sorted(set(re.findall(r"#([EMH]\d{3})#", json.dumps(messages))))
+        with self.lock:
+            self.requests.setdefault(who, []).append(json.loads(json.dumps(messages)))
+        last = messages[-1]["content"]
+        if isinstance(last, list) and last[-1].get("type") == "tool_result":
+            text = f"WHO={who} MARKS={','.join(marks)} RESULT={last[-1]['content']}"
+            return types.SimpleNamespace(content=[Block(type="text", text=text)], stop_reason="end_turn", usage=usage)
+        said = last if isinstance(last, str) else last[-1].get("text", "")
+        if not re.match(r"#[EMH]\d{3}#", said):            # a guard's note: just answer
+            return types.SimpleNamespace(content=[Block(type="text", text=f"WHO={who}")], stop_reason="end_turn", usage=usage)
+        self.together.wait()
+        if "book" in said:
+            call = Block(type="tool_use", id="toolu_book", name="apply_leave",
+                         input={"leave_type": "casual", "start_date": "2031-03-04", "end_date": "2031-03-04"})
+        else:
+            call = Block(type="tool_use", id="toolu_balance", name="get_leave_balance", input={})
+        return types.SimpleNamespace(content=[call], stop_reason="tool_use", usage=usage)
+
+
+def at_once(people, send):
+    """send(person) for every person at the same time, each in its own thread; returns {person: what it returned}."""
+    got = {}
+
+    def one(who):
+        try:
+            got[who] = send(who)
+        except Exception as e:            # an exception in a thread would otherwise vanish
+            got[who] = e
+    threads = [threading.Thread(target=one, args=(who,)) for who in people]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    return got
+
+
+def ten_people_who_can_book_a_day():
+    import hr_queries
+    import employees
+    from tools import get_employee
+    ids = [p["id"] for p in hr_queries.people() if p["active"] and employees.is_active(p["id"])]
+    ready = [i for i in ids if hr_queries.balances(i)["casual"]["available"] >= 1 and get_employee(i)]
+    assert len(ready) >= 10, ready
+    return ready[:10]
+
+
+@test
+def ten_people_chat_at_the_same_time_and_nobody_sees_anyone_elses_conversation():
+    import conversations
+    from tools import get_employee, get_leave_balance
+    people = ten_people_who_can_book_a_day()
+    clients = {who: as_person(who) for who in people}
+    server.ASK_BY_PERSON.clear()
+    model = ManyPeopleClaude(len(people))
+    names = {who: get_employee(who)["name"] for who in people}
+
+    def first_round():
+        got = at_once(people, lambda who: clients[who].post("/api/assistant", json={"message": f"#{who}# What is my balance?"}))
+        for who in people:
+            r = got[who]
+            assert not isinstance(r, Exception) and r.status_code == 200, (who, r if isinstance(r, Exception) else r.text)   # no "database is locked"
+            reply = r.json()["reply"]
+            assert f"WHO={names[who]} " in reply and f"MARKS={who} " in reply, (who, reply)                  # their own prompt, their own history only
+            assert json.loads(reply.split("RESULT=", 1)[1].split("\n")[0]) == get_leave_balance(who), (who, reply)   # the tool ran as them
+            assert r.json()["tools"] == ["get_leave_balance"]
+    with_the_real_agent(model, first_round)
+
+    # a restart: a new agent, nothing in memory. Each history comes back from the database exactly as it was sent
+    model2 = ManyPeopleClaude(len(people))
+
+    def second_round():
+        got = at_once(people, lambda who: clients[who].post("/api/assistant", json={"message": f"#{who}# Please book casual leave on 4 March 2031"}))
+        for who in people:
+            r = got[who]
+            assert not isinstance(r, Exception) and r.status_code == 200, (who, r if isinstance(r, Exception) else r.text)
+            card = r.json()["confirm"]
+            assert card and card["tool"] == "apply_leave" and card["input"]["start_date"] == "2031-03-04", (who, r.json())   # everyone has their own card
+            assert f"MARKS={who} " in r.json()["reply"], (who, r.json()["reply"])
+    with_the_real_agent(model2, second_round)
+    def unmarked(messages):            # the cache marker moves to the newest message on every call; everything else must be identical
+        return json.dumps([{**m, "content": [{k: v for k, v in b.items() if k != "cache_control"} for b in m["content"]]}
+                           if isinstance(m["content"], list) else m for m in messages])
+    for who in people:
+        before, after = model.requests[names[who]][-1], model2.requests[names[who]][0]
+        assert len(after) == len(before) + 2, (who, len(before), len(after))         # + the answer and the new question
+        assert unmarked(after).startswith(unmarked(before)[:-1]), who               # the same prefix, byte for byte, across the restart: the cache still matches
+
+    # another restart, then everyone presses Confirm at once, and one person double-clicks
+    def confirm_round():
+        double = people[0]
+        clicks = at_once([*people, "again"], lambda who: clients[double if who == "again" else who].post("/api/assistant/confirm", json={"accept": True}))
+        codes = sorted([clicks[double].status_code, clicks["again"].status_code])
+        assert codes[0] == 200 and codes[1] in (400, 409), codes                                       # the second click runs nothing
+        for who in people[1:]:
+            assert clicks[who].status_code == 200 and clicks[who].json()["result"].get("success"), (who, clicks[who].text)
+        conn = db.get_conn()
+        for who in people:
+            rows = conn.execute("SELECT employee_id FROM leave_requests WHERE start_date = '2031-03-04' AND employee_id = ?", (who,)).fetchall()
+            assert len(rows) == 1, (who, len(rows))                                                    # one request each, in the right name
+        assert conn.execute("SELECT COUNT(*) AS n FROM pending_actions WHERE status = 'pending' AND user_id IN (%s)" % ",".join("?" * len(people)),
+                            people).fetchone()["n"] == 0
+        conn.close()
+        for who in people:
+            c = conversations.open_conversation(who, lambda user_id: (None, []))
+            assert c is not None and c.pending == {} and c.messages[-2]["content"] == "[In the app, I confirmed the apply_leave card.]", who
+            conversations.release(c)
+    with_the_real_agent(ManyPeopleClaude(len(people)), confirm_round)
+
+
+@test
+def a_production_server_refuses_to_start_with_the_demo_picker_or_without_a_secret():
+    assert server.production_problems({"HRM_ENV": "development"}) == []
+    assert server.production_problems({"HRM_ENV": "production", "HRM_SESSION_SECRET": "x" * 32}) == []
+    assert ["HRM_DEMO_LOGIN" in p for p in server.production_problems({"HRM_ENV": "production", "HRM_SESSION_SECRET": "x", "HRM_DEMO_LOGIN": "1"})] == [True]
+    assert ["HRM_SESSION_SECRET" in p for p in server.production_problems({"HRM_ENV": "production"})] == [True]
+
+    def start(**env):
+        settings = {**os.environ, "HRM_DB": os.path.join(tempfile.mkdtemp(), "start.db"), "HRM_DEMO_LOGIN": "", "HRM_SESSION_SECRET": "", **env}
+        return subprocess.run([sys.executable, "-c", "import server"], env=settings, capture_output=True, text=True,
+                              cwd=os.path.dirname(os.path.abspath(__file__)), timeout=120)
+    demo = start(HRM_ENV="production", HRM_SESSION_SECRET="x" * 32, HRM_DEMO_LOGIN="1")
+    assert demo.returncode != 0 and "Refusing to start with HRM_ENV=production" in demo.stderr and "HRM_DEMO_LOGIN" in demo.stderr, demo.stderr[-500:]
+    no_secret = start(HRM_ENV="production")
+    assert no_secret.returncode != 0 and "HRM_SESSION_SECRET is not set" in no_secret.stderr, no_secret.stderr[-500:]
+    fine = start(HRM_ENV="production", HRM_SESSION_SECRET="x" * 32)
+    assert fine.returncode == 0, fine.stderr[-500:]
 
 
 if __name__ == "__main__":

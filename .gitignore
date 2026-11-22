@@ -17,3 +17,5 @@ web/.next/
 web/tsconfig.tsbuildinfo
 web_demo.db
 private_files/
+*.db-wal
+*.db-shm

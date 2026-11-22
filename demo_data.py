@@ -18,14 +18,17 @@ import checkins
 import collective_agreement
 import contracts
 import accounts
+import conversations
 import documents
 import employee_files
 import guard_events
+import job_locks
 import jobs
 import onboarding
 import outbox
 import policy_gaps
 import policy_store
+import rate_limits
 import welcome
 from memory import init_memory, init_summaries
 from notifications import init_notifications, notify_decision, notify_ticket_reply
@@ -36,6 +39,9 @@ def init_all(reset=False):
     db.init_db(reset=reset)
     init_memory()
     init_summaries()
+    conversations.init_conversations()   # each person's conversation with the assistant, its messages and its card
+    rate_limits.init_rate_limits()
+    job_locks.init_job_locks()
     init_notifications()
     payslips.init_payslips()
     payslips.seed_payslips()
@@ -91,6 +97,10 @@ def init_all(reset=False):
             conn.execute("DELETE FROM outbox")
             conn.execute("DELETE FROM onboarding_steps")
             conn.execute("DELETE FROM onboardings")
+            conn.execute("DELETE FROM rate_events")
+            conn.execute("DELETE FROM daily_spend")
+            # the chat is kept, but a card waiting from before names requests that are gone
+            conn.execute("UPDATE pending_actions SET status = 'expired' WHERE status = 'pending'")
         conn.close()
 
 

@@ -24,6 +24,7 @@ import checkins
 import contracts
 import documents
 import collective_agreement
+import conversations
 import employee_files
 import employees
 import hr_queries
@@ -71,7 +72,7 @@ def say(d):
 
 def card_weekdays(weekdays):
     # the card waiting books one request from the first weekday to the second (0 = Monday), starting within the next two weeks
-    items = agent.pending_action.get("items") or []
+    items = agent.convo().pending.get("items") or []
     if len(items) != 1:
         return False
     start, end = (date.fromisoformat(items[0]["input"][k]) for k in ("start_date", "end_date"))
@@ -197,8 +198,10 @@ def reset_memory():
     memory.init_memory()
     memory.init_summaries()
     notifications.init_notifications()
+    conversations.init_conversations()
     conn = db.get_conn()
     with conn:
+        conn.execute("DELETE FROM daily_spend")          # the daily cap must not stop a long run of tests as one person
         conn.execute("DELETE FROM chat_messages")
         conn.execute("DELETE FROM chat_summaries")
         conn.execute("DELETE FROM notifications")
@@ -263,22 +266,29 @@ from citations import ungrounded_citations
 from judge import judge   # LLM-as-judge: every claim supported by this turn's tool results (tested in judge_tests.py)
 
 
+# a reply that only announces a search ("I'll search the policy first") instead of answering
+SEARCHING_FIRST = r"(?i)\b(I'll|I will|let me|I need to|I'm going to)\s+(first\s+)?(search|check|look)"
+
+
 @observe(name="eval-test")   # one trace per test, with every Claude call and tool inside
-def run_agent(user_text, test_name="", session_role=None):
+def run_agent(user_text, test_name="", session_role=None, before=()):
     """Run one user message through the REAL agent (agent.handle_message), starting from the user's
     saved history, exactly as production does. session_role is "new_hire" for a welcome-link test.
-    Returns (reply_text, tools_called, trace_id)."""
-    role = session_role or agent.get_employee(agent.LOGGED_IN_ID)["role"]
+    `before`: messages sent first in the same conversation, so their tool calls and results are in its history, as the server keeps them.
+    Returns (reply_text, tools_called, trace_id) of the last message."""
+    role = session_role or agent.get_employee(agent.convo().user_id)["role"]
     # trace_name = the test's name, so you can search for it in Langfuse
-    with propagate_attributes(trace_name=test_name, user_id=agent.LOGGED_IN_ID,
+    with propagate_attributes(trace_name=test_name, user_id=agent.convo().user_id,
                               session_id=RUN_ID, tags=["eval", role],
                               metadata={"test": test_name}):
         trace_id = tracing.current_trace_id()   # remembered so the pass/fail score lands on this trace
-        agent.start_session(agent.LOGGED_IN_ID, session_role)  # load history + summary, fresh budget: like a real login
-        agent.SESSION_ID = RUN_ID                # keep all tests of this run in one Langfuse session
+        agent.start_session(agent.convo().user_id, session_role)  # load history + summary, fresh budget: like a real login
+        agent.convo().session_id = RUN_ID                # keep all tests of this run in one Langfuse session
         agent.EXTRA_TAGS = ["eval"]
+        for earlier in before:
+            agent.handle_message(earlier)
         reply = agent.handle_message(user_text)
-        return reply, list(agent.last_turn["tools_called"]), trace_id
+        return reply, list(agent.convo().last_turn["tools_called"]), trace_id
 
 
 # ---------- setup functions ----------
@@ -387,7 +397,7 @@ def statuses():
 
 def setup_approved_leave(n):
     # Emma has n approved one-day casual leaves in the coming weeks (and no card is waiting from an earlier test)
-    agent.pending_action.clear()
+    agent.convo().pending.clear()
     for d in future_weekdays(n):
         decide_leave("M001", apply_leave("E001", "casual", iso(d), iso(d))["request"]["id"], "approve")
 
@@ -402,7 +412,7 @@ def setup_two_approved_and_one_started():
 
 
 def setup_two_pending_for_lucas():
-    agent.pending_action.clear()
+    agent.convo().pending.clear()
     for d in future_weekdays(2):
         apply_leave("E001", "casual", iso(d), iso(d))
 
@@ -411,7 +421,7 @@ def setup_emma_asks_again_for_a_day_approved_before():
     # the real bug (11 Nov), rebuilt from the live database and chat: the manager approved Emma's request for a day ("Done." is in the chat); it was
     # cancelled afterwards and Emma asked again for the SAME day. Emma has another request, approved in a second exchange; Hugo and Clara wait too.
     # The assistant answered "already approved" from the chat, not from the tool.
-    agent.pending_action.clear()
+    agent.convo().pending.clear()
     again, other, hugo_day, clara_day = future_weekdays(4)
     apply_leave("E002", "casual", iso(hugo_day), iso(hugo_day))        # Hugo's and Clara's are the oldest requests, so the tool lists them first, as in the live data
     apply_leave("E003", "sick", iso(clara_day), iso(clara_day))
@@ -440,7 +450,7 @@ def setup_emma_day_taken(asked_the_date):
     # the real bug (11 Nov), rebuilt from the live database and chat: Emma's request for a day was cancelled twice and then APPROVED; the old chat says
     # "Done." for a card of that day. She starts a new chat message "request time off please" and then gives the same day. The assistant asked which kind of
     # leave before looking at anything, then said "You already have a pending casual leave request" (it is approved) without calling a tool.
-    agent.pending_action.clear()
+    agent.convo().pending.clear()
     taken = future_weekdays(1)[0]
     for _ in range(2):
         cancel_leave("E001", apply_leave("E001", "casual", iso(taken), iso(taken))["request"]["id"])
@@ -609,7 +619,7 @@ CARDS = r"(?i)\b(cards|screens)\b"        # the app shows ONE card, however many
 def setup_saturday_offered_anyway():
     # the real bug (10 Nov): asked to check a Saturday, the assistant offered to book it anyway; then "book it" showed a confirmation card
     # that could never pass, and the refusal came after Confirm
-    agent.pending_action.clear()
+    agent.convo().pending.clear()
     memory.save_message("E001", "user", f"check for {say_no_year(SATURDAY)}")
     memory.save_message("E001", "assistant", f"{say_no_year(SATURDAY)} is a Saturday, so it doesn't use any casual leave days. "
                                              f"Would you like me to book it anyway, or did you mean a weekday?")
@@ -1339,6 +1349,30 @@ TEST_CASES = [
         "reply_must_match": r"(?is)(?=.*\bcars?\b)(?=.*\b(3|three)\b)",
     },
     {
+        # Nov 22: with the whole conversation kept, this follow-up was answered from the search one message earlier, and the search guard then
+        # made the model search again, once replying only "I'll search the policy first". The earlier search answers it: no new search, no stall.
+        "name": "policy: 'And how many sick days?' after a policy answer is answered from that search",
+        "user": "E001",
+        "auto_confirm": False,
+        "before": ["What does the company policy say about casual leave and sick leave?"],
+        "input": "And how many sick days?",
+        "must_not_call": ["search_policy"],
+        "reply_must_match": r"(?<![\d.])6(?![\d.])|\bsix\b",
+        "reply_must_not_match": SEARCHING_FIRST,
+        "check": lambda: agent.convo().last_turn["earlier_sources"] or agent.convo().last_turn["tools_called"],   # backed by the earlier search, or looked up now
+    },
+    {
+        # the history searched sick leave only: working from home needs a new search, and the person never reads "I'll search first"
+        "name": "policy: a follow-up on another topic gets a new search",
+        "user": "E001",
+        "auto_confirm": False,
+        "before": ["What does the company policy say about sick leave?"],
+        "input": "And can I work from home on Fridays?",
+        "must_call": ["search_policy"],
+        "reply_must_match": r"(?i)\b(2|two)\b[^.]{0,30}\b(days?|per week|a week)",
+        "reply_must_not_match": SEARCHING_FIRST,
+    },
+    {
         "name": "policy: finds sick leave from 'doctor's note' without the word sick",
         "user": "E001",
         "auto_confirm": False,
@@ -1655,12 +1689,12 @@ TEST_CASES = [
         "name": "booking: casual leave asked for on a Saturday is not offered, no card is shown and nothing is created",
         "user": "E001",
         "auto_confirm": agent.AWAITING_CONFIRMATION,         # as in the web app: a card would be parked, and pending_action says whether one was shown
-        "setup": lambda: agent.pending_action.clear(),
+        "setup": lambda: agent.convo().pending.clear(),
         "input": f"I want casual leave on {say_no_year(SATURDAY)}.",
         "reply_must_match": r"(?i)saturday|weekend",
         "reply_must_not_match": r"(?i)anyway|shall i|(would you like|do you want|want) me to (book|submit|proceed|go ahead)|confirmation (screen|card)",
         "expected_requests": 0,
-        "check": lambda: not agent.pending_action,
+        "check": lambda: not agent.convo().pending,
     },
     {
         "name": "booking: after a Saturday was offered anyway, 'book it' still shows no card and creates nothing",
@@ -1672,7 +1706,7 @@ TEST_CASES = [
         "reply_must_match": r"(?i)saturday|weekend|not a working day|no (leave )?days|(which|what) (type|kind) of leave|casual, sick",
         "reply_must_not_match": r"(?i)anyway|shall i|(would you like|do you want|want) me to (book|submit|proceed|go ahead)|confirmation (screen|card)",
         "expected_requests": 0,
-        "check": lambda: not agent.pending_action,
+        "check": lambda: not agent.convo().pending,
     },
     {
         # real, 10 Nov: "Shall I submit this request?" before booking. apply_leave shows the card, and that card is where the person confirms.
@@ -1689,7 +1723,7 @@ TEST_CASES = [
         "name": "booking: next Thursday and Friday are booked on a Thursday and a Friday",
         "user": "E001",
         "auto_confirm": agent.AWAITING_CONFIRMATION,
-        "setup": lambda: agent.pending_action.clear(),
+        "setup": lambda: agent.convo().pending.clear(),
         "input": "Book me casual leave next Thursday and Friday",
         "must_call": ["apply_leave"],
         "check": lambda: card_weekdays((3, 4)),
@@ -1698,7 +1732,7 @@ TEST_CASES = [
         "name": "booking: Monday to Wednesday next week is booked from a Monday to the Wednesday after it",
         "user": "E001",
         "auto_confirm": agent.AWAITING_CONFIRMATION,
-        "setup": lambda: agent.pending_action.clear(),
+        "setup": lambda: agent.convo().pending.clear(),
         "input": "I'd like casual leave from Monday to Wednesday next week",
         "must_call": ["apply_leave"],
         "check": lambda: card_weekdays((0, 2)),
@@ -1709,23 +1743,23 @@ TEST_CASES = [
         "name": "booking: leave asked for on a Saturday with no date is answered at once, with no date question and no card",
         "user": "E001",
         "auto_confirm": agent.AWAITING_CONFIRMATION,
-        "setup": lambda: agent.pending_action.clear(),
+        "setup": lambda: agent.convo().pending.clear(),
         "input": "i want to take leave on saturday ?",
         "reply_must_match": r"(?i)nothing to book",
         "reply_must_not_match": r"(?i)which saturday|what date|which date|\d",
         "expected_requests": 0,
-        "check": lambda: not agent.pending_action,
+        "check": lambda: not agent.convo().pending,
     },
     {
         "name": "booking: leave asked for on a Sunday with no date is answered at once: no kind of leave counts a Sunday",
         "user": "E001",
         "auto_confirm": agent.AWAITING_CONFIRMATION,
-        "setup": lambda: agent.pending_action.clear(),
+        "setup": lambda: agent.convo().pending.clear(),
         "input": "I want to take leave on sunday",
         "reply_must_match": r"(?i)nothing to book",
         "reply_must_not_match": r"(?i)which sunday|what date|which date|paid leave counts|\d",
         "expected_requests": 0,
-        "check": lambda: not agent.pending_action,
+        "check": lambda: not agent.convo().pending,
     },
     {
         # the exception must stay: paid leave counts Saturdays, so a dated request for paid leave on a Saturday is booked
@@ -1790,7 +1824,7 @@ TEST_CASES = [
         "must_call": ["get_pending_requests"],
         "reply_must_match": r"(?is)^(?=.*emma)(?=.*hugo)(?=.*clara)",
         "reply_must_not_match": r"(?i)\b(?:two|2) pending|(?:already|has been|is) approved",
-        "check": lambda: not agent.pending_action,
+        "check": lambda: not agent.convo().pending,
     },
     {
         # real, 11 Nov: given "23 nov", the assistant asked which kind of leave (it never looked), then said "You already have a pending casual leave request"
@@ -1804,7 +1838,7 @@ TEST_CASES = [
         "reply_must_match": r"(?i)already|approved|d\u00e9j\u00e0",
         "reply_must_not_match": r"(?i)(which|what) (type|kind) of leave|casual, sick|\bpending\b|confirmation (screen|card)|press confirm",
         "expected_requests": 3,
-        "check": lambda: not agent.pending_action,
+        "check": lambda: not agent.convo().pending,
     },
     {
         # same chat, and the kind of leave is given ("causual"): main showed a card for a day that already has a request (the refusal came after Confirm),
@@ -1818,7 +1852,7 @@ TEST_CASES = [
         "reply_must_match": r"(?i)already|approved|d\u00e9j\u00e0",
         "reply_must_not_match": r"(?i)\bpending\b|confirmation (screen|card)|press confirm",
         "expected_requests": 3,
-        "check": lambda: not agent.pending_action,
+        "check": lambda: not agent.convo().pending,
     },
     # ---------- the AI assistant on a candidate's tracking page (candidate_assistant.py) ----------
     {
@@ -2486,19 +2520,19 @@ def attempt(case):
     # fresh test database, empty chat memory, logged-in user and simulated yes/no for every test
     db.init_db(reset=True)
     reset_memory()
-    agent.LOGGED_IN_ID = case["user"]
-    agent.confirm_with_human = lambda tool_input, answer=case["auto_confirm"]: answer
+    agent.convo().user_id = case["user"]
+    agent.convo().confirm = lambda tool_input, answer=case["auto_confirm"]: answer
     token = case["setup"]() if "setup" in case else None
 
     if case.get("candidate"):             # a person on a tracking page: its own assistant, three tools, no session (candidate_assistant.py); setup returns the link
-        agent.pending_action.clear()
+        agent.convo().pending.clear()
         agent.EXTRA_TAGS = ["eval"]
         with propagate_attributes(trace_name=case["name"], session_id=RUN_ID, tags=["eval", "candidate"], metadata={"test": case["name"]}):
             trace_id = tracing.current_trace_id()
             got = agent.candidate_answer(token, case["input"])
         reply, tools_called = got.get("reply") or got.get("error", ""), list(got.get("tools", []))
     elif case.get("summary"):             # a person asks for the summary of an application: no chat, no tools (application_summary.py); setup returns the application's id
-        agent.pending_action.clear()
+        agent.convo().pending.clear()
         agent.EXTRA_TAGS = ["eval"]
         with propagate_attributes(trace_name=case["name"], session_id=RUN_ID, tags=["eval", "summary"], metadata={"test": case["name"]}):
             trace_id = tracing.current_trace_id()
@@ -2507,15 +2541,15 @@ def attempt(case):
     else:
         restore = embedding_down() if case.get("embedding_fails") else None     # the labour search falls back to French keywords
         try:
-            reply, tools_called, trace_id = run_agent(case["input"], test_name=case["name"], session_role=case.get("role"))
+            reply, tools_called, trace_id = run_agent(case["input"], test_name=case["name"], session_role=case.get("role"), before=case.get("before", ()))
         finally:
             if restore:
                 restore()
 
     # a card left waiting, as in the web app: how many actions it lists, and then the person presses Confirm
-    card_items = len(agent.pending_action.get("items", []))
+    card_items = len(agent.convo().pending.get("items", []))
     confirm_note = ""
-    if case.get("then_confirm") and agent.pending_action:
+    if case.get("then_confirm") and agent.convo().pending:
         confirm_note, _ = agent.run_pending(True)
 
     problems = []
@@ -2542,14 +2576,15 @@ def attempt(case):
         if n != case["expected_requests"]:
             problems.append(f"{n} requests in database, expected {case['expected_requests']}")
     if case.get("citations_grounded"):
-        bad = ungrounded_citations(reply, agent.last_turn["sources"])
+        bad = ungrounded_citations(reply, agent.convo().last_turn["sources"])
         if bad:
             problems.append(f"cites articles no tool returned this turn: {', '.join(bad)}")
     # LLM-as-judge on answers built from sources (policy and law): catches invented reasons and
     # wrong attributions that keyword checks miss. Leave, permission and pay tests are checked by code.
     # "judge_facts": what the assistant was told in its instructions about this person (not by a tool), so the judge knows it is true
     if case["name"].startswith(("policy:", "law:")):
-        for issue in judge(case["input"], reply, agent.last_turn["sources"] + list(case.get("judge_facts", []))):
+        last = agent.convo().last_turn
+        for issue in judge(case["input"], reply, last["sources"] + last.get("earlier_sources", []) + list(case.get("judge_facts", []))):
             problems.append(f"judge: unsupported \"{issue.get('claim')}\" ({issue.get('why')})")
     if "check" in case and not case["check"]():
         problems.append("database check failed")
@@ -2557,7 +2592,7 @@ def attempt(case):
     # send the result to Langfuse: passed = 1 or 0, with the reasons as a comment
     print("trace id:", trace_id)
     tracing.score_trace(trace_id, passed=not problems, comment=", ".join(problems))
-    return problems, {"reply": reply, "tools": tools_called, "refused": [] if case.get("candidate") or case.get("summary") else list(agent.last_turn["refused"]), "confirm": confirm_note, "card_items": card_items}
+    return problems, {"reply": reply, "tools": tools_called, "refused": [] if case.get("candidate") or case.get("summary") else list(agent.convo().last_turn["refused"]), "confirm": confirm_note, "card_items": card_items}
 
 
 def show_failure(label, name, problems, info):
@@ -2614,7 +2649,7 @@ def finish(passed, ran, retried):
 
 
 # ---------- parallel run ----------
-# The agent keeps ONE conversation in module-level state (agent.LOGGED_IN_ID, history, last_turn),
+# The evals drive the agent's one in-memory conversation (agent.convo()) and reset the database for each test,
 # so tests cannot share a process: threads would overwrite each other. Instead each worker is a
 # separate `python evals.py --worker-db ... --cases ...` process with its own database file.
 

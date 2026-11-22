@@ -12,12 +12,19 @@ import db
 db.DB_PATH = os.getenv("HRM_DB", db.DB_PATH)
 import careers
 import interviews
+import job_locks
 import jobs
 
 
 if __name__ == "__main__":
     jobs.init_jobs()
-    done = careers.run_retention()
+    # one run at a time, even from two copies at the same second (job_locks.py)
+    with job_locks.only_one("recruitment-daily") as mine:
+        if not mine:
+            print("Another copy is running the recruitment job right now: nothing done.")
+            sys.exit(0)
+        done = careers.run_retention()
+        reminders = interviews.run_reminders()
     print(f"{done['on']}: erased {done['erased']} candidate(s)" + "".join(f", {n} by '{rule}'" for rule, n in done["by_rule"].items()))
-    print(f"interview reminders prepared: {interviews.run_reminders()}")
+    print(f"interview reminders prepared: {reminders}")
     sys.exit(0)

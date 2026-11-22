@@ -96,5 +96,5 @@ if __name__ == "__main__":
         print(f"{'PASS' if right == len(mine) else 'FAIL'} {right}/{len(mine)} {name}")
     good = sum(1 for c in CASES if c[1]) * runs
     print(f"\ngood replies flagged: {flagged_good}/{good}   bad replies missed: {missed_bad}/{len(CASES) * runs - good}   no usable answer: {unusable}")
-    print(f"cost: ${agent.usage['check_cost']:.4f} for {len(results)} checks")
+    print(f"cost: ${agent.convo().usage['check_cost']:.4f} for {len(results)} checks")
     sys.exit(1 if flagged_good else 0)
