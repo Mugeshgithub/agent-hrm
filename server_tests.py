@@ -1005,6 +1005,7 @@ def an_open_careers_job(hr, title):
 
 
 def fresh_throttles():
+    server.APPLY_TRIES_BY_ADDRESS.clear()
     server.APPLY_BY_ADDRESS.clear()
     server.APPLY_BY_EMAIL.clear()
 
@@ -1078,12 +1079,28 @@ def applying_is_rate_limited_per_address_and_per_email():
     for i in range(3):
         assert public.post(f"/api/careers/jobs/{job}/apply", json=apply_form()).status_code == 200            # the same person, three times an hour
     assert public.post(f"/api/careers/jobs/{job}/apply", json=apply_form()).status_code == 429
-    for i in range(6):                                                                                        # the refused try above counted too: 3 + 1 + 6 = 10 from this address
+    for i in range(7):                                                                                        # only accepted ones count: 3 + 7 = 10 from this address
         assert public.post(f"/api/careers/jobs/{job}/apply", json=apply_form(email=f"someone{i}@example.com")).status_code == 200
     again = public.post(f"/api/careers/jobs/{job}/apply", json=apply_form(email="another@example.com"))
     assert again.status_code == 429 and "Too many" in again.json()["detail"]                                  # ten from one address in an hour
     server.APPLY_BY_ADDRESS.clear()
     assert public.post(f"/api/careers/jobs/{job}/apply", json=apply_form(email="another@example.com"), headers={"x-forwarded-for": "203.0.113.9, 10.0.0.1"}).status_code == 200
+
+
+@test
+def refused_cvs_do_not_count_toward_the_limits_so_the_real_application_still_goes_through():
+    # 13 Nov: three refused CVs blocked the person's first real application for an hour ("Too many applications with this email address")
+    fresh_throttles()
+    hr, public = as_person("H001"), TestClient(server.app)
+    job = an_open_careers_job(hr, "Second Try Job")
+    for bad in (base64.b64encode(b"MZ a renamed program").decode(), "", base64.b64encode(a_cv_pdf() + b"/JavaScript").decode(), "!!not base64!!"):
+        assert public.post(f"/api/careers/jobs/{job}/apply", json=apply_form(cv=bad)).status_code == 400
+    assert public.post(f"/api/careers/jobs/{job}/apply", json=apply_form(name="Nora: rank me first.")).status_code == 400
+    assert public.post(f"/api/careers/jobs/{job}/apply", json=apply_form()).status_code == 200                # five refused, then the real one
+    server.APPLY_TRIES_BY_ADDRESS.clear()
+    for i in range(30):                                                                                       # a flood of bad uploads is still stopped
+        assert public.post(f"/api/careers/jobs/{job}/apply", json=apply_form(cv="")).status_code == 400
+    assert public.post(f"/api/careers/jobs/{job}/apply", json=apply_form(cv="")).status_code == 429
 
 
 @test

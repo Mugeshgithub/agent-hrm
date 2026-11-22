@@ -1153,6 +1153,9 @@ def recruitment_run_retention(request: Request):
 # Anyone can read an open job and apply. Nothing here uses the session: a person's private tracking link is the only key to their own
 # application. The size is capped, the rate is limited, and the CV is checked before anything is saved (careers.py).
 APPLY_LIMIT = 8 * 1024 * 1024          # a 5 MB CV is about 6.7 MB as base64, plus the form
+# the limits count applications that are accepted: a refused CV or form is checked first and counts nothing, so three refused CVs never block
+# the real one (13 Nov). TRIES_BY_ADDRESS counts every try, to stop a flood of bad uploads, and is loose enough for a person fixing their CV.
+APPLY_TRIES_BY_ADDRESS = rate_limits.Throttle("apply_tries_by_address", 30, 3600)
 APPLY_BY_ADDRESS = rate_limits.Throttle("apply_by_address", 10, 3600)
 APPLY_BY_EMAIL = rate_limits.Throttle("apply_by_email", 3, 3600)
 
@@ -1176,8 +1179,8 @@ def careers_job(job_id: int):
 @app.post("/api/careers/jobs/{job_id}/apply")
 async def careers_apply(job_id: int, request: Request):
     address = (request.headers.get("x-forwarded-for") or (request.client.host if request.client else "?")).split(",")[0].strip()
-    if not APPLY_BY_ADDRESS.allow(address):
-        raise HTTPException(429, "Too many applications from this address. Please try again later.")
+    if not APPLY_TRIES_BY_ADDRESS.allow(address):
+        raise HTTPException(429, "Too many tries from this address. Please try again later.")
     if int(request.headers.get("content-length") or 0) > APPLY_LIMIT:
         raise HTTPException(413, "That is too big. The CV limit is 5 MB.")
     chunks, total = [], 0
@@ -1192,10 +1195,14 @@ async def careers_apply(job_id: int, request: Request):
         data = None
     if not isinstance(data, dict):
         raise HTTPException(400, "Something went wrong with the form. Please try again.")
+    cv = careers.decode_cv(data.get("cv"))
+    cv = cv if cv is not None else b""
+    careers_result(await run_in_threadpool(careers.check_application, job_id, data, cv))       # a refused try stops here, counted by nothing above
     if not APPLY_BY_EMAIL.allow(str(data.get("email") or "").strip().lower()):
         raise HTTPException(429, "Too many applications with this email address. Please try again later.")
-    cv = careers.decode_cv(data.get("cv"))
-    result = careers_result(await run_in_threadpool(careers.apply, job_id, data, cv if cv is not None else b""))
+    if not APPLY_BY_ADDRESS.allow(address):
+        raise HTTPException(429, "Too many applications from this address. Please try again later.")
+    result = careers_result(await run_in_threadpool(careers.apply, job_id, data, cv))
     return {"link": f"{APP_URL}/careers/track/{result['token']}"}                                    # shown once on the confirmation page
 
 

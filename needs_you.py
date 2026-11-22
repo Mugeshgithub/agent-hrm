@@ -15,6 +15,7 @@ import jobs
 import law_status
 import onboarding
 import policy_gaps
+import untrusted
 from tools import get_employee, get_pending_requests, clean_days
 
 PAID_WARN_ABOVE = 30    # unused paid days. L3141-3 caps a year's paid leave at 30 jours ouvrables, so
@@ -87,7 +88,9 @@ def for_assistant(emp_id):
     box = inbox(emp_id)
     if "error" in box:
         return box
+    tag = untrusted.mark()                # candidate names come from the public careers page (untrusted.py)
     return {
+        "about_candidate_names": untrusted.NOTE if box["new_applications"] else None,
         "waiting_on_you": box["waiting_on_you"],
         "leave_requests": [{"request_id": p["request_id"], "employee_name": p["employee_name"],
                             "leave_type": p["leave_type"], "start": p["start"], "end": p["end"], "days": p["days"],
@@ -102,7 +105,7 @@ def for_assistant(emp_id):
         "contracts_to_approve": [{"employee_name": c["employee_name"], "contract_type": c["contract_type"], "start_date": c["start_date"],
                                   "salary_eur": c["salary_eur"], "trial": c["trial_text"], "sent_by": c["submitted_by"]}
                                  for c in box["contract_approvals"]],
-        "new_applications": [{"candidate": a["name"], "job": a["job_title"], "applied_on": a["applied_at"][:10]} for a in box["new_applications"]],
+        "new_applications": [{"candidate": untrusted.wrap(a["name"], tag), "job": a["job_title"], "applied_on": a["applied_at"][:10]} for a in box["new_applications"]],
         "candidate_notes_waiting": len(box["candidate_notes"]),      # a count only: what a candidate wrote is untrusted text, and is read on the page, not here
         "questions_the_policy_does_not_answer": [{"topic": g["topic"], "times_asked": g["asks"], "also_asked_as": g["examples"][1:]}
                                                  for g in box["policy_gaps"]],

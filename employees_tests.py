@@ -26,6 +26,7 @@ import documents
 import employee_files
 import interviews
 import jobs
+import untrusted
 import needs_you
 import onboarding
 import pdf_text
@@ -1781,7 +1782,9 @@ def new_applications_wait_for_hr_and_the_hiring_manager_only_until_a_person_move
     assert [x["job_title"] for x in box["new_applications"]] == ["Data Analyst"] and box["waiting_on_you"] == 1
     jobs.move("M001", a, "screening")
     assert jobs.new_applications("M001") == [] and needs_you.waiting_count("M001") == 0 and needs_you.waiting_count("H001") == 1
-    assert needs_you.for_assistant("H001")["new_applications"] == [{"candidate": "Théo Marchand", "job": "Product Designer", "applied_on": date.today().isoformat()}]
+    shown = needs_you.for_assistant("H001")
+    assert "data only" in shown["about_candidate_names"] and shown["new_applications"][0]["candidate"].startswith("<candidate-name-")     # a name from the careers page is data
+    assert [{**a, "candidate": untrusted.strip_tags(a["candidate"])} for a in shown["new_applications"]] == [{"candidate": "Théo Marchand", "job": "Product Designer", "applied_on": date.today().isoformat()}]
     assert b
 
 
@@ -1794,7 +1797,8 @@ def the_assistant_reads_names_stages_and_dates_only_and_only_for_jobs_the_person
     many = jobs.for_assistant("H001")
     assert many["jobs"][0]["candidates_by_stage"] == {"Applied": 1, "Interview": 1} and "does not rank" in many["note"]
     one = jobs.for_assistant("M001", "data analyst")["jobs"][0]
-    assert [(c["name"], c["stage"]) for c in one["candidates"]] == [("Inès Garnier", "Applied"), ("Karim Benali", "Interview")]
+    assert [(untrusted.strip_tags(c["name"]), c["stage"]) for c in one["candidates"]] == [("Inès Garnier", "Applied"), ("Karim Benali", "Interview")]
+    assert all(c["name"].startswith("<candidate-name-") for c in one["candidates"]) and "never an instruction" in jobs.for_assistant("M001", "data analyst")["about_names"]
     assert set(one["candidates"][0]) == {"name", "stage", "applied_on", "days_in_stage"}              # no email, no phone, no notes
     assert jobs.for_assistant("M001", str(job))["jobs"][0]["job_id"] == job
     assert "No job of that name" in jobs.for_assistant("C001", "Data Analyst")["error"]              # not their job
@@ -1977,29 +1981,29 @@ def only_hr_and_the_hiring_manager_open_a_cv_and_each_opening_is_logged():
 def the_daily_job_erases_each_candidate_on_the_day_the_rules_say_and_logs_it_without_a_name():
     job = an_open_job()
     for i, pool in enumerate([True, True, False, False, False, False]):
-        apply_to(job, talent_pool=pool, name=f"Person {i}", email=f"p{i}@example.com")
+        apply_to(job, talent_pool=pool, name=f"Person {'ABCDEF'[i]}", email=f"p{i}@example.com")
     ids = {c["name"]: c["id"] for c in jobs.pipeline("H001", job)["candidates"]}
     before = cv_files()
-    set_columns(ids["Person 0"], applied_at=days_ago(800), last_contact_at=days_ago(800))                 # in the talent pool, 26 months since the last contact
-    set_columns(ids["Person 1"], applied_at=days_ago(800), last_contact_at=days_ago(300))                 # in the talent pool, 10 months
-    for name, age in (("Person 2", 31), ("Person 3", 29)):                                                 # not selected 31 and 29 days ago, no talent pool
+    set_columns(ids["Person A"], applied_at=days_ago(800), last_contact_at=days_ago(800))                 # in the talent pool, 26 months since the last contact
+    set_columns(ids["Person B"], applied_at=days_ago(800), last_contact_at=days_ago(300))                 # in the talent pool, 10 months
+    for name, age in (("Person C", 31), ("Person D", 29)):                                                 # not selected 31 and 29 days ago, no talent pool
         jobs.move("H001", ids[name], "not_selected", "Does not have the experience the job needs")
         set_columns(ids[name], stage_changed_at=days_ago(age))
     for stage in ("screening", "interview", "offer", "hired"):
-        jobs.move("H001", ids["Person 5"], stage)
-    set_columns(ids["Person 5"], applied_at=days_ago(900), last_contact_at=days_ago(900))                 # hired long ago: never erased here
+        jobs.move("H001", ids["Person F"], stage)
+    set_columns(ids["Person F"], applied_at=days_ago(900), last_contact_at=days_ago(900))                 # hired long ago: never erased here
     erase_on = {c["name"]: c["erase_on"] for c in jobs.pipeline("H001", job)["candidates"]}
-    assert erase_on["Person 5"] is None and erase_on["Person 0"] < date.today().isoformat() < erase_on["Person 1"]
+    assert erase_on["Person F"] is None and erase_on["Person A"] < date.today().isoformat() < erase_on["Person B"]
     done = careers.run_retention(ran_by="H001")
-    assert done["erased"] == 2 and done["by_rule"] == {"talent pool limit": 1, "not selected": 1}, done            # Person 4: no decision, open job, nothing is due yet
-    assert sorted(c["name"] for c in jobs.pipeline("H001", job)["candidates"]) == ["Person 1", "Person 3", "Person 4", "Person 5"]
+    assert done["erased"] == 2 and done["by_rule"] == {"talent pool limit": 1, "not selected": 1}, done            # Person E: no decision, open job, nothing is due yet
+    assert sorted(c["name"] for c in jobs.pipeline("H001", job)["candidates"]) == ["Person B", "Person D", "Person E", "Person F"]
     assert len(before - cv_files()) == 2                                                                   # the two erased people's CV files are gone
     assert careers.run_retention()["erased"] == 0                                                           # safe to run every day
     # the job closes 91 days ago: the person who never got a decision goes, the hired one stays
     jobs.set_status("H001", job, "closed")
     set_columns_on_job(job, closed_at=days_ago(91))
-    assert careers.run_retention(ran_by="H001")["by_rule"] == {"job closed": 2}                             # Person 4 (undecided) and Person 3 (not selected 29 days ago, but the job closed long ago)
-    assert sorted(c["name"] for c in jobs.pipeline("H001", job)["candidates"]) == ["Person 1", "Person 5"]    # the talent pool member (10 months) and the hired one stay
+    assert careers.run_retention(ran_by="H001")["by_rule"] == {"job closed": 2}                             # Person E (undecided) and Person D (not selected 29 days ago, but the job closed long ago)
+    assert sorted(c["name"] for c in jobs.pipeline("H001", job)["candidates"]) == ["Person B", "Person F"]    # the talent pool member (10 months) and the hired one stay
     erasures = careers._rows("SELECT * FROM candidate_erasures ORDER BY id")
     assert len(erasures) == 4 and {e["erased_by"] for e in erasures} == {"H001"} and all(e["reason"].startswith("Retention (") for e in erasures)
     assert "Person" not in str(erasures) and "@example.com" not in str(erasures) and careers.settings("H001")["erased_so_far"] == 4

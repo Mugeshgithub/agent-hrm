@@ -6,6 +6,7 @@ Entries marked *backfilled* were written afterwards from the code, the git histo
 ## Open items
 Known weak spots, measured and not fixed yet. Remove a line when its fix merges.
 - **Grounding check: "decided on a case-by-case basis" is caught 2 to 4 times in 10** (grounding_tests.py, 22 Nov; 3/10 on main before #63). An invented basis for the manager's decision can reach the person. See entry 29.
+- **Test that CV text stays out of Langfuse against a live Langfuse before real candidate data.** The summary call is wrapped in `tracing.private_call()` and its trace keeps no input or output (entry 35), checked only by reading the installed instrumentation's source.
 - **Eval "category: when HR has not set it the assistant says so and gives each case" fails about 1 time in 10** (9/10 on main, 8/10 on #64's branch, 22 Nov; one CI retry on #64). The reply sometimes gives one notice period and mentions the other only as an "unless". Not fixed: CI's one retry covers it.
 
 ### 1. Our own agent loop, not LangChain (backfilled, 2026-10-29)
@@ -224,3 +225,38 @@ Known weak spots, measured and not fixed yet. Remove a line when its fix merges.
 - **Why:** HR's question was answered 3/3 with no search. The model looked Hugo up (or the contract's stage, "his contract hasn't been drafted yet") and offered to search. Once searched, the check flagged "I can't read Hugo's contract", and 2 of 3 replies became the bare policy quote.
 - **Cost:** grounding_tests.py with 4 new cases, 10 runs: 0/280 good flagged, 6/290 bad missed. New evals 5/5 each.
 - **Change it when:** a manager's question about their own team's data gets a forced search it does not need.
+
+### 32. Recruitment: the AI informs, a person decides; ranking is refused in code (PR #28, merged 2026-11-08, backfilled)
+- **Chose:** jobs, a pipeline (Applied, Screening, Interview, Offer, Hired, Not selected) and `get_job_pipeline` for HR and the job's hiring manager: names, stages and dates in the order people applied, no contact details. Ranking, comparing and "who should I hire" get a fixed refusal from [recruitment_guard.py](../recruitment_guard.py) before the model is called, for the founder too. A job text is checked against the L1132-1 terms. Not selected needs a reason; Hired needs an Offer first.
+- **Not chosen:** letting the model rank or recommend with a warning (high-risk under the EU AI Act; L1132-1 and L1221-6 read from the labour DB); a prompt paragraph for the rules.
+- **Why:** a paragraph added to the manager/HR prompt dropped "send Lea's contract" from about 83% to 47%; removing it restored it. Rules went into code and tool descriptions.
+- **Cost:** the job-text check is a word list, conservative, and skips equal-opportunity sentences: it misses paraphrases.
+- **Change it when:** a recruiter needs a view the refusal blocks that ranks nobody.
+
+### 33. Careers page: a private tracking link, and retention set by the CNIL guidance (PR #29, merged 2026-11-08, backfilled)
+- **Chose:** a public careers page ([careers.py](../careers.py)) with a CV upload and a tracking link shown once and stored as a hash; withdraw and erase from the link. Retention ([retention.py](../retention.py)): the talent pool, only with consent, for 1 to 24 months from the last contact (HR sets it); others erased 30 days after Not selected or 90 days after the job closes. Erased means personal data blanked and the CV deleted; an anonymous record stays. The privacy notice is built from `AI_ASSISTS`, so it never says more than the app does.
+- **Not chosen:** accounts for candidates; the 5-year proof archive L1134-5 allows (not built: the user's call).
+- **Why:** the CNIL recruitment referential (29/01/2026): 24 months is the ceiling for a talent pool of people who agreed; other candidates only for the procedure.
+- **Cost:** the CV goes in the JSON body as base64 (CI's web job has no python-multipart).
+- **Change it when:** a legal review asks for the proof archive, or the CNIL guidance changes.
+
+### 34. Candidate assistant: its own small assistant, three read tools, fixed answers in code (PR #38, merged 2026-11-12; PR #43, merged 2026-11-15; backfilled)
+- **Chose:** [candidate_assistant.py](../candidate_assistant.py), keyed by the tracking link only, with `get_my_application`, `get_privacy_notice` and `note_for_hr`. "Am I talking to a person", chances, other candidates and promises get fixed answers in code before the model; promise and comparison replies are sent back once then replaced; a reply claiming a note was passed when none was saved is replaced. Only for applications made under the notice that says an AI answers (2026-11b). #43: a reply with no `get_my_application` call in the turn is sent back once, then replaced.
+- **Not chosen:** the HR assistant with a candidate role (it has tools that write); showing the HR handbook to candidates (only the privacy notice is public).
+- **Why:** #43: asked "I want to prepare for the interview", it described a Product team the job never had (0/10 calls, 6/10 wrong team); with the check 40/40, and 7/40 first answers on main called nothing.
+- **Cost:** a candidate's note is untrusted text: the HR assistant only gets a count, and people read the notes on the page.
+- **Change it when:** a practice interview is built (parked, option B): it needs a new notice version and must never grade.
+
+### 35. Application summaries: quotes checked in code, no score (PR #39, merged 2026-11-13, backfilled)
+- **Chose:** on request, [application_summary.py](../application_summary.py) gives the model the job's numbered requirements and the CV and cover letter between random markers; it can only return quotes. Code finds each quote in the document and shows the document's own words; a quote with personal details (age, nationality, family, health, address, beliefs) or an instruction to an AI is withheld. Each requirement is found, not mentioned, withheld or unchecked. No score, no total, no sentence written by the model. The summary model has no tools; its trace keeps no input or output.
+- **Not chosen:** a free-text summary or a fit score; summaries for applications made before the notice said so.
+- **Why:** EU AI Act high-risk; a score would rank. Evals 60/60 at x10; without the prompt's rules the "own words" evals fail 4/5, the injection ones still pass (the markers already say "data").
+- **Cost:** the personal-details filter is a word list; the Langfuse suppression is untested live (Open items).
+- **Change it when:** the filter misses a real CV's personal detail.
+
+### 36. Candidate input: refused tries are not counted, and names are letters read as data (PR #66, 2026-11-22)
+- **Chose:** the careers API checks the form and the CV ([careers.py](../careers.py) `check_application`) before its limits, which count accepted applications only (3 per email, 10 per address an hour); a looser limit (30 an hour per address) counts every try. A name is letters in any script with their marks, spaces, hyphens, apostrophes and full stops ("R. Mugesh", "St. John"), 2 to 80 characters ([untrusted.py](../untrusted.py)), on the careers page and HR's form. The HR assistant reads each candidate name between tags made at random for each answer, with a note that it is data; the tags are taken out of the reply.
+- **Not chosen:** counting every try per email (three refused CVs blocked the real application for an hour, 13 Nov); refusing names that read like instructions (a word list; "Ignore your rules" is letters, so the tags carry it).
+- **Why:** names from the public form reach an assistant with tools that write.
+- **Cost:** a name with digits, a comma or a colon is refused; existing names are not changed. Eval: a name that is an instruction, 3/3, and 3/3 too with the tags turned off (the model ignored it by itself): the tags are defence in depth, not shown to be what stops it. The welcome prompt also lists only the new hire's own steps when asked what is missing ("welcome: after a reminder" 10/10, main 6/10).
+- **Change it when:** a real candidate cannot type their name.

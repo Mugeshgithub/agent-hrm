@@ -22,6 +22,7 @@ import db
 import documents
 import jobs
 import retention
+import untrusted
 from jobs import _rows
 
 MAX_CV_BYTES = 5 * 1024 * 1024
@@ -141,17 +142,22 @@ def _text(data, key, low, high, label):
     return value if low <= len(value) <= high else {"error": label}
 
 
-def apply(job_id, data, cv, now=None):
-    """Create the application. `data`: name, email, phone, cover_letter, consent (must be true), talent_pool. `cv`: the PDF bytes.
-    Returns {"token": ...} (shown once: it is the tracking link) or {"error": ...}."""
+NAME_PROBLEM = f"Give your name using letters, spaces, hyphens, apostrophes and full stops only (at most {untrusted.NAME_MAX} characters)."
+
+
+def check_application(job_id, data, cv):
+    """{"name", "email", "phone", "letter"} cleaned for an application that would be accepted, or {"error": ...}. Nothing is counted or saved:
+    the API checks this BEFORE its per-email limit, so refused tries (a CV refused three times) never block the person's real application."""
     rows = _rows("SELECT * FROM jobs WHERE id = ? AND status = 'open'", (job_id,))
     if not rows:
         return {"error": NOT_OPEN}
-    name = _text(data, "name", 2, 120, "Give your name.")
+    name = untrusted.clean_name(data.get("name"))
+    if name is None:
+        return {"error": NAME_PROBLEM}
     email = _text(data, "email", 3, 200, "Give a valid email address.")
     phone = _text(data, "phone", 0, 40, "That phone number is too long.")
     letter = _text(data, "cover_letter", 0, 3000, "The cover letter is too long (at most 3000 characters).")
-    for value in (name, email, phone, letter):
+    for value in (email, phone, letter):
         if isinstance(value, dict):
             return value
     if not jobs._valid_email(email.lower()):
@@ -161,6 +167,16 @@ def apply(job_id, data, cv, now=None):
     problem = check_cv(cv)
     if problem:
         return {"error": problem}
+    return {"name": name, "email": email, "phone": phone, "letter": letter}
+
+
+def apply(job_id, data, cv, now=None):
+    """Create the application. `data`: name, email, phone, cover_letter, consent (must be true), talent_pool. `cv`: the PDF bytes.
+    Returns {"token": ...} (shown once: it is the tracking link) or {"error": ...}."""
+    checked = check_application(job_id, data, cv)
+    if "error" in checked:
+        return checked
+    name, email, phone, letter = checked["name"], checked["email"], checked["phone"], checked["letter"]
     token = secrets.token_urlsafe(32)
     file_name = f"cv_{secrets.token_hex(16)}.pdf"
     folder = documents.files_dir()
