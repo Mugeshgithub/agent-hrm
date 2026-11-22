@@ -33,6 +33,8 @@ import leave_admin
 import onboarding
 import outbox
 import policy_gaps
+import app_clock
+import date_check
 import guard_events
 import policy_store
 import pdf_text
@@ -68,6 +70,17 @@ def iso(d):
 
 def say(d):
     return d.strftime("%-d %B %Y")        # 17 November 2026, how a user would type it
+
+
+def card_dates(start, end):
+    # the card waiting books exactly one request, from `start` to `end`
+    items = agent.convo().pending.get("items") or []
+    return len(items) == 1 and (items[0]["input"]["start_date"], items[0]["input"]["end_date"]) == (start.isoformat(), end.isoformat())
+
+
+def no_wrong_weekday(today):
+    # every weekday the reply writes next to a date is that date's weekday (date_check.py)
+    return lambda reply: [f"says {t!r}, but {d.isoformat()} is a {real}" for t, d, real in date_check.wrong_pairs(reply, today)]
 
 
 def card_weekdays(weekdays):
@@ -2613,6 +2626,48 @@ TEST_CASES = [
 ]
 
 
+# ---- dates: each way of naming a day, for each day of the week as "today" ----
+# real, Sun 22 Nov 2026: "Friday 29 November" (a Sunday) for Friday 27 November; "next Thursday and Friday" and "Monday to Wednesday next
+# week" failed on Sundays only. Today is fixed (app_clock.py) to each day of the week of Mon 1 to Sun 7 March 2027: no public holiday, no
+# demo request, and every date asked for is in the future whatever day the evals really run on. The meaning of each phrase is the rule
+# the prompt gives (date_check.table), by the weeks (Monday to Sunday): a weekday on its own is the first one after today; "next Friday" is
+# the Friday of next week, "the Friday after next" the Friday of the week after; "next week" is the week after this one.
+DATE_WEEK = [date(2027, 3, 1) + timedelta(days=n) for n in range(7)]
+
+
+def first_after(today, weekday):
+    return today + timedelta(days=(weekday - today.weekday() - 1) % 7 + 1)
+
+
+def in_week(today, weeks_on, weekday):
+    # that weekday in this week (0), next week (1) or the week after (2)
+    return today - timedelta(days=today.weekday()) + timedelta(days=7 * weeks_on + weekday)
+
+
+DATE_PHRASES = [
+    ("Book me Friday off as casual leave", lambda t: (first_after(t, 4), first_after(t, 4))),
+    ("Book me casual leave next Monday", lambda t: (first_after(t, 0), first_after(t, 0))),
+    ("Book me casual leave next Thursday and Friday", lambda t: (in_week(t, 1, 3), in_week(t, 1, 4))),
+    ("I'd like casual leave from Monday to Wednesday next week", lambda t: (in_week(t, 1, 0), in_week(t, 1, 2))),
+    ("Book me casual leave on the Friday after next", lambda t: (in_week(t, 2, 4), in_week(t, 2, 4))),
+]
+
+TEST_CASES += [
+    {
+        "name": f"dates: today {today:%A}: {said}",
+        "user": "E001",
+        "auto_confirm": agent.AWAITING_CONFIRMATION,
+        "today": today,
+        "setup": lambda: agent.convo().pending.clear(),
+        "input": said,
+        "must_call": ["apply_leave"],
+        "reply_check": no_wrong_weekday(today),
+        "check": lambda today=today, dates=dates: card_dates(*dates(today)),
+    }
+    for today in DATE_WEEK for said, dates in DATE_PHRASES
+]
+
+
 # ---------- runner ----------
 
 def select_indices(only=None):
@@ -2631,6 +2686,7 @@ def attempt(case):
     # fresh test database, empty chat memory, logged-in user and simulated yes/no for every test
     db.init_db(reset=True)
     reset_memory()
+    app_clock.fix(case.get("today"))          # a fixed "today" for the date tests, else the real date
     agent.convo().user_id = case["user"]
     agent.convo().confirm = lambda tool_input, answer=case["auto_confirm"]: answer
     token = case["setup"]() if "setup" in case else None

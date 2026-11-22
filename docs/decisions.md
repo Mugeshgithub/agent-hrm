@@ -260,3 +260,10 @@ Known weak spots, measured and not fixed yet. Remove a line when its fix merges.
 - **Why:** names from the public form reach an assistant with tools that write.
 - **Cost:** a name with digits, a comma or a colon is refused; existing names are not changed. Eval: a name that is an instruction, 3/3, and 3/3 too with the tags turned off (the model ignored it by itself): the tags are defence in depth, not shown to be what stops it. The welcome prompt also lists only the new hire's own steps when asked what is missing ("welcome: after a reminder" 10/10, main 6/10).
 - **Change it when:** a real candidate cannot type their name.
+
+### 38. Dates: code works out the days a person names, the prompt gets a dated list, and a reply's weekdays are checked (PR #68, 2026-11-22)
+- **Chose:** [date_check.py](../date_check.py). The prompt gets today and the next 14 days, each with its weekday and week (this week, next week, the week after next). Code works out the days a person names and adds them to their message: a weekday on its own is the first one after today; "next Friday" is next week's, "the Friday after next" the week after's; "Monday to Wednesday next week" is next week's; "vendredi prochain" is the first one after today. A reply that pairs a weekday with a date is checked with real date maths: one retry, then a safe reply. `app_clock.today()` lets the evals fix today.
+- **Not chosen:** rules in the prompt alone (with the dated list and rules, 315/350: on a Monday the model booked next week's Thursday for "next Thursday" whatever the rule said, and this week's Friday for "the Friday after next", 0-1/10).
+- **Why:** real, Sun 22 Nov: "Friday 29 November" (a Sunday) for Friday 27 November. 35 evals (5 phrases for each day of the week as today) x10: 244/350 before, 350/350 after; the reply check never had to step in.
+- **Cost:** about 600 more tokens in the cached prompt. "Next Friday" on a Monday is read as next week's Friday, not this week's: people use both, and this one is now fixed in code.
+- **Change it when:** people say the app picks the wrong one of two readings, or another phrase ("in two weeks", "le 1er") needs working out.

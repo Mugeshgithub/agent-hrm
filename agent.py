@@ -23,7 +23,9 @@ from memory import init_memory, init_summaries, save_message, build_context, loa
 from notifications import init_notifications, notify_decision, notify_ticket_reply, show_unread
 from policy import search_policy, embed as embed_texts
 import application_summary
+import app_clock
 import approval_first
+import date_check
 import booking_first
 import candidate_assistant
 import existing_first
@@ -528,7 +530,8 @@ def system_prompt_for(user_id):
     role_rules = ROLE_RULES.get(role, ROLE_RULES["employee"])
     return [
         # block 1: same for everyone with this role, so it can be cached
-        {"type": "text", "text": SYSTEM_PROMPT.replace(TODAY, today_line()) + role_rules, "cache_control": {"type": "ephemeral"}},
+        {"type": "text", "text": SYSTEM_PROMPT.replace(TODAY, today_line() + "\n" + date_check.table(app_clock.today())) + role_rules,
+         "cache_control": {"type": "ephemeral"}},
         # block 2: only once HR has uploaded the collective agreement: the order of sources. It replaces the earlier "search_policy first" rules.
         *([{"type": "text", "text": order + " While the agreement is on file, this order replaces any earlier instruction about which of "
                                             "search_policy and search_labour_code to call first, or together."}]
@@ -635,11 +638,11 @@ def run_tool(name, tool_input):
             return {"error": "Dates must be in YYYY-MM-DD format"}
         if end < start:
             return {"error": "End date is before start date"}
-        if start < date.today():
-            return {"error": f"Start date {start} is in the past. Today is {date.today()}. "
+        if start < app_clock.today():
+            return {"error": f"Start date {start} is in the past. Today is {app_clock.today()}. "
                              "If the user didn't give a year, use the next upcoming date."}
         # the dates fall on the weekdays the person named ("next Thursday and Friday"): the model gets the weekday wrong (named_days.py)
-        if (wrong := named_days.mismatch(days_named_by_person(), start, end, date.today())):
+        if (wrong := named_days.mismatch(days_named_by_person(), start, end, app_clock.today())):
             return {"error": wrong}
         kind = tool_input.get("leave_type") or "casual"
         if kind not in LEAVE_TYPES:
@@ -664,12 +667,12 @@ def run_tool(name, tool_input):
             end = date.fromisoformat(tool_input["end_date"])
         except ValueError:
             return {"error": "Dates must be in YYYY-MM-DD format"}
-        if start < date.today():
-            return {"error": f"Leave cannot start in the past. Today is {date.today()}."}
+        if start < app_clock.today():
+            return {"error": f"Leave cannot start in the past. Today is {app_clock.today()}."}
         if end < start:
             return {"error": "End date is before start date"}
         # refuse BEFORE asking: dates on other weekdays than the ones the person named never get a card (named_days.py)
-        if (wrong := named_days.mismatch(days_named_by_person(), start, end, date.today())):
+        if (wrong := named_days.mismatch(days_named_by_person(), start, end, app_clock.today())):
             return {"error": f"{wrong} Nothing was submitted and no confirmation was shown."}
         # refuse BEFORE asking: dates that already have a pending or approved request never get a card (the refusal used to come only after Confirm)
         if (found := existing_request(me, start.isoformat(), end.isoformat())):
@@ -954,6 +957,7 @@ def answer_turn(user_text):
         existing_retry_used = False
         card_retry_used = False
         number_retry_used = False
+        date_retry_used = False
         grounding_retry_used = False
         guards = guard_events.Turn()      # what each guard did in this answer, written once it is final (guard_events.py)
         last_turn["tools_called"] = []
@@ -1133,6 +1137,20 @@ def answer_turn(user_text):
                     reply = shown
                     guards.ended("number", "replaced", {"figures": len(figures)})
 
+                # guardrail in code: a weekday written next to a date is that date's weekday, checked with real date maths (date_check.py). One retry
+                # naming the right weekdays, then a safe reply (the card, if one is waiting, shows the exact dates with their weekdays)
+                action, shown = date_check.review(reply, app_clock.today(), date_retry_used, bool(pending_action))
+                if action == "retry":
+                    date_retry_used = True
+                    guards.retried("date", {"pairs": len(date_check.wrong_pairs(reply, app_clock.today()))})
+                    print(f"  [guard] a weekday and a date disagree: {date_check.wrong_pairs(reply, app_clock.today())}: asking again")
+                    messages.append({"role": "user", "content": shown})
+                    continue
+                if action == "replaced":
+                    print("  [guard] a weekday and a date still disagree: replying safely instead")
+                    reply = shown
+                    guards.ended("date", "safe_reply")
+
                 # guardrail in code: a policy answer gives no reason, condition, deadline or consequence that this turn's tool results do not contain;
                 # a second model reads it (policy_grounding.py). One retry naming those parts, then their sentences are taken out or the policy is quoted.
                 if policy_grounding.applies(last_turn["tools_called"]) or (last_turn["earlier_sources"] and policy_grounding.applies([n for n, _ in earlier])):
@@ -1148,7 +1166,7 @@ def answer_turn(user_text):
                     if action == "replaced":
                         reply = shown
                         guards.ended("grounding", "replaced", {"claims": len(detail)})
-                if document_retry_used or agreement_retry_used or contract_retry_used or booking_retry_used or decision_retry_used or existing_retry_used or card_retry_used or number_retry_used or grounding_retry_used:       # a retry note was sent: the reply must not talk about it
+                if document_retry_used or agreement_retry_used or contract_retry_used or booking_retry_used or decision_retry_used or existing_retry_used or card_retry_used or number_retry_used or grounding_retry_used or date_retry_used:       # a retry note was sent: the reply must not talk about it
                     reply = document_answers.strip_correction(reply)
                 reply = untrusted.strip_tags(reply)          # the tags around candidate names (untrusted.py) are for the model, never shown
 
@@ -1211,7 +1229,9 @@ def handle_message(user_text):
         c.summary, c.messages = build_context(c.user_id, client, MODEL)
         c.stored, c.restarted = 0, True
 
-    c.messages.append({"role": "user", "content": user_text})
+    # the days the person names by their weekday ("next Thursday and Friday") are worked out by code and given with the message (date_check.py);
+    # the saved message, which the person sees again, is only what they typed
+    c.messages.append({"role": "user", "content": user_text + date_check.dates_note(user_text, app_clock.today())})
     save_message(c.user_id, "user", user_text)
     try:
         return answer_turn(user_text)

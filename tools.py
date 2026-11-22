@@ -4,6 +4,7 @@ import os
 import re
 from datetime import date, timedelta
 from db import get_conn, init_db, ticket_number
+import app_clock
 import policy_store
 
 # public holidays of the default plan; leave_admin.load_holidays() refills this set from the database
@@ -128,7 +129,7 @@ def _day_label(d):
 
 def today_line(today=None):
     """The date line of the prompt, built on every call: the weekday is part of it (the model gets it wrong when it has to work it out from 2026-11-10)."""
-    today = today or date.today()
+    today = today or app_clock.today()
     return f"Today is {today:%A} {today.isoformat()}."
 
 
@@ -209,7 +210,7 @@ def apply_leave(employee_id, leave_type, start_date, end_date):
     end = date.fromisoformat(end_date)
     if end < start:
         return {"error": "End date is before start date"}
-    if start < date.today():
+    if start < app_clock.today():
         return {"error": "Start date is in the past"}
 
     conn = get_conn()
@@ -374,7 +375,7 @@ def cancel_leave(employee_id, request_id):
             return {"cancelled": True, "days_returned": 0, "message": "Pending request withdrawn."}
 
         if req["status"] == "approved":
-            if date.fromisoformat(req["start_date"]) <= date.today():
+            if date.fromisoformat(req["start_date"]) <= app_clock.today():
                 return {"cancelled": False,
                         "message": "This leave has already started. Please contact your manager or HR."}
             if req["leave_type"] == FLOATER:
@@ -409,7 +410,7 @@ def cancel_problem(employee_id, request_id):
     if req["status"] == PENDING:
         return None
     if req["status"] == "approved":
-        return "This leave has already started. Please contact your manager or HR." if date.fromisoformat(req["start_date"]) <= date.today() else None
+        return "This leave has already started. Please contact your manager or HR." if date.fromisoformat(req["start_date"]) <= app_clock.today() else None
     return f"This request is already {req['status']}."
 
 
