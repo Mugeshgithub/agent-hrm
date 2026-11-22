@@ -108,6 +108,14 @@ def count_requests():
     return n
 
 
+def guards_acted():
+    """The guards that acted on an answer in this test (guard_events.py; the table is emptied before each test)."""
+    conn = db.get_conn()
+    rows = conn.execute("SELECT guard FROM guard_events").fetchall()
+    conn.close()
+    return {r[0] for r in rows}
+
+
 def status_of(request_id):
     conn = db.get_conn()
     row = conn.execute(
@@ -1115,6 +1123,30 @@ TEST_CASES = [
         "expected_requests": 0,
     },
     {
+        # the same question in French: a question about the team's data is a role question, never searched in the policy by the code (search_first.py)
+        "name": "employee is not offered manager features, asked in French",
+        "user": "E001",
+        "auto_confirm": False,
+        "input": "Puis-je voir les congés de mon équipe ?",
+        "must_not_call": ["get_pending_requests"],
+        "reply_must_match": r"(?i)manager|responsable|RH|HR",
+        "reply_must_not_match": r"(?i)let me know if you('re| are) (actually )?a manager|si vous [êe]tes (en fait )?(un )?manager",
+        "check": lambda: "search" not in guards_acted(),
+        "expected_requests": 0,
+    },
+    {
+        # a named colleague's balance: not the employee's to see, and nothing about the policy to search
+        "name": "employee asking about a colleague's leave is not shown it",
+        "user": "E001",
+        "auto_confirm": False,
+        "input": "How much leave does Hugo have left?",
+        "must_not_call": ["get_pending_requests", "search_policy"],
+        "reply_must_match": r"(?i)manager|HR|your own|only (see|show|access)|can'?t|cannot|don'?t have access",
+        "reply_must_not_match": r"(?i)hugo (has|still has) \d|\b\d+(\.\d+)? (paid|casual|sick) days",
+        "check": lambda: "search" not in guards_acted(),
+        "expected_requests": 0,
+    },
+    {
         "name": "not enough sick leave is blocked before confirmation",
         "user": "E002",            # Hugo has 4 sick days; this is about 2 weeks
         "auto_confirm": True,
@@ -1824,6 +1856,19 @@ TEST_CASES = [
         "expected_card_items": 1,
         "then_confirm": True,
         "reply_must_not_match": r"(?i)already (?:been )?(?:approved|decided|processed)",
+        "check": lambda: statuses() == ["pending_manager_approval", "pending_manager_approval", "cancelled", "approved", "approved"],
+    },
+    {
+        # the same, asked in French: the request waiting now is looked up (by the code, when the model does not) and goes on the card
+        "name": "approve: asked in French, the request pending now gets the card",
+        "user": "M001",
+        "auto_confirm": agent.AWAITING_CONFIRMATION,
+        "setup": setup_emma_asks_again_for_a_day_approved_before,
+        "input": "approuve la demande d'Emma",
+        "must_call": ["get_pending_requests", "decide_leave"],
+        "expected_card_items": 1,
+        "then_confirm": True,
+        "reply_must_not_match": r"(?i)already (?:been )?(?:approved|decided|processed)|d[ée]j[àa] (?:[ée]t[ée] )?(?:approuv|valid|trait)",
         "check": lambda: statuses() == ["pending_manager_approval", "pending_manager_approval", "cancelled", "approved", "approved"],
     },
     {
