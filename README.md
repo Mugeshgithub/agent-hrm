@@ -95,7 +95,8 @@ cd agent-hrm
 pip install -r requirements.txt
 ```
 
-Create a `.env` file with `ANTHROPIC_API_KEY` and `OPENAI_API_KEY`. Then, in two terminals:
+Create a `.env` file with `ANTHROPIC_API_KEY` and `OPENAI_API_KEY`, and `HRM_DEMO_LOGIN=1` to sign in as any sample person
+without a password (leave it out anywhere real people sign in). Then, in two terminals:
 
 ```bash
 # 1. API
@@ -111,6 +112,9 @@ cd web && npm install && npm run dev
 ```
 
 Open http://localhost:3000 and choose a person: Emma (employee), Lucas (manager) or Narmadha (HR).
+Without the demo picker, people sign in with their work email and a password they set from a link HR sends them
+(person page, "Send sign-in link"; the email waits in the Outbox). The first HR person gets theirs from the server:
+`HRM_DB=web_demo.db python accounts.py link H001`.
 More in [web/README.md](web/README.md).
 
 Labour-law answers also need Postgres with the pgvector extension and `LABOUR_DB_URL` in `.env`. Without it, the
@@ -120,11 +124,11 @@ Tests: `python unit_tests.py` needs no keys. `python evals.py` calls the real mo
 
 ## Not done yet
 
-- **Sign-in is a demo:** you choose a person, with no password. Real sign-in (SSO or email and password) is the next step.
+- **Sign-in is email and password only:** no single sign-on, no two-step check, and no "forgot password" email (HR sends a new
+  link, and the app sends no email yet).
 - **Built for one machine:** SQLite, one API process, one assistant conversation at a time, no hosted backups.
   It isn't deployed anywhere.
-- **The nightly law sync isn't switched on yet.** It is built and tested on a copy with Légifrance sandbox keys. Until
-  its first real run, search uses a public copy of the Code du travail that misses 1,830 articles in force.
+- **The nightly law sync isn't scheduled yet.** Its first real run (19 Nov 2026) was reviewed and applied by hand.
 - **The labour-law evals don't run in CI,** only locally.
 - **No email is sent by the app:** emails wait in an outbox for HR to send. Interviews are in Paris time only, with no
   calendar link.

@@ -184,3 +184,10 @@ Entries marked *backfilled* were written afterwards from the code, the git histo
 - **Why:** on Fri 20 Nov, "Book me casual leave next Thursday and Friday": 6/10 right on main, 4 cards for Fri 27 and Sat 28 Nov. Now 9/10, no wrong card (the miss asked "26-27 November or 3-4 December?"). "Monday to Wednesday next week": 5/10 on main (asked "Ready to submit?" instead of booking), 10/10 now.
 - **Cost:** a day name used for something else ("sick since Monday, book today to Wednesday") is refused and the assistant asks. Abbreviations ("Fri") are not checked.
 - **Change it when:** people use abbreviations or other languages, or the refusal shows up on requests that were right.
+
+### 27. People sign in with their work email and a password they set from HR's link (PR #61, 2026-11-20)
+- **Chose:** email and password ([accounts.py](../accounts.py)). HR sends a one-use link (7 days) to set a first or a forgotten password; it waits in the Outbox and is taken out once marked sent. Passwords are kept as scrypt hashes, links as SHA-256 hashes. 5 wrong passwords lock the account for 15 minutes, 30 tries per 10 minutes per address. A new password signs the person out everywhere. The demo picker works only with `HRM_DEMO_LOGIN=1`.
+- **Not chosen:** Google or Microsoft sign-in (needs an app registered with them and company accounts for everyone); a magic link by email (the app sends no email yet); a library like argon2 (CI's unit tests install nothing; scrypt is in Python).
+- **Why:** anyone could sign in as anyone, which rules out any real use. Picked by the user on Nov 20.
+- **Cost:** HR can read the link in the Outbox before sending it, so HR could set someone's password (the person's own link then fails, and login_events show it). No two-step check. The address limit is in memory, per process.
+- **Change it when:** the app sends its own email (send the link straight to the person), or a company asks for single sign-on.
