@@ -4,8 +4,10 @@ import importlib.util
 import io
 import json
 import os
+import contextvars
 import re
 import sys
+import threading
 import time
 import types
 from datetime import date, datetime, timedelta, timezone
@@ -18,6 +20,7 @@ import booking_first
 import collective_agreement
 import confirm_batch
 import contract_first
+import conversations
 import contracts
 import document_answers
 import documents
@@ -27,11 +30,13 @@ import named_days
 import guard_events
 import employee_files
 import eval_patterns
+import job_locks
 import jobs
 import number_guard
 import pdf_text
 import policy_gaps
 import policy_grounding
+import rate_limits
 import retention
 import policy_store
 import recruitment_guard
@@ -1959,7 +1964,12 @@ def a_cv_is_checked_before_anything_is_saved():
 
 @test
 def applications_are_rate_limited_per_key_and_the_window_slides():
-    t = careers.Throttle(2, 60)
+    rate_limits.init_rate_limits()
+    conn = db.get_conn()
+    with conn:
+        conn.execute("DELETE FROM rate_events WHERE bucket = 'test'")
+    conn.close()
+    t = rate_limits.Throttle("test", 2, 60)
     assert [t.allow("a", 0), t.allow("a", 10), t.allow("a", 20)] == [True, True, False]
     assert t.allow("b", 20) is True                                                                      # another address is not affected
     assert t.allow("a", 61) is True and t.allow("a", 62) is False                                         # the first try left the window
@@ -2490,8 +2500,14 @@ def load_agent():
     return agent
 
 
+class FakeBlock(types.SimpleNamespace):
+    """A reply block, like the SDK's: the agent saves it as a plain dict."""
+    def model_dump(self, exclude_none=False):
+        return {k: v for k, v in vars(self).items() if not (exclude_none and v is None)}
+
+
 class FakeAgentClaude:
-    """Answers each call of the agent loop with the next reply text, no tool calls."""
+    """Answers each call of the agent loop with the next reply: a text, or a (tool name, input) pair for a tool call."""
     def __init__(self, replies):
         self.replies, self.calls = list(replies), []
         self.messages = self
@@ -2499,7 +2515,11 @@ class FakeAgentClaude:
     def create(self, **request):
         self.calls.append(request)
         usage = types.SimpleNamespace(input_tokens=10, output_tokens=10, cache_creation_input_tokens=0, cache_read_input_tokens=0)
-        return types.SimpleNamespace(content=[types.SimpleNamespace(type="text", text=self.replies.pop(0))], stop_reason="end_turn", usage=usage)
+        reply = self.replies.pop(0)
+        if isinstance(reply, tuple):
+            block = FakeBlock(type="tool_use", id=f"toolu_{len(self.calls)}", name=reply[0], input=reply[1])
+            return types.SimpleNamespace(content=[block], stop_reason="tool_use", usage=usage)
+        return types.SimpleNamespace(content=[FakeBlock(type="text", text=reply)], stop_reason="end_turn", usage=usage)
 
 
 @test
@@ -2511,9 +2531,8 @@ def forced_citation_failure_writes_one_row():
         agent = load_agent()
         made_up = "It is Article L9999-9 of the labour code."   # an article no tool returned, twice
         agent.client = fake = FakeAgentClaude([made_up, made_up])
-        agent.LOGGED_IN_ID, agent.LOGGED_IN_ROLE = "E001", None
-        agent.state.update(messages=[{"role": "user", "content": "Which article of the labour code is that?"}], summary=None)
-        reply = agent.answer_turn("Which article of the labour code is that?")
+        with agent.using(agent.Conversation("E001", messages=[{"role": "user", "content": "Which article of the labour code is that?"}])):
+            reply = agent.answer_turn("Which article of the labour code is that?")
     assert len(fake.calls) == 2, len(fake.calls)                                                # the first answer and one retry
     assert reply.startswith(agent.SAFE_REPLY), reply
     rows = guard_rows()
@@ -2567,6 +2586,263 @@ def booking_guard_hears_i_d_like():
     assert booking_first._REQUEST.search("I'd like casual leave from Monday to Wednesday next week")
     assert booking_first._REQUEST.search("I would like some time off on Friday")
     assert not booking_first._REQUEST.search("How many days would I like to keep?")
+
+
+
+# ---------- stateless server: conversations, cards, limits and jobs in the database ----------
+
+def fresh_conversations():
+    conversations.init_conversations()
+    conn = db.get_conn()
+    with conn:
+        for table in ("pending_actions", "conversation_messages", "conversations"):
+            conn.execute(f"DELETE FROM {table}")
+    conn.close()
+
+
+def no_history(user_id):
+    return None, []
+
+
+A_CARD = {"tool": "apply_leave", "input": {"leave_type": "casual"}, "details": {"working_days": 1}, "kind": "apply_leave", "items": [{"input": {"leave_type": "casual"}}]}
+
+
+@test
+def a_conversation_is_saved_append_only_and_comes_back_byte_for_byte_after_a_restart():
+    fresh_conversations()
+    c = conversations.open_conversation("E001", no_history)
+    tool_turn = [{"type": "text", "text": "Let me check."}, {"type": "tool_use", "id": "toolu_1", "name": "get_leave_balance", "input": {}}]
+    c.messages += [{"role": "user", "content": "My balance?"}, {"role": "assistant", "content": tool_turn},
+                   {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_1", "content": "{\"casual\": 8}"}]},
+                   {"role": "assistant", "content": [{"type": "text", "text": "You have 8 days, café compris."}]}]
+    c.pending = dict(A_CARD)
+    c.usage["calls"] = 2
+    conversations.save(c)
+    sent_before = json.dumps(c.messages)
+    # a restart: nothing in memory, a new object read from the database
+    again = conversations.open_conversation("E001", lambda user_id: (_ for _ in ()).throw(AssertionError("not a new conversation")))
+    assert again.id == c.id and json.dumps(again.messages) == sent_before            # the same bytes: the cached prefix still matches
+    assert again.pending == A_CARD and again.card_id == c.card_id and again.usage["calls"] == 2
+    # more messages are added after the old ones, never instead of them
+    again.messages.append({"role": "user", "content": "Thanks"})
+    conversations.save(again)
+    conn = db.get_conn()
+    rows = conn.execute("SELECT role FROM conversation_messages WHERE conversation_id = ? ORDER BY id", (c.id,)).fetchall()
+    conn.close()
+    assert [r["role"] for r in rows] == ["user", "assistant", "user", "assistant", "user"]
+
+
+@test
+def nobody_can_load_another_persons_conversation_or_confirm_their_card():
+    fresh_conversations()
+    emma = conversations.open_conversation("E001", no_history)
+    emma.messages.append({"role": "user", "content": "private question"})
+    emma.pending = dict(A_CARD)
+    conversations.save(emma)
+    assert conversations.messages_of(emma.tenant, "E002", emma.id) == []                     # Hugo, with Emma's conversation id
+    assert conversations.messages_of("other-company", "E001", emma.id) == []                 # the same person id in another tenant
+    assert conversations.card_of(emma.tenant, "E002", emma.id) == (None, {})
+    assert conversations.claim_card(emma.tenant, "E002", emma.card_id, True) is None         # Hugo presses Confirm with Emma's card id
+    assert conversations.claim_card("other-company", "E001", emma.card_id, True) is None
+    hugo = conversations.open_conversation("E002", no_history)
+    assert hugo.id != emma.id and hugo.messages == [] and hugo.pending == {}
+    assert conversations.claim_card(emma.tenant, "E001", emma.card_id, True) == A_CARD       # Emma's card was untouched, and is still hers
+
+
+@test
+def a_double_click_runs_the_card_once():
+    fresh_conversations()
+    c = conversations.open_conversation("E001", no_history)
+    c.pending = dict(A_CARD)
+    conversations.save(c)
+    start = threading.Barrier(8)
+    won = []
+
+    def click():
+        start.wait()
+        won.append(conversations.claim_card(c.tenant, "E001", c.card_id, True) is not None)
+    clicks = [threading.Thread(target=click) for _ in range(8)]
+    for t in clicks:
+        t.start()
+    for t in clicks:
+        t.join()
+    assert sorted(won) == [False] * 7 + [True], won
+    assert conversations.claim_card(c.tenant, "E001", c.card_id, False) is None             # and Cancel after Confirm does nothing either
+
+
+@test
+def a_card_expires_after_30_minutes_and_a_new_message_drops_it():
+    fresh_conversations()
+    made = datetime(2026, 11, 22, 10, 0, tzinfo=timezone.utc)
+    c = conversations.open_conversation("E001", no_history, now=made)
+    c.pending = dict(A_CARD)
+    conversations.save(c, now=made)
+    assert conversations.card_of(c.tenant, "E001", c.id, now=made + timedelta(minutes=29))[1] == A_CARD
+    assert conversations.card_of(c.tenant, "E001", c.id, now=made + timedelta(minutes=31)) == (None, {})
+    assert conversations.claim_card(c.tenant, "E001", c.card_id, True, now=made + timedelta(minutes=31)) is None
+    # a fresh card, then the person sends another message instead of pressing it
+    c.pending, c.card_id = dict(A_CARD), None
+    conversations.save(c, now=made)
+    conversations.drop_card(c)
+    assert c.pending == {} and conversations.card_of(c.tenant, "E001", c.id, now=made)[1] == {}
+
+
+@test
+def one_message_at_a_time_per_conversation_and_an_idle_one_starts_again():
+    fresh_conversations()
+    t0 = datetime(2026, 11, 22, 9, 0, tzinfo=timezone.utc)
+    first = conversations.open_conversation("E001", no_history, now=t0)
+    assert conversations.open_conversation("E001", no_history, now=t0) is None              # still answering: the second message waits
+    assert conversations.open_conversation("E001", no_history, channel=conversations.WELCOME, now=t0) is not None   # another assistant: its own
+    conversations.release(first)                                                             # the answer failed: free again, nothing kept
+    second = conversations.open_conversation("E001", no_history, now=t0)
+    assert second.id == first.id and second.messages == []
+    second.messages.append({"role": "user", "content": "hello"})
+    second.usage["input_tokens"] = 99
+    conversations.save(second, now=t0)
+    # a copy that died mid-answer: the conversation is free again after BUSY_SECONDS
+    stuck = conversations.open_conversation("E001", no_history, now=t0)
+    assert conversations.open_conversation("E001", no_history, now=t0 + timedelta(seconds=conversations.BUSY_SECONDS + 1)).id == stuck.id
+    conversations.release(stuck)
+    # after IDLE_HOURS, a new conversation: fresh budget, the earlier chat as its summary
+    later = conversations.open_conversation("E001", lambda user_id: ("Asked about leave.", [{"role": "user", "content": "earlier"}]),
+                                            now=t0 + timedelta(hours=conversations.IDLE_HOURS, minutes=1))
+    assert later.id != first.id and later.summary == "Asked about leave." and later.usage["input_tokens"] == 0
+    conversations.save(later)
+    assert conversations.messages_of(later.tenant, "E001", later.id) == [{"role": "user", "content": "earlier"}]
+    conn = db.get_conn()
+    assert conn.execute("SELECT status FROM conversations WHERE id = ?", (first.id,)).fetchone()["status"] == "closed"
+    conn.close()
+
+
+@test
+def a_rebuilt_history_starts_the_model_history_again_without_deleting_anything():
+    fresh_conversations()
+    c = conversations.open_conversation("E001", no_history)
+    c.messages += [{"role": "user", "content": f"message {i}"} for i in range(5)]
+    conversations.save(c)
+    c = conversations.open_conversation("E001", no_history)
+    c.summary, c.messages, c.stored, c.restarted = "Five messages.", [{"role": "user", "content": "message 4"}], 0, True    # as handle_message does
+    conversations.save(c)
+    assert conversations.messages_of(c.tenant, "E001", c.id) == [{"role": "user", "content": "message 4"}]
+    conn = db.get_conn()
+    assert conn.execute("SELECT COUNT(*) AS n FROM conversation_messages WHERE conversation_id = ?", (c.id,)).fetchone()["n"] == 6
+    conn.close()
+
+
+@test
+def every_connection_uses_wal_and_waits_for_a_writer():
+    conn = db.get_conn()
+    assert conn.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+    assert conn.execute("PRAGMA busy_timeout").fetchone()[0] == 5000
+    conn.close()
+
+
+@test
+def two_copies_of_the_server_share_one_rate_limit():
+    rate_limits.init_rate_limits()
+    copy_a, copy_b = rate_limits.Throttle("shared_test", 3, 60), rate_limits.Throttle("shared_test", 3, 60)
+    copy_a.clear()
+    assert [copy_a.allow("E001", 0), copy_b.allow("E001", 1), copy_a.allow("E001", 2), copy_b.allow("E001", 3)] == [True, True, True, False]
+    copy_a.clear()
+    start, allowed = threading.Barrier(10), []
+
+    def try_once():
+        start.wait()
+        allowed.append(copy_b.allow("E002"))
+    racers = [threading.Thread(target=try_once) for _ in range(10)]
+    for t in racers:
+        t.start()
+    for t in racers:
+        t.join()
+    assert allowed.count(True) == 3, allowed                                                # ten at the same moment: exactly the limit gets through
+
+
+@test
+def a_scheduled_job_runs_once_at_a_time_even_from_two_copies_at_once():
+    job_locks.init_job_locks()
+    conn = db.get_conn()
+    with conn:
+        conn.execute("DELETE FROM job_locks")
+    conn.close()
+    start, ran, finished = threading.Barrier(6), [], threading.Event()
+
+    def cron():
+        start.wait()
+        with job_locks.only_one("onboarding-daily") as mine:
+            ran.append(mine)
+            if mine:
+                finished.wait(5)          # still running while the others try
+    copies = [threading.Thread(target=cron) for _ in range(6)]
+    for t in copies:
+        t.start()
+    while len(ran) < 6:
+        time.sleep(0.01)
+    finished.set()
+    for t in copies:
+        t.join()
+    assert ran.count(True) == 1, ran
+    with job_locks.only_one("onboarding-daily") as mine:                                     # it finished: the next run goes ahead
+        assert mine and job_locks.take("recruitment-daily")                                   # and another job is not held up by it
+    # a copy that died mid-run left its row: an hour later the next run takes over
+    assert job_locks.take("leave-month-end", now=datetime(2026, 11, 22, 1, 0, tzinfo=timezone.utc))
+    assert not job_locks.take("leave-month-end", now=datetime(2026, 11, 22, 1, 30, tzinfo=timezone.utc))
+    assert job_locks.take("leave-month-end", now=datetime(2026, 11, 22, 2, 1, tzinfo=timezone.utc))
+
+
+class PausingClaude:
+    """Calls get_leave_balance, waits until every turn has reached the same point, then answers with what the tool returned."""
+    def __init__(self, turns):
+        self.together = threading.Barrier(turns, timeout=10)
+        self.messages = self
+
+    def create(self, **request):
+        usage = types.SimpleNamespace(input_tokens=10, output_tokens=10, cache_creation_input_tokens=0, cache_read_input_tokens=0)
+        last = request["messages"][-1]["content"]
+        if isinstance(last, list) and last[-1].get("type") == "tool_result":
+            return types.SimpleNamespace(content=[FakeBlock(type="text", text=f"Done: {last[-1]['content']}")], stop_reason="end_turn", usage=usage)
+        self.together.wait()           # all the turns are in the middle of their answer at once
+        block = FakeBlock(type="tool_use", id="toolu_1", name="get_leave_balance", input={})
+        return types.SimpleNamespace(content=[block], stop_reason="tool_use", usage=usage)
+
+
+@test
+def two_peoples_turns_at_the_same_time_never_see_each_others_identity():
+    import demo_data
+    with contextlib.redirect_stdout(io.StringIO()):
+        demo_data.init_all()
+        agent = load_agent()
+    agent.client = PausingClaude(2)
+    seen, replies = {}, {}
+    real_balance = agent.get_leave_balance
+
+    def balance_seen(employee_id, leave_type=None):
+        seen.setdefault(threading.current_thread().name, []).append(employee_id)
+        return real_balance(employee_id, leave_type)
+    agent.get_leave_balance = balance_seen
+
+    def turn(user_id):
+        with agent.using(agent.Conversation(user_id, messages=[{"role": "user", "content": "My balance?"}])):
+            replies[user_id] = agent.answer_turn("My balance?")
+            assert agent.convo().user_id == user_id and agent.convo().last_turn["tools_called"] == ["get_leave_balance"]
+    people = [threading.Thread(target=turn, args=(who,), name=who) for who in ("E001", "E002")]
+    with contextlib.redirect_stdout(io.StringIO()):      # once, for both threads: sys.stdout is shared by the whole process
+        for t in people:
+            t.start()
+        for t in people:
+            t.join()
+    assert seen == {"E001": ["E001"], "E002": ["E002"]}, seen
+    assert '"name": "Emma"' in replies["E001"] and '"name": "Hugo"' in replies["E002"], replies
+    # a thread started without the request's context has no conversation: in the server it fails instead of using someone else's
+    agent.ONLY_IN_CONTEXT = True
+    found = {}
+    with agent.using(agent.Conversation("E003")):
+        bare = threading.Thread(target=lambda: found.update(bare=agent.convo_or_none()))
+        copied = threading.Thread(target=contextvars.copy_context().run, args=(lambda: found.update(copied=agent.convo().user_id),))
+        for t in (bare, copied):
+            t.start()
+            t.join()
+    assert found == {"bare": None, "copied": "E003"}, found
 
 
 if __name__ == "__main__":

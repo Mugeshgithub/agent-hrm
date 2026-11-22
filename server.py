@@ -4,11 +4,27 @@
 import json
 import os
 import secrets
-import threading
 from datetime import date, timedelta
 
 from dotenv import load_dotenv
 load_dotenv()
+
+
+def production_problems(env=os.environ):
+    """Why a production server must not start. A random cookie secret signs everyone out at each restart and differs between copies (each
+    would refuse the others' cookies); the demo picker lets anyone in as anyone, with no password."""
+    if env.get("HRM_ENV") != "production":
+        return []
+    problems = []
+    if not env.get("HRM_SESSION_SECRET"):
+        problems.append("HRM_SESSION_SECRET is not set (every copy needs the same fixed secret)")
+    if env.get("HRM_DEMO_LOGIN"):
+        problems.append("HRM_DEMO_LOGIN is set (the demo picker signs anyone in without a password)")
+    return problems
+
+
+if (problems := production_problems()):
+    raise SystemExit("Refusing to start with HRM_ENV=production: " + "; ".join(problems) + ".")
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, Response
@@ -23,6 +39,7 @@ import interviews
 import careers
 import checkins
 import contracts
+import conversations
 import db
 import documents
 import employee_files
@@ -33,6 +50,7 @@ import leave_admin
 import onboarding
 import outbox
 import payslips
+import rate_limits
 import welcome
 from demo_data import init_all
 import collective_agreement
@@ -47,7 +65,9 @@ db.DB_PATH = os.getenv("HRM_DB", "hr.db")
 init_all()   # creates any missing tables; never wipes data
 
 app = FastAPI(title="CognivexAI HR API")
-# a fixed secret keeps people logged in across restarts; a random one is fine for local demos
+# a fixed secret keeps people logged in across restarts and works on every copy; a random one is fine for a local demo (refused in production, above)
+if not os.getenv("HRM_SESSION_SECRET"):
+    print("HRM_SESSION_SECRET is not set: using a random one, so a restart signs everyone out. Fine for a local demo only.")
 app.add_middleware(SessionMiddleware, secret_key=os.getenv("HRM_SESSION_SECRET") or secrets.token_hex(32),
                    same_site="lax", https_only=False, max_age=60 * 60 * 12)
 
@@ -96,7 +116,7 @@ class PasswordIn(BaseModel):
     password: str
 
 
-SIGN_IN_BY_ADDRESS = careers.Throttle(30, 600)    # 30 tries per 10 minutes from one address; each account also locks after 5 wrong passwords
+SIGN_IN_BY_ADDRESS = rate_limits.Throttle("sign_in_by_address", 30, 600)    # 30 tries per 10 minutes from one address; each account also locks after 5 wrong passwords
 
 
 def address_of(request: Request):
@@ -683,14 +703,8 @@ def welcome_ask(body: AskIn, request: Request):
     if not text:
         raise HTTPException(400, "Type a question first.")
     assistant_allowed(emp["id"])
-    with agent_lock:
-        agent = _agent_for(emp["id"], "new_hire")
-        agent.pending_action.clear()
-        try:
-            reply = agent.handle_message(text)
-        except Exception as e:
-            raise HTTPException(503, f"The assistant isn't available right now ({type(e).__name__}).")
-        return {"reply": reply}
+    reply, _ = _answer(emp["id"], text, conversations.WELCOME, "new_hire")
+    return {"reply": reply}
 
 
 # ---------- the new hire's documents, and HR's side of them ----------
@@ -1088,7 +1102,7 @@ def recruitment_interview_calendar(application_id: int, request: Request):
     return calendar_response(interviews.calendar_for_staff(recruiter(request)["id"], application_id))
 
 
-SUMMARY_BY_PERSON = careers.Throttle(30, 3600)         # a summary calls a paid model: 30 an hour for one person
+SUMMARY_BY_PERSON = rate_limits.Throttle("summary_by_person", 30, 3600)         # a summary calls a paid model: 30 an hour for one person
 
 
 @app.get("/api/recruitment/candidates/{application_id}/summary")
@@ -1101,7 +1115,7 @@ def recruitment_prepare_summary(application_id: int, request: Request):
     actor = recruiter(request)
     if not SUMMARY_BY_PERSON.allow(actor["id"]):
         raise HTTPException(429, "That is a lot of summaries in a short time. Please wait a little and try again.")
-    import agent                                         # the model call (application_summary.py holds every rule; agent.py only calls the model)
+    agent = _agent()                                  # the model call (application_summary.py holds every rule; agent.py only calls the model)
     try:
         return recruitment_result(agent.summary_answer(actor["id"], application_id))
     except HTTPException:
@@ -1139,8 +1153,8 @@ def recruitment_run_retention(request: Request):
 # Anyone can read an open job and apply. Nothing here uses the session: a person's private tracking link is the only key to their own
 # application. The size is capped, the rate is limited, and the CV is checked before anything is saved (careers.py).
 APPLY_LIMIT = 8 * 1024 * 1024          # a 5 MB CV is about 6.7 MB as base64, plus the form
-APPLY_BY_ADDRESS = careers.Throttle(10, 3600)
-APPLY_BY_EMAIL = careers.Throttle(3, 3600)
+APPLY_BY_ADDRESS = rate_limits.Throttle("apply_by_address", 10, 3600)
+APPLY_BY_EMAIL = rate_limits.Throttle("apply_by_email", 3, 3600)
 
 
 def careers_result(result):
@@ -1190,8 +1204,8 @@ def careers_tracking(token: str):
     return careers_result(careers.tracking(token))
 
 
-ASK_BY_LINK = careers.Throttle(20, 600)                # the assistant calls a paid model: 20 messages per 10 minutes for one link, 60 an hour for one address
-ASK_BY_ADDRESS = careers.Throttle(60, 3600)
+ASK_BY_LINK = rate_limits.Throttle("candidate_ask_by_link", 20, 600)                # the assistant calls a paid model: 20 messages per 10 minutes for one link, 60 an hour for one address
+ASK_BY_ADDRESS = rate_limits.Throttle("candidate_ask_by_address", 60, 3600)
 
 
 @app.get("/api/careers/track/{token}/assistant")
@@ -1204,7 +1218,7 @@ def careers_assistant_ask(token: str, body: AskIn, request: Request):
     address = (request.headers.get("x-forwarded-for") or (request.client.host if request.client else "?")).split(",")[0].strip()
     if not ASK_BY_ADDRESS.allow(address) or not ASK_BY_LINK.allow(token):
         raise HTTPException(429, "That is a lot of messages in a short time. Please wait a little and try again.")
-    import agent                                         # the assistant's model call (candidate_assistant.py holds every rule; agent.py only calls the model)
+    agent = _agent()                                  # the assistant's model call (candidate_assistant.py holds every rule; agent.py only calls the model)
     try:
         result = careers_result(agent.candidate_answer(token, body.message))
     except HTTPException:
@@ -1218,7 +1232,7 @@ class ChooseIn(BaseModel):
     slot: str
 
 
-CHOOSE_BY_LINK = careers.Throttle(20, 600)             # choosing and cancelling change what staff and the outbox see: 20 tries per 10 minutes for one link
+CHOOSE_BY_LINK = rate_limits.Throttle("interview_choice_by_link", 20, 600)             # choosing and cancelling change what staff and the outbox see: 20 tries per 10 minutes for one link
 
 
 def interview_allowed(token):
@@ -1426,12 +1440,11 @@ def run_month_accrual(request: Request):
 
 
 # ---------- assistant ----------
-# The agent keeps one conversation in memory at a time, so calls are serialised with a lock.
-# Good for a local demo; a multi-user deployment would keep per-session agent state instead.
+# Each person's conversation is in the database (conversations.py). A message opens it, runs the agent on it in this request's own context
+# (agent.using), and saves it. Nothing is kept in memory between requests and there is no lock: many people chat at once, any copy of the
+# server can answer any message, and a restart loses nothing. One message at a time per conversation (a second one gets a 409).
 
-agent_lock = threading.Lock()
-agent_user = {"key": None}      # (person, role override): a welcome-link session never shares a conversation
-ASK_BY_PERSON = careers.Throttle(20, 600)     # a message can make up to 8 model calls: 20 messages per 10 minutes for one person, both assistants together
+ASK_BY_PERSON = rate_limits.Throttle("assistant_by_person", 20, 600)     # a message can make up to 8 model calls: 20 messages per 10 minutes for one person, both assistants together
 
 
 def assistant_allowed(emp_id):
@@ -1447,20 +1460,40 @@ class ConfirmIn(BaseModel):
     accept: bool
 
 
-def _agent_for(emp_id, role=None):
+def _agent():
     import agent
-    if agent_user["key"] != (emp_id, role):
-        agent.start_session(emp_id, role)
-        agent_user["key"] = (emp_id, role)
-    # in the web app, write actions become confirmation cards instead of terminal prompts
-    agent.confirm_with_human = lambda details: agent.AWAITING_CONFIRMATION
+    agent.ONLY_IN_CONTEXT = True     # a request never falls back to the terminal's in-memory conversation: without its context it fails
     return agent
 
 
-def _card(agent):
-    if not agent.pending_action:
+def _open(emp_id, channel, role=None):
+    """The person's conversation, taken for this request (conversations.py), with write actions turned into confirmation cards."""
+    agent = _agent()
+    from memory import build_context
+    c = conversations.open_conversation(emp_id, lambda user_id: build_context(user_id, agent.client, agent.MODEL), channel=channel, role=role)
+    if c is None:
+        raise HTTPException(409, "The assistant is still answering your previous message. Please wait a moment and try again.")
+    c.confirm = lambda details: agent.AWAITING_CONFIRMATION
+    return agent, c
+
+
+def _answer(emp_id, text, channel, role=None):
+    agent, c = _open(emp_id, channel, role)
+    try:
+        conversations.drop_card(c)            # a new message: a card still waiting expires
+        with agent.using(c):
+            reply = agent.handle_message(text)
+    except Exception as e:   # e.g. no API key or the API is down: say so plainly, and keep nothing of the half-done turn
+        conversations.release(c)
+        raise HTTPException(503, f"The assistant isn't available right now ({type(e).__name__}).")
+    conversations.save(c)
+    return reply, c
+
+
+def _card(c):
+    if not c.pending:
         return None
-    a = agent.pending_action
+    a = c.pending
     # one card, however many actions it lists: `details` and `input` are the first item's (as before), `items` is every one, in order
     return {"tool": a["tool"], "details": a["details"], "input": a["input"], "items": a["items"]}
 
@@ -1477,32 +1510,35 @@ def ask(body: AskIn, request: Request):
     if not text:
         raise HTTPException(400, "Type a question first.")
     assistant_allowed(emp["id"])
-    with agent_lock:
-        agent = _agent_for(emp["id"])
-        agent.pending_action.clear()
-        try:
-            reply = agent.handle_message(text)
-        except Exception as e:   # e.g. no API key or the API is down: say so plainly
-            raise HTTPException(503, f"The assistant isn't available right now ({type(e).__name__}).")
-        return {"reply": reply, "tools": list(agent.last_turn["tools_called"]), "confirm": _card(agent)}
+    reply, c = _answer(emp["id"], text, conversations.ASSISTANT)
+    return {"reply": reply, "tools": list(c.last_turn["tools_called"]), "confirm": _card(c)}
 
 
 @app.post("/api/assistant/confirm")
 def confirm(body: ConfirmIn, request: Request):
     emp = me(request)
-    with agent_lock:
-        agent = _agent_for(emp["id"])
-        if not agent.pending_action:
+    agent, c = _open(emp["id"], conversations.ASSISTANT)
+    try:
+        # pending -> confirmed (or cancelled) in ONE update: a double click, or the same click reaching two copies, finds nothing the second time
+        action = conversations.claim_card(c.tenant, c.user_id, c.card_id, body.accept) if c.card_id else None
+        if action is None:
+            conversations.release(c)
             raise HTTPException(400, "There's nothing waiting for confirmation.")
-        action = dict(agent.pending_action)        # run_pending takes the card off the shelf: keep what the conversation note needs
         from memory import save_message
         # Confirm runs every item on the card, one by one, and reports each result (agent.run_pending); Cancel changes nothing
-        note, results = agent.run_pending(body.accept)
-        result = results[0] if len(results) == 1 else results
-        # keep the conversation consistent for the next question (user turn, then assistant turn)
-        decision = "confirmed" if body.accept else "declined"
-        agent.state["messages"].append({"role": "user", "content": f"[In the app, I {decision} the {action['tool']} card.]"})
-        agent.state["messages"].append({"role": "assistant", "content": f"{note} Result: {result}"})
-        save_message(emp["id"], "user", f"[In the app, I {decision} the {action['tool']} card.]")
-        save_message(emp["id"], "assistant", note)
-        return {"reply": note, "result": result}
+        with agent.using(c):
+            note, results = agent.run_pending(body.accept, action)
+    except HTTPException:
+        raise
+    except Exception:
+        conversations.release(c)
+        raise
+    result = results[0] if len(results) == 1 else results
+    # keep the conversation consistent for the next question (user turn, then assistant turn)
+    decision = "confirmed" if body.accept else "declined"
+    c.messages.append({"role": "user", "content": f"[In the app, I {decision} the {action['tool']} card.]"})
+    c.messages.append({"role": "assistant", "content": f"{note} Result: {result}"})
+    conversations.save(c)
+    save_message(emp["id"], "user", f"[In the app, I {decision} the {action['tool']} card.]")
+    save_message(emp["id"], "assistant", note)
+    return {"reply": note, "result": result}

@@ -46,6 +46,9 @@ flowchart LR
   A new hire can only read their onboarding; a candidate can only read their own application.
 - **A person confirms every change:** to book leave, approve, cancel or open a ticket, the assistant doesn't act. The
   app shows a card, and only "Confirm" runs it, through the same `run_tool` checks.
+- **Nothing kept in server memory:** each person's conversation (tool calls included), their card and the rate limits
+  are in the database, so many people chat at once and a restart loses nothing. Each message runs in its own context:
+  no person ever sees another's identity or card. A card runs once, however many times Confirm is pressed.
 - **Output guardrails:** code checks each reply before it is shown. A number of days, an amount or a count that no
   tool returned this turn, a law article that wasn't retrieved, a rules question answered without searching, or
   a reason the policy doesn't contain (a second model checks that one). A failing reply is sent back once; if it
@@ -74,7 +77,7 @@ flowchart LR
 - **Every fix is measured:** the eval it targets runs at least 10 times before and after, then the full suite. For example,
   "which requests are pending?" went from 17/20 to 20/20 with the count check.
 - **Unit tests** cover everything that has no AI in it (roles, leave rules, onboarding, retention, the guardrails):
-  144 in `unit_tests.py` plus four more test files. They run on every push and pull request, with a type check and
+  154 in `unit_tests.py` plus four more test files, among them 10 people chatting at the same time against a real database. They run on every push and pull request, with a type check and
   a build of the web app.
 
 ## Tech stack
@@ -126,8 +129,8 @@ Tests: `python unit_tests.py` needs no keys. `python evals.py` calls the real mo
 
 - **Sign-in is email and password only:** no single sign-on, no two-step check, and no "forgot password" email (HR sends a new
   link, and the app sends no email yet).
-- **Built for one machine:** SQLite, one API process, one assistant conversation at a time, no hosted backups.
-  It isn't deployed anywhere.
+- **Built for one machine:** SQLite, no hosted backups. The API keeps nothing in memory, so it is ready for several
+  copies, but they need a shared database (Postgres) first. It isn't deployed anywhere.
 - **The nightly law sync isn't scheduled yet.** Its first real run (19 Nov 2026) was reviewed and applied by hand.
 - **The labour-law evals don't run in CI,** only locally.
 - **No email is sent by the app:** emails wait in an outbox for HR to send. Interviews are in Paris time only, with no

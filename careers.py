@@ -16,7 +16,6 @@ import json
 import os
 import re
 import secrets
-import time
 from datetime import date, datetime, timezone
 
 import db
@@ -187,27 +186,6 @@ def apply(job_id, data, cv, now=None):
     finally:
         conn.close()
     return {"token": token}
-
-
-class Throttle:
-    """At most `limit` tries per `seconds` for a key (an address, an email). In memory: enough to stop a script, not a distributed attack."""
-    def __init__(self, limit, seconds):
-        self.limit, self.seconds, self.seen = limit, seconds, {}
-
-    def allow(self, key, now=None):
-        now = time.time() if now is None else now
-        recent = [t for t in self.seen.get(key, []) if now - t < self.seconds]
-        if len(recent) >= self.limit:
-            self.seen[key] = recent
-            return False
-        self.seen[key] = recent + [now]
-        return True
-
-    def wait(self, key, now=None):
-        """Seconds until `key` may try again: 0 when it may now (a refused try was never counted, so it does not push this back)."""
-        now = time.time() if now is None else now
-        recent = [t for t in self.seen.get(key, []) if now - t < self.seconds]
-        return 0 if len(recent) < self.limit else recent[len(recent) - self.limit] + self.seconds - now
 
 
 def decode_cv(text):

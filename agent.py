@@ -5,15 +5,18 @@ load_dotenv()
 import tracing                     # must come before the Anthropic client is created
 from tracing import observe, propagate_attributes
 
+import contextvars
 import json
 import os
 import time
+from contextlib import contextmanager
 from datetime import date, datetime
 import anthropic
 
 import payslips
 from roles import tools_for, allowed
 from db import init_db
+from conversations import Conversation, fresh_usage
 from memory import init_memory, init_summaries, save_message, build_context, load_recent
 from notifications import init_notifications, notify_decision, notify_ticket_reply, show_unread
 from policy import search_policy, embed as embed_texts
@@ -72,16 +75,16 @@ grounding_client = anthropic.Anthropic(timeout=10, max_retries=1)
 MAX_COST_PER_CONVERSATION = 0.10   # dollars; stop the chat if it costs more
 MAX_CALLS_PER_MESSAGE = 8          # stop runaway tool loops on one question
 
-usage = {"calls": 0, "input_tokens": 0, "output_tokens": 0, "cache_write": 0, "cache_read": 0, "check_cost": 0}
-
 
 def reset_usage():
-    for key in usage:
-        usage[key] = 0
+    convo().usage = fresh_usage()
 
 
 def record_usage(response):
-    u = response.usage
+    c = convo_or_none()
+    if c is None:       # a candidate's assistant or an application summary in the server: no conversation, their limits are server.py's throttles
+        return
+    u, usage = response.usage, c.usage
     usage["calls"] += 1
     usage["input_tokens"] += u.input_tokens
     usage["output_tokens"] += u.output_tokens
@@ -90,6 +93,7 @@ def record_usage(response):
 
 
 def cost_so_far():
+    usage = convo().usage
     return (usage["input_tokens"] * PRICE_IN
             + usage["output_tokens"] * PRICE_OUT
             + usage["cache_write"] * PRICE_CACHE_WRITE
@@ -100,18 +104,8 @@ def grounding_model(system, text):
     """One call of the grounding check (policy_grounding.py): a prompt and the text, no tools. Its cost counts in this conversation's."""
     response = grounding_client.messages.create(model=GROUNDING_MODEL, max_tokens=3000, system=system, output_config={"effort": "medium"},
                                                 messages=[{"role": "user", "content": text}])
-    usage["check_cost"] += (response.usage.input_tokens * GROUNDING_PRICE_IN + response.usage.output_tokens * GROUNDING_PRICE_OUT) / 1_000_000
+    convo().usage["check_cost"] += (response.usage.input_tokens * GROUNDING_PRICE_IN + response.usage.output_tokens * GROUNDING_PRICE_OUT) / 1_000_000
     return "".join(b.text for b in response.content if b.type == "text")
-
-
-# fake login: in a real app this comes from the session
-LOGGED_IN_ID = "E001"
-LOGGED_IN_ROLE = None     # "new_hire" for someone signed in with a welcome link; None = the role in the database
-
-
-def current_role():
-    # the role comes from the system (the login or the link), never from the model or the user's words
-    return LOGGED_IN_ROLE or get_employee(LOGGED_IN_ID)["role"]
 
 
 def new_session_id(user_id):
@@ -119,13 +113,40 @@ def new_session_id(user_id):
     return f"{user_id}-{datetime.now():%Y%m%d-%H%M%S}"
 
 
-SESSION_ID = new_session_id(LOGGED_IN_ID)
+# The conversation of THIS request (server) or this process (terminal, evals). A contextvar, not a global: each request runs in its own
+# thread with its own copy, so two people's turns at the same time never see each other's identity, messages or card.
+_current = contextvars.ContextVar("conversation", default=None)
+_default = Conversation("E001", session_id=new_session_id("E001"))      # fake login for the terminal and the evals
+ONLY_IN_CONTEXT = False   # the server sets it: no request may fall back to the shared default (a thread started without copying the context fails loudly)
 
-# the current conversation, shared by chat() and answer_turn()
-state = {"messages": [], "summary": None}
 
-# what happened in the last answered message: read by the evals (tools used, tool results for citations)
-last_turn = {"tools_called": [], "sources": [], "refused": [], "policy_searches": []}      # refused: calls the code refused (not counted as called)
+def convo_or_none():
+    return _current.get() or (None if ONLY_IN_CONTEXT else _default)
+
+
+def convo():
+    c = convo_or_none()
+    if c is None:
+        raise RuntimeError("No conversation in this context. A thread started by a request must run with contextvars.copy_context().")
+    return c
+
+
+@contextmanager
+def using(conversation):
+    """Run the agent for this conversation: everything inside sees only it, and the request's earlier context comes back after."""
+    token = _current.set(conversation)
+    try:
+        yield conversation
+    finally:
+        _current.reset(token)
+
+
+def current_role():
+    # the role comes from the system (the login or the link), never from the model or the user's words
+    c = convo()
+    return c.role or get_employee(c.user_id)["role"]
+
+
 EXTRA_TAGS = []   # extra Langfuse tags, e.g. ["eval"] when the evals drive the agent
 
 TODAY = "@@TODAY@@"   # replaced by tools.today_line() on every call: the date in an f-string is fixed when the server starts, and goes stale after midnight
@@ -540,36 +561,37 @@ def confirm_with_human(tool_input):
 
 
 # web app: instead of asking in the terminal, the action is parked and shown as a confirmation card.
-# The web server sets confirm_with_human to return AWAITING_CONFIRMATION; when the person clicks
+# The web server sets the conversation's confirm to return AWAITING_CONFIRMATION; when the person clicks
 # Confirm, the server runs the parked action through run_tool again with confirmation = yes.
 AWAITING_CONFIRMATION = "awaiting_confirmation"
-pending_action = {}       # the card: the first item's tool, input and details, plus `kind` and `items` (every action on it): see confirm_batch.py
 
 
 def confirmed(name, tool_input, details):
     """True or False in the terminal and in the tests. In the web app the action goes on the card instead, and what comes back is a dict, the tool
     result the assistant is shown: the card (and how many items it lists), or why this action could not join it. Never a silent replacement."""
-    answer = confirm_with_human(details)
+    c = convo()
+    answer = (c.confirm or confirm_with_human)(details)
     if answer != AWAITING_CONFIRMATION:
         return answer
-    status, count = confirm_batch.add(pending_action, name, tool_input, details)
-    return confirm_batch.tool_result(status, count, pending_action, name, details)
+    status, count = confirm_batch.add(c.pending, name, tool_input, details)
+    return confirm_batch.tool_result(status, count, c.pending, name, details)
 
 
-def run_pending(accept):
+def run_pending(accept, action=None):
     """The person pressed Confirm (or Cancel) on the card. Confirm runs every item on it, one by one in the order they were added, through the SAME
-    tool path again with confirmation = yes, and reports each result separately. Returns (the message for the person, the results)."""
-    global confirm_with_human
-    action = dict(pending_action)
-    pending_action.clear()
+    tool path again with confirmation = yes, and reports each result separately. Returns (the message for the person, the results).
+    `action` is the card the server took from the database (conversations.claim_card); without it, the one in this conversation."""
+    c = convo()
+    action = dict(action or c.pending)
+    c.pending.clear()
     if not accept:
         return "Cancelled. Nothing was changed.", [{"cancelled_by_user": True}]
-    previous = confirm_with_human
-    confirm_with_human = lambda details: True
+    previous = c.confirm
+    c.confirm = lambda details: True
     try:
         results = [run_tool(action["tool"], item["input"]) for item in action["items"]]
     finally:
-        confirm_with_human = previous
+        c.confirm = previous
     outcomes = [confirm_batch.outcome(action["tool"], item, result) for item, result in zip(action["items"], results)]
     return confirm_batch.note(action["kind"], outcomes), results
 
@@ -578,21 +600,23 @@ def run_pending(accept):
 def days_named_by_person():
     """The person's own words that name the days to check dates against (named_days.py): this message, or the one before it. From the saved
     chat, so the app's notes to the assistant never count."""
-    said = [m["content"] for m in reversed(load_recent(LOGGED_IN_ID, 6)) if m["role"] == "user"]
+    said = [m["content"] for m in reversed(load_recent(convo().user_id, 6)) if m["role"] == "user"]
     return named_days.words_naming_days(said)
 
 
 def run_tool(name, tool_input):
+    c = convo()
+    me, last_turn = c.user_id, c.last_turn
     # defence in depth: even if a tool call gets through, the role and the source rules must allow it
     if (refused := tool_guard.refusal(current_role(), name, last_turn["tools_called"], collective_agreement.on_file())):
         return refused
 
     # the user's ID always comes from the login, never from the model
     if name == "get_leave_balance":
-        return get_leave_balance(LOGGED_IN_ID, tool_input.get("leave_type"))
+        return get_leave_balance(me, tool_input.get("leave_type"))
 
     if name == "get_my_requests":
-        return get_my_requests(LOGGED_IN_ID)
+        return get_my_requests(me)
 
     if name == "count_leave_days":
         try:
@@ -611,13 +635,13 @@ def run_tool(name, tool_input):
         kind = tool_input.get("leave_type") or "casual"
         if kind not in LEAVE_TYPES:
             return {"error": f"Unknown leave type '{kind}'"}
-        if (found := existing_request(LOGGED_IN_ID, start.isoformat(), end.isoformat())):       # these dates are taken: say so first, whatever the earlier chat says
+        if (found := existing_request(me, start.isoformat(), end.isoformat())):       # these dates are taken: say so first, whatever the earlier chat says
             return {"already_requested": already_requested(found),
                     "note": "These dates already have a request, so there is nothing to count or book. Say so, with its status, and quote no balance."}
-        result = {"working_days": days_for(kind, start, end, holidays_of(LOGGED_IN_ID))}
+        result = {"working_days": days_for(kind, start, end, holidays_of(me))}
         if not result["working_days"]:
-            result["cannot_be_booked"] = no_days_reason(kind, start, end, holidays_of(LOGGED_IN_ID))      # a Saturday, a Sunday, a public holiday: nothing to book
-        result.update(days_figures(LOGGED_IN_ID, kind, result["working_days"]))       # what is left after these days, or how short: the reply never works it out
+            result["cannot_be_booked"] = no_days_reason(kind, start, end, holidays_of(me))      # a Saturday, a Sunday, a public holiday: nothing to book
+        result.update(days_figures(me, kind, result["working_days"]))       # what is left after these days, or how short: the reply never works it out
         if kind == PAID:
             result["counted"] = "Monday to Saturday (jours ouvrables); Sundays and public holidays are not counted"
             if note := paid_policy_note(start, end):
@@ -625,7 +649,7 @@ def run_tool(name, tool_input):
         return result
 
     if name == "apply_leave":
-        emp = get_employee(LOGGED_IN_ID)
+        emp = get_employee(me)
         try:
             start = date.fromisoformat(tool_input["start_date"])
             end = date.fromisoformat(tool_input["end_date"])
@@ -639,18 +663,18 @@ def run_tool(name, tool_input):
         if (wrong := named_days.mismatch(days_named_by_person(), start, end, date.today())):
             return {"error": f"{wrong} Nothing was submitted and no confirmation was shown."}
         # refuse BEFORE asking: dates that already have a pending or approved request never get a card (the refusal used to come only after Confirm)
-        if (found := existing_request(LOGGED_IN_ID, start.isoformat(), end.isoformat())):
+        if (found := existing_request(me, start.isoformat(), end.isoformat())):
             return {"error": f"You already have request {found['id']} ({found['status']}), {found['leave_type']} leave, "
                              f"{when_label(found['start_date'], found['end_date'])}. Nothing was submitted and no confirmation was shown.",
                     "already_requested": already_requested(found)}
         # refuse BEFORE asking: a request for no days (a Saturday, a Sunday, a public holiday) never gets a confirmation card it could not pass
-        if (why := no_days_reason(tool_input["leave_type"], start, end, holidays_of(LOGGED_IN_ID))):
+        if (why := no_days_reason(tool_input["leave_type"], start, end, holidays_of(me))):
             return {"error": f"{why} Nothing was submitted and no confirmation was shown."}
-        days = days_for(tool_input["leave_type"], start, end, holidays_of(LOGGED_IN_ID))
+        days = days_for(tool_input["leave_type"], start, end, holidays_of(me))
         # available = saved balance minus days already waiting for approval (same rule as apply_leave),
         # so the confirmation never shows a "balance after" that ignores pending requests
         from hr_queries import balances
-        balance = balances(LOGGED_IN_ID)[tool_input["leave_type"]]["available"]
+        balance = balances(me)[tool_input["leave_type"]]["available"]
         # refuse BEFORE asking, so the user is never asked to confirm something impossible
         if balance - days < 0:
             return {"error": f"Not enough {tool_input['leave_type']} leave: needs {days} days, "
@@ -668,11 +692,11 @@ def run_tool(name, tool_input):
         if not answer:
             return {"submitted": False, "working_days": days,
                     "message": f"The employee chose not to submit this {days}-day request. No request exists."}
-        return apply_leave(LOGGED_IN_ID, **tool_input)
+        return apply_leave(me, **tool_input)
 
     if name == "cancel_leave":
         # refuse BEFORE the card, as for a booking: a request that would fail is left off it, and the reply says why
-        if (problem := cancel_problem(LOGGED_IN_ID, tool_input["request_id"])):
+        if (problem := cancel_problem(me, tool_input["request_id"])):
             return {"cancelled": False, "message": problem,
                     "left_off_the_card": "This request is NOT on the card and nothing was cancelled for it: tell the person why, in these words."}
         answer = confirmed(name, tool_input, request_summary(tool_input["request_id"]))
@@ -680,34 +704,34 @@ def run_tool(name, tool_input):
             return answer
         if not answer:
             return {"cancelled": False, "message": "The user chose not to cancel. The request is unchanged."}
-        return cancel_leave(LOGGED_IN_ID, tool_input["request_id"])
+        return cancel_leave(me, tool_input["request_id"])
 
     if name == "get_team_member_balance":
-        return get_team_member_balance(LOGGED_IN_ID, tool_input["employee_id"])
+        return get_team_member_balance(me, tool_input["employee_id"])
 
     if name == "get_pending_requests":
-        return get_pending_requests(LOGGED_IN_ID)
+        return get_pending_requests(me)
 
     if name == "get_my_documents":
-        return employee_files.tool_list(LOGGED_IN_ID)                       # always their own: the id is the login's
+        return employee_files.tool_list(me)                       # always their own: the id is the login's
     if name == "read_my_document":
-        return employee_files.tool_read(LOGGED_IN_ID, tool_input.get("document_id"))
+        return employee_files.tool_read(me, tool_input.get("document_id"))
 
     if name == "get_contract_status":
-        return contracts.status_for_assistant(LOGGED_IN_ID, tool_input.get("name"))     # HR only, in roles.py and in contracts.py
+        return contracts.status_for_assistant(me, tool_input.get("name"))     # HR only, in roles.py and in contracts.py
 
     if name == "get_my_onboarding":
-        return onboarding.my_checklist(LOGGED_IN_ID)     # always their own: the id is the link's, never the model's
+        return onboarding.my_checklist(me)     # always their own: the id is the link's, never the model's
 
     if name == "get_job_pipeline":
-        return jobs.for_assistant(LOGGED_IN_ID, tool_input.get("job"))        # HR, or the hiring manager of the job: checked in jobs.py and roles.py
+        return jobs.for_assistant(me, tool_input.get("job"))        # HR, or the hiring manager of the job: checked in jobs.py and roles.py
 
     if name == "get_needs_attention":
-        return needs_you.for_assistant(LOGGED_IN_ID)     # the role check is in roles.py and in needs_you.py
+        return needs_you.for_assistant(me)     # the role check is in roles.py and in needs_you.py
 
     if name == "decide_leave":
         # refuse BEFORE the card: a decision that would fail is left off it, and the reply says why
-        if (problem := decide_problem(LOGGED_IN_ID, tool_input["request_id"], tool_input["decision"], tool_input.get("reason", ""))):
+        if (problem := decide_problem(me, tool_input["request_id"], tool_input["decision"], tool_input.get("reason", ""))):
             return {"error": problem, "left_off_the_card": "This decision is NOT on the card and nothing was saved for it: tell the person why, in these words."}
         answer = confirmed(name, tool_input, {**request_summary(tool_input["request_id"]), "decision": tool_input["decision"],
                                               "reason": tool_input.get("reason", "")})
@@ -715,27 +739,27 @@ def run_tool(name, tool_input):
             return answer
         if not answer:
             return {"saved": False, "message": "The manager chose not to save this decision. Nothing changed."}
-        result = decide_leave(LOGGED_IN_ID, **tool_input)
+        result = decide_leave(me, **tool_input)
         # tell the employee, but only if the decision was actually saved
         if isinstance(result, dict) and "error" not in result:
             notify_decision(tool_input["request_id"], tool_input["decision"],
-                            tool_input.get("reason"), get_employee(LOGGED_IN_ID)["name"])
+                            tool_input.get("reason"), get_employee(me)["name"])
         return result
 
     if name == "get_holidays":
         from leave_admin import my_holidays
-        return my_holidays(LOGGED_IN_ID, tool_input.get("year"))   # always the user's own plan
+        return my_holidays(me, tool_input.get("year"))   # always the user's own plan
 
     if name == "get_balance_history":
         from leave_admin import balance_history
-        return balance_history(LOGGED_IN_ID)     # always the user's own history
+        return balance_history(me)     # always the user's own history
 
     if name == "lookup_colleague":
         # directory details only (employees.directory_entry): never balances, pay or history
         from employees import find_colleagues, my_record
         wanted = tool_input.get("name", "").strip().lower()
         if wanted in ("me", "myself", "i", "my", ""):
-            return my_record(LOGGED_IN_ID)       # "me" is always the login, never a name the model chose
+            return my_record(me)       # "me" is always the login, never a name the model chose
         return find_colleagues(wanted)
 
     if name == "search_policy":
@@ -801,13 +825,13 @@ def run_tool(name, tool_input):
             return answer
         if not answer:
             return {"created": False, "message": "The user chose not to raise a ticket. Nothing was sent."}
-        return create_hr_ticket(LOGGED_IN_ID, tool_input.get("question"), tool_input.get("summary"))
+        return create_hr_ticket(me, tool_input.get("question"), tool_input.get("summary"))
 
     if name == "get_my_tickets":
-        return get_my_tickets(LOGGED_IN_ID)
+        return get_my_tickets(me)
 
     if name == "get_open_tickets":
-        return get_open_tickets(LOGGED_IN_ID)
+        return get_open_tickets(me)
 
     if name == "reply_to_ticket":
         answer = confirmed(name, tool_input, tool_input)
@@ -815,35 +839,36 @@ def run_tool(name, tool_input):
             return answer
         if not answer:
             return {"sent": False, "message": "HR chose not to send this reply. The ticket is still open."}
-        result = reply_to_ticket(LOGGED_IN_ID, tool_input["ticket_id"], tool_input.get("reply"))
+        result = reply_to_ticket(me, tool_input["ticket_id"], tool_input.get("reply"))
         # tell the employee, but only if the reply was actually saved
         if isinstance(result, dict) and "error" not in result:
-            notify_ticket_reply(tool_input["ticket_id"], get_employee(LOGGED_IN_ID)["name"])
+            notify_ticket_reply(tool_input["ticket_id"], get_employee(me)["name"])
         return result
 
     # ---------- payslips (read-only; the viewer is always the logged-in user) ----------
 
     if name == "get_payslip":
-        target = tool_input.get("employee_id") or LOGGED_IN_ID
-        return payslips.get_payslip(LOGGED_IN_ID, target, tool_input["month"])
+        target = tool_input.get("employee_id") or me
+        return payslips.get_payslip(me, target, tool_input["month"])
 
     if name == "compare_payslips":
-        target = tool_input.get("employee_id") or LOGGED_IN_ID
-        return payslips.compare_payslips(LOGGED_IN_ID, target,
+        target = tool_input.get("employee_id") or me
+        return payslips.compare_payslips(me, target,
                                          tool_input["month_a"], tool_input["month_b"])
 
     if name == "get_pay_summary":
-        target = tool_input.get("employee_id") or LOGGED_IN_ID
-        return payslips.get_pay_summary(LOGGED_IN_ID, target, tool_input["year"])
+        target = tool_input.get("employee_id") or me
+        return payslips.get_pay_summary(me, target, tool_input["year"])
 
     return {"error": f"Unknown tool {name}"}
 
 
 def fixed_reply(reply, messages, user_text):
     """Answer without calling the model: a guard in code decided the answer. It is part of the conversation and saved like any other."""
-    last_turn.update(tools_called=[], refused=[], policy_searches=[], sources=[], question=user_text)
+    c = convo()
+    c.last_turn.update(tools_called=[], refused=[], policy_searches=[], sources=[], question=user_text)
     messages.append({"role": "assistant", "content": reply})
-    save_message(LOGGED_IN_ID, "assistant", reply)
+    save_message(c.user_id, "assistant", reply)
     print(f"\nAgent: {reply}")
     return reply
 
@@ -886,16 +911,17 @@ def summary_answer(actor_id, application_id):
 
 @observe(name="hr-agent-turn")   # one trace per user question, with every Claude call and tool inside
 def answer_turn(user_text):
-    user = get_employee(LOGGED_IN_ID)
+    c = convo()
+    me, last_turn, pending_action, usage = c.user_id, c.last_turn, c.pending, c.usage
     role = current_role()
-    with propagate_attributes(user_id=LOGGED_IN_ID, session_id=SESSION_ID,
+    with propagate_attributes(user_id=me, session_id=c.session_id,
                               tags=[role, *EXTRA_TAGS], metadata={"model": MODEL}):
-        messages = state["messages"]
-        summary = state["summary"]
+        messages = c.messages
+        summary = c.summary
 
         # guardrail in code: nobody gets a ranking, a score or a "hire this one" from the assistant, whoever asks (recruitment_guard.py).
         # The model is not called at all: the answer is fixed.
-        if (fixed := recruitment_guard.refusal(role, user_text, jobs.candidate_names(LOGGED_IN_ID))):
+        if (fixed := recruitment_guard.refusal(role, user_text, jobs.candidate_names(me))):
             print("  [guard] asked to rank or choose between candidates: the fixed refusal")
             return fixed_reply(fixed, messages, user_text)
 
@@ -930,7 +956,7 @@ def answer_turn(user_text):
             response = client.messages.create(
                 model=MODEL,
                 max_tokens=1024,
-                system=system_prompt_for(LOGGED_IN_ID) + (
+                system=system_prompt_for(me) + (
                     [{"type": "text", "text": f"Summary of earlier conversations: {summary}"}]
                     if summary else []
                 ),
@@ -938,7 +964,8 @@ def answer_turn(user_text):
                 messages=with_cache_marker(messages),   # cache the conversation so far
             )
             record_usage(response)
-            messages.append({"role": "assistant", "content": response.content})
+            # plain dicts, as they are saved and loaded again (conversations.py): the next request sends the same bytes, so the cached prefix still matches
+            messages.append({"role": "assistant", "content": [b.model_dump(exclude_none=True) for b in response.content]})
 
             if response.stop_reason != "tool_use":
                 reply = "".join(b.text for b in response.content if b.type == "text")
@@ -1074,7 +1101,7 @@ def answer_turn(user_text):
                     reply = document_answers.strip_correction(reply)
 
                 # every guard that acted on this answer: one row each, and a tag on the Langfuse trace (guard_events.py)
-                if (found := guards.write(LOGGED_IN_ID, role, tracing.current_trace_id())):
+                if (found := guards.write(me, role, tracing.current_trace_id())):
                     tracing.tag_trace(guard_events.tags(found))
                     print(f"  [guard events] {found}")
 
@@ -1089,7 +1116,7 @@ def answer_turn(user_text):
                 if policy_gaps.record_from_turn(last_turn["policy_searches"], reply):
                     print("  [policy gap] the question is kept for HR")
                 print(f"\nAgent: {reply}")
-                save_message(LOGGED_IN_ID, "assistant", reply)
+                save_message(me, "assistant", reply)
                 print(f"\n  [usage] {usage['calls']} calls, {usage['input_tokens']} in, "
                       f"{usage['cache_write']} cache-written, {usage['cache_read']} cached, {usage['output_tokens']} out, "
                       f"${cost_so_far():.4f} so far")
@@ -1119,17 +1146,17 @@ def answer_turn(user_text):
 def start_session(user_id, role=None):
     """Log a user in: load their history (+ summary) and start a fresh budget. Used by chat() and the evals.
     role is "new_hire" for a welcome-link session; otherwise the role in the database applies."""
-    global LOGGED_IN_ID, LOGGED_IN_ROLE, SESSION_ID
-    LOGGED_IN_ID = user_id
-    LOGGED_IN_ROLE = role
-    SESSION_ID = new_session_id(user_id)
-    state["summary"], state["messages"] = build_context(user_id, client, MODEL)
+    c = convo()
+    c.user_id, c.role, c.session_id = user_id, role, new_session_id(user_id)
+    c.summary, c.messages = build_context(user_id, client, MODEL)
+    c.stored, c.restarted = 0, True
     reset_usage()
 
 
 def handle_message(user_text):
-    """One user message, exactly as production runs it. chat() and the evals both call this,
+    """One user message, exactly as production runs it. chat(), the web server and the evals all call this,
     so the tests always check the real agent, never a copy."""
+    c = convo()
     # budget check BEFORE calling the model, so we never pay for a refused request
     if cost_so_far() >= MAX_COST_PER_CONVERSATION:
         reply = ("This conversation has reached its usage limit. "
@@ -1138,23 +1165,24 @@ def handle_message(user_text):
         return reply
 
     # keep the chat short mid-session: rebuild from the database when it grows
-    if len(state["messages"]) > 20:
-        state["summary"], state["messages"] = build_context(LOGGED_IN_ID, client, MODEL)
+    if len(c.messages) > 20:
+        c.summary, c.messages = build_context(c.user_id, client, MODEL)
+        c.stored, c.restarted = 0, True
 
-    state["messages"].append({"role": "user", "content": user_text})
-    save_message(LOGGED_IN_ID, "user", user_text)
+    c.messages.append({"role": "user", "content": user_text})
+    save_message(c.user_id, "user", user_text)
     return answer_turn(user_text)
 
 
 def chat():
-    global LOGGED_IN_ID, LOGGED_IN_ROLE, SESSION_ID
-    state["summary"], state["messages"] = build_context(LOGGED_IN_ID, client, MODEL)   # pick up where this user left off
+    c = convo()
+    start_session(c.user_id)   # pick up where this user left off
     print("HR assistant ready. Type 'login E001' to switch user, 'quit' to exit.")
-    print(f"Logged in as {get_employee(LOGGED_IN_ID)['name']} ({LOGGED_IN_ID})")
+    print(f"Logged in as {get_employee(c.user_id)['name']} ({c.user_id})")
     print(f"(Tracing {'ON' if tracing.ENABLED else 'OFF'})")
-    show_unread(LOGGED_IN_ID)
-    if state["messages"]:
-        print(f"(Loaded {len(state['messages'])} earlier messages)")
+    show_unread(c.user_id)
+    if c.messages:
+        print(f"(Loaded {len(c.messages)} earlier messages)")
 
     while True:
         user_text = input("\nYou: ")
@@ -1166,15 +1194,11 @@ def chat():
             new_id = user_text.split()[1].upper()
             new_user = get_employee(new_id)
             if new_user:
-                LOGGED_IN_ID = new_id
-                LOGGED_IN_ROLE = None
-                SESSION_ID = new_session_id(new_id)                                   # new conversation in Langfuse
-                state["summary"], state["messages"] = build_context(LOGGED_IN_ID, client, MODEL)
-                reset_usage()                                                         # new session, new budget
+                start_session(new_id)                # new conversation in Langfuse, new budget
                 print(f"Logged in as {new_user['name']} ({new_id})")
-                show_unread(LOGGED_IN_ID)
-                if state["messages"]:
-                    print(f"(Loaded {len(state['messages'])} earlier messages)")
+                show_unread(new_id)
+                if c.messages:
+                    print(f"(Loaded {len(c.messages)} earlier messages)")
             else:
                 print("Unknown employee ID")
             continue

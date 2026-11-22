@@ -24,8 +24,12 @@ def add_column_if_missing(conn, table, column, definition):
 
 
 def get_conn():
-    conn = sqlite3.connect(DB_PATH)
+    # a new connection for each use, closed by the caller, so a connection never moves between the server's threads.
+    # WAL: readers never wait for a writer; busy_timeout: a writer waits up to 5 s for another one instead of failing with "database is locked"
+    conn = sqlite3.connect(DB_PATH, timeout=5)
     conn.row_factory = sqlite3.Row  # lets us read columns by name, like row["name"]
+    conn.execute("PRAGMA busy_timeout = 5000")
+    conn.execute("PRAGMA journal_mode = WAL")
     return conn
 
 

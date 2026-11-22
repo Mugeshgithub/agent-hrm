@@ -12,6 +12,7 @@ from datetime import date
 
 import db
 db.DB_PATH = os.getenv("HRM_DB", db.DB_PATH)
+import job_locks
 import leave_admin
 
 USAGE = "Usage: python leave_jobs.py year-start [year]  |  python leave_jobs.py month-end [YYYY-MM]"
@@ -26,15 +27,20 @@ if __name__ == "__main__":
     if len(sys.argv) < 2 or sys.argv[1] not in ("year-start", "month-end"):
         sys.exit(USAGE)
     leave_admin.init_leave_admin()
-    if sys.argv[1] == "year-start":
-        year = int(sys.argv[2]) if len(sys.argv) > 2 else date.today().year
-        result = leave_admin.run_year_start(year)
-    else:
-        try:
-            year, month = parse_month(sys.argv[2]) if len(sys.argv) > 2 else leave_admin.last_finished_month()
-            result = leave_admin.run_month_accrual(year, month)
-        except ValueError:
-            sys.exit(USAGE)
+    # one run at a time, even from two copies at the same second (job_locks.py): the "already run" checks below read before they write
+    with job_locks.only_one(f"leave-{sys.argv[1]}") as mine:
+        if not mine:
+            print(f"Another copy is running {sys.argv[1]} right now: nothing done.")
+            sys.exit(0)
+        if sys.argv[1] == "year-start":
+            year = int(sys.argv[2]) if len(sys.argv) > 2 else date.today().year
+            result = leave_admin.run_year_start(year)
+        else:
+            try:
+                year, month = parse_month(sys.argv[2]) if len(sys.argv) > 2 else leave_admin.last_finished_month()
+                result = leave_admin.run_month_accrual(year, month)
+            except ValueError:
+                sys.exit(USAGE)
     print(result)
     # "already run" is a normal outcome for a daily job; anything else is a real failure
     ok = result.get("success") or "already run" in result.get("error", "") \
