@@ -1,8 +1,10 @@
 "use client";
-import { useEffect, useRef, useState } from "react";
+import { RefObject, useEffect, useRef, useState } from "react";
 import { Mic } from "lucide-react";
+import { startsTalking, stopsTalking } from "@/lib/talkKey";
 
-// Push to talk: hold the button, speak, let go. The browser's own speech recognition (Web Speech API) turns speech into text; the text goes
+// Push to talk: hold the button (or Ctrl+Space while the chat box has focus), speak, let go. Space and Enter alone never record: they type
+// and send (lib/talkKey.ts). The browser's own speech recognition (Web Speech API) turns speech into text; the text goes
 // into the chat box through onText, and the person reads it, edits it and presses Send. This component never sends a message and never
 // touches a card: it only knows onText. No audio reaches our server: the browser's speech service hears it (Chrome: Google, Safari: Apple).
 
@@ -40,8 +42,8 @@ export function useSpeechSupported() {
   return ok;
 }
 
-export function MicButton({ text, onText, onProblem, disabled }: {
-  text: string; onText: (t: string) => void; onProblem: (p: string | null) => void; disabled?: boolean;
+export function MicButton({ text, onText, onProblem, disabled, box }: {
+  text: string; onText: (t: string) => void; onProblem: (p: string | null) => void; disabled?: boolean; box: RefObject<HTMLTextAreaElement>;
 }) {
   const [listening, setListening] = useState(false);
   const rec = useRef<Recognition | null>(null);
@@ -49,6 +51,21 @@ export function MicButton({ text, onText, onProblem, disabled }: {
   const heard = useRef("");           // the final parts so far
 
   useEffect(() => () => rec.current?.abort(), []);
+
+  // the shortcut works only in the chat box: keydown Ctrl+Space starts, letting go of Space or Ctrl stops. The latest start/stop are read
+  // through a ref, so the listeners are added once
+  const keys = useRef({ start: () => {}, stop: () => {} });
+  useEffect(() => {
+    const el = box.current;
+    if (!el) return;
+    const down = (e: KeyboardEvent) => { if (startsTalking(e)) { e.preventDefault(); keys.current.start(); } };
+    const up = (e: KeyboardEvent) => { if (rec.current && stopsTalking(e)) { e.preventDefault(); keys.current.stop(); } };
+    const blur = () => keys.current.stop();
+    el.addEventListener("keydown", down);
+    el.addEventListener("keyup", up);
+    el.addEventListener("blur", blur);
+    return () => { el.removeEventListener("keydown", down); el.removeEventListener("keyup", up); el.removeEventListener("blur", blur); };
+  }, [box]);
 
   function start() {
     const Klass = recognitionClass();
@@ -76,17 +93,16 @@ export function MicButton({ text, onText, onProblem, disabled }: {
   }
 
   function stop() { rec.current?.stop(); }        // the last words still arrive (onresult), then onend
+  keys.current = { start, stop };
 
   return (
     <button type="button" disabled={disabled}
             className={`h-8 w-8 shrink-0 select-none touch-none px-0 ${listening ? "btn-primary" : "btn-ghost"}`}
             aria-label={listening ? "Listening: release to stop" : "Hold to speak"} aria-pressed={listening}
-            title="Hold to speak"
+            aria-keyshortcuts="Control+Space" title="Hold to speak (or hold Ctrl+Space in the box)"
             onPointerDown={(e) => { e.preventDefault(); try { e.currentTarget.setPointerCapture(e.pointerId); } catch { /* no capture: pointerup still stops */ } start(); }}
             onPointerUp={stop} onPointerCancel={stop} onLostPointerCapture={stop}
-            onContextMenu={(e) => e.preventDefault()}
-            onKeyDown={(e) => { if ((e.key === " " || e.key === "Enter") && !e.repeat) { e.preventDefault(); start(); } }}
-            onKeyUp={(e) => { if (e.key === " " || e.key === "Enter") { e.preventDefault(); stop(); } }}>
+            onContextMenu={(e) => e.preventDefault()}>
       <Mic size={16} aria-hidden />
     </button>
   );

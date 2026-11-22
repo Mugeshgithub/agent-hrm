@@ -262,10 +262,10 @@ Known weak spots, measured and not fixed yet. Remove a line when its fix merges.
 - **Change it when:** a real candidate cannot type their name.
 
 ### 37. Voice input: the browser's speech recognition fills the chat box, and nothing more (PR #67, 2026-11-22)
-- **Chose:** a hold-to-talk mic in the assistant's input ([MicButton.tsx](../web/components/MicButton.tsx)) using the browser's Web Speech API. The transcript goes into the text box; the person edits it and presses Send. It never sends, and it cannot reach a card: a spoken "Confirm" is an ordinary message, which expires a waiting card (server test). Hidden where the browser has no speech recognition (Firefox). Language: French when the page or the browser is French, English otherwise (the app has no French UI yet). No spoken replies.
+- **Chose:** a hold-to-talk mic in the assistant's input ([MicButton.tsx](../web/components/MicButton.tsx)) using the browser's Web Speech API, and Ctrl+Space held in the chat box ([talkKey.ts](../web/lib/talkKey.ts); Space and Enter alone type and send, never record: a `node --test` in CI). The transcript goes into the text box; the person edits it and presses Send. It never sends, and it cannot reach a card: a spoken "Confirm" is an ordinary message, which expires a waiting card (server test). Hidden where the browser has no speech recognition (Firefox). Language: French when the page or the browser is French, English otherwise (the app has no French UI yet). No spoken replies.
 - **Not chosen:** recording audio and transcribing it on our server (we would hold voice data); auto-send; voice commands for cards.
 - **Why:** the smallest version that keeps the confirmation card a click.
-- **Cost:** the audio goes to the browser's speech service (Google for Chrome, Apple for Safari), not to us; the notice under the box says so. Not tested on a real phone.
+- **Cost:** the audio goes to the browser's speech service (Google for Chrome, Apple for Safari), not to us; the notice under the box says so. Not tested on a real phone. On a Mac with two keyboard layouts, macOS takes Ctrl+Space to switch them, so the page never sees it: the button still works.
 - **Change it when:** people need it where the browser has no speech service, or the app gets a French UI (the language then follows the page).
 
 ### 38. Dates: code works out the days a person names, the prompt gets a dated list, and a reply's weekdays are checked (PR #68, 2026-11-22)

@@ -34,6 +34,8 @@ jobs:
         working-directory: web
       - run: npx tsc --noEmit
         working-directory: web
+      - run: node --experimental-strip-types --test lib/talkKey.test.mjs      # voice input: typing and Enter never start recording
+        working-directory: web
       - run: npm run build
         working-directory: web
 
