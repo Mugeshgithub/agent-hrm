@@ -17,21 +17,25 @@ Report every REASON, CONDITION, EXCEPTION, REQUIREMENT, DEADLINE or CONSEQUENCE 
 - "your manager decides based on business needs" when the text only says the manager decides: the basis is invented;
 - "you also need HR's approval", "unless you were off sick before", "it must be signed by a doctor registered in France": new conditions;
 - "upload it by your third day back" when the text says "within 3 days of returning to work": a changed deadline;
-- "the policy doesn't restrict paid leave by month", "there is no limit", "you can take it any time" when no returned section says so: silence turned
-  into a rule (what the text does not mention is unknown, not allowed).
+- "any more than 5 casual days will lapse on 31 December" when the text gives that date for sick leave only: a date or deadline moved from one rule to
+  another;
+- "the policy doesn't restrict paid leave by month", "there is no limit", "you can take it any time" when no returned section says so, or "it doesn't
+  specify which days, so Fridays would be allowed if your manager agrees" and "so yes, you could work from home on Fridays" when the text gives "up to 2
+  days per week with manager approval" and nothing about days: silence turned into a rule (what the text does not mention is unknown, not allowed).
 
 These are supported. Do NOT report them:
 - what the tool results say, in other words or in another language, with the same meaning. "Yes, you can take paid leave in December" is the same
   meaning as a text that says it "can still be requested" and the manager decides, even when the reply leaves the manager out; it is reported only
   when the reply promises the result, makes it automatic, or says nobody has to approve it;
 - the other side of a limit the text states: "more than 2 consecutive days requires a certificate" supports "for 1 or 2 days you don't need one", and
-  "up to 5 unused days can be carried forward" supports "any more than 5 are lost" or "the rest does not carry over";
+  "up to 5 unused days can be carried forward" supports "any more than 5 are lost" or "the rest does not carry over" (but not a date or deadline for
+  it that the text gives only for something else);
 - a sentence about one thing is not a claim about the others: "only up to 5 casual days carry over" says nothing about paid leave;
 - whether a date falls inside a period the text gives (July is inside 1 May to 31 October);
 - "the policy does not cover / does not say / does not mention X" when no returned section answers the question. A section about another topic,
   or a result with "found": false, does not answer it: the search returns the closest sections of the whole policy, so when they are about something
   else, the policy has nothing on the topic. Do not report it because the search might have missed something;
-- numbers of days, amounts, dates and law article numbers (other checks handle them);
+- numbers of days, amounts and law article numbers (other checks handle them);
 - facts about the employee (name, role, category, team, balance, requests);
 - greetings, questions, offers to help, advice to ask HR or the manager, and plain advice that follows from a stated rule ("so it's worth using them").
 
@@ -45,7 +49,8 @@ RETRY = HIDDEN + ("These parts of your reply are not in what the tools returned 
                   "something else, call search_policy once more with other words (the topic's own name, such as \"paid leave\" or \"sick leave\"). Then "
                   "answer the question again stating only what the policy text and the other tool results say. Add no reason, condition, exception, "
                   "deadline or consequence of your own, and do not say what happens in a case the text does not name. If the person's case is not "
-                  "covered, say the policy does not cover it and suggest asking HR. Start with the answer itself and say nothing about this note.")
+                  "covered, say the policy does not cover it and suggest asking HR. If the text is silent on a detail they asked about (such as "
+                  "which days), say it does not say and suggest (not require) asking their manager or HR. Start with the answer itself and say nothing about this note.")
 QUOTE = "Here is what the company policy says, word for word ({title}): \"{text}\""
 QUOTE_FR = "Voici ce que dit la politique de l'entreprise, mot pour mot ({title}) : « {text} »"
 NOT_CONFIRMED = "I can't confirm that from the company policy, so I won't guess. HR can tell you."
