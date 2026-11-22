@@ -5,6 +5,8 @@
 # 1. Asked to approve or reject a named person's request: 7 of 10 replies wrong with that history, 0 of 8 without it. The request is put on the card.
 # 2. Asked what is pending ("any pending request"): "Two pending requests" and the new one left out, 8 of 8. Every request the tool returned is listed.
 # So code checks the final reply and sends it back once. No AI and no third-party package, so it is unit-tested in CI.
+# Asked to decide with nothing looked up, the code calls get_pending_requests itself (agent.py), as the policy search is run (search_first.py): the
+# note that asked the model to look first used up the one retry (main and PR #63, 22 Nov), and the model then listed the requests or asked what to do.
 import json
 import re
 import unicodedata
@@ -43,9 +45,6 @@ REJECT_NOW = HIDDEN + ("The tool result in this turn shows that {name} has a lea
                        "never say it was already decided. If the manager gave a reason, call decide_leave for request {id} now with decision \"reject\" "
                        "and that reason: the app shows a confirmation card, which is where the manager confirms. If they gave none, ask for the "
                        "reason, naming this request ({name}, {when}): a rejection always needs one.")
-LOOK_FIRST = HIDDEN + ("The manager asked you to decide a leave request. The earlier messages in this chat are old: requests are cancelled, sent again "
-                       "and decided in the meantime. Call get_pending_requests now to see what is waiting for a decision right now, and decide only "
-                       "from what it returns. Never say a request is already approved or rejected from the chat.")
 LIST_ALL = HIDDEN + ("The tool result in this turn lists {count} waiting for the manager's decision right now: {all}. Your reply does not present {missing} as waiting. "
                      "Tell them about every request the tool returned, each with its own dates and figures, and no other. Whatever the earlier messages "
                      "say about approving or cancelling an earlier request on the same dates, these are the requests waiting now.")
@@ -98,6 +97,12 @@ def _line(request):
     return f"{request['employee_name']}, request {request['request_id']}, {request['leave_type']} leave, {tools.when_label(request['start'], request['end'])}"
 
 
+def needs_pending(role, user_text, called):
+    """True when the code must look up what is waiting before the reply goes out: asked to approve or reject, and neither decided nor looked up."""
+    return (TOOL not in called and LIST_TOOL not in called and roles.allowed(role, TOOL) and roles.allowed(role, LIST_TOOL)
+            and asked_to_decide(user_text) is not None)
+
+
 def nudge(role, user_text, reply, called, sources):
     """What to tell the assistant once, before its reply is shown, or None. `called` is the tools it used in this answer."""
     if TOOL in called or not roles.allowed(role, TOOL):
@@ -109,8 +114,8 @@ def nudge(role, user_text, reply, called, sources):
             return None
         count = f"{len(pending)} request{'s' if len(pending) != 1 else ''}"
         return LIST_ALL.format(count=count, all="; ".join(_line(r) for r in pending), missing=", ".join(r["employee_name"] for r in missing))
-    if pending is None:
-        return LOOK_FIRST
+    if pending is None:          # nothing to go on (the code's lookup comes first, in agent.py)
+        return None
     named = [r for r in pending if names(user_text, r.get("employee_name"))]
     if len(named) != 1:          # nobody named, none waiting, or several waiting: asking which one is the right answer
         return None

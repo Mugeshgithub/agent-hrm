@@ -198,7 +198,8 @@ Labour-law answers are general information about the law, not legal advice; a co
 # rules only one role needs; added to the prompt for that role only
 ROLE_RULES = {
     "employee": """
-Never mention or offer manager or HR features like team requests, approvals or other people's tickets.""",
+Never mention or offer manager or HR features like team requests, approvals or other people's tickets.
+Asked about the team's or another person's leave, requests or balance (in any language): say you can only show their own, suggest asking their manager or HR, and stop there. Their role is known: nothing about what managers can do or where they find it.""",
     "manager": """
 You can view your team's pending requests and approve or reject them.
 A rejection always needs a reason; ask for one if it was not given, politely explaining it helps the employee plan or reapply.
@@ -947,6 +948,7 @@ def answer_turn(user_text):
         contract_retry_used = False
         booking_retry_used = False
         decision_retry_used = False
+        pending_lookup_used = False
         existing_retry_used = False
         card_retry_used = False
         number_retry_used = False
@@ -1056,7 +1058,17 @@ def answer_turn(user_text):
 
                 # guardrail in code: a manager is told which requests are pending NOW, from this turn's get_pending_requests, never from the chat: asked to
                 # approve or reject one, it goes on the card (never "already approved"); asked what is pending, every request the tool returned is listed
-                # (approval_first.py). One retry.
+                # (approval_first.py). One retry. Asked to decide with nothing looked up, the code calls get_pending_requests itself first: the reply is
+                # dropped, the result goes into the turn and the model answers again, with the one note still left for "put it on the card".
+                if not pending_lookup_used and approval_first.needs_pending(role, user_text, last_turn["tools_called"]):
+                    pending_lookup_used = True
+                    guards.retried("pending_lookup", recheck=lambda: approval_first.needs_pending(role, user_text, last_turn["tools_called"]))
+                    print("  [guard] asked to decide a request without looking at what is waiting: the code looks, the model answers again")
+                    messages.pop()
+                    uses = [{"type": "tool_use", "id": f"toolu_{uuid.uuid4().hex[:24]}", "name": approval_first.LIST_TOOL, "input": {}}]
+                    messages.append({"role": "assistant", "content": uses})
+                    messages.append(run_uses(uses))
+                    continue
                 if not decision_retry_used and (fix := approval_first.nudge(role, user_text, reply, last_turn["tools_called"], turn_sources)):
                     decision_retry_used = True
                     guards.retried("approval", recheck=lambda: approval_first.nudge(role, user_text, reply, last_turn["tools_called"], turn_sources))

@@ -1640,6 +1640,29 @@ def a_rules_question_answered_without_any_tool_needs_a_lookup_and_nothing_else_d
     assert not needs("employee", None, [])
 
 
+@test
+def a_question_about_someone_elses_data_is_a_role_question_and_is_not_searched():
+    # Nov 22: "Can I see my team's pending leave requests?" got a forced search every time, and the grounding check then reshaped the reply
+    for q in ["Can I see my team's pending leave requests?", "Can I see my team’s leave?", "My team's requests: can I see them?",
+              "Can I view the leave requests of my team?", "How much leave does Hugo have left?", "Can I see Hugo's requests?",
+              "Can I approve Hugo's leave?", "Is Emma's sick leave approved?", "What is my colleague's balance?", "Can I see someone else's payslip?",
+              "Can I check other people's holidays?", "Can I access my direct reports' calendars?", "Am I allowed to see the requests for Clara?",
+              "Puis-je voir les congés de mon équipe ?", "Est-ce que je peux voir les demandes de Hugo ?", "Quel est le solde d'Emma ?",
+              "Puis-je consulter le planning de mes collègues ?", "Puis-je approuver les demandes de mon équipe ?",
+              "Peux-tu me montrer les absences de ma collègue ?", "Puis-je voir les congés des autres ?"]:
+        assert search_first.about_others(q), q
+        assert not search_first.needs_lookup("employee", q, []), q
+    # questions about the rules that look alike are still searched: a possessive that is not a person's data, a holiday's name
+    for q in ["Do I need my manager's approval to work from home?", "Can an employee's leave be refused?", "Do I need HR's approval for unpaid leave?",
+              "Can I carry my leave over to next year?", "Am I allowed to work from home on Fridays?", "How many days of sick leave do I get?",
+              "What happens to my leave if I resign?", "Do I need a doctor's note?", "Is there a limit on leave for New Year's Eve?",
+              "Is there extra pay for Labour Day's shift?", "Can I take leave for Monday?", "Do I need a certificate for sick leave from December?"]:
+        assert not search_first.about_others(q), q
+        assert search_first.needs_lookup("employee", q, []), q
+    for q in ["Is Labour Day's leave paid?", "Les congés de Noël sont-ils payés ?", "Puis-je voir les autres types de congés ?", "Is Christmas Day a holiday?"]:
+        assert not search_first.about_others(q), q
+
+
 SICK = {"title": "Sick leave", "text": "Employees get 6 sick leave days per calendar year (1 January to 31 December)."}
 CASUAL = {"title": "Casual leave", "text": "Employees get 12 casual leave days per calendar year."}
 HOME = {"title": "Work from home", "text": "Employees may work from home up to 2 days a week."}
@@ -2361,9 +2384,15 @@ def a_manager_asked_to_approve_or_reject_is_shown_the_request_pending_now_never_
     assert nudge("manager", "approve emma's leave request", ["get_pending_requests", "decide_leave"], pending) is None   # it did decide: the card is up
     assert nudge("employee", "approve emma's leave request", ["get_pending_requests"], pending) is None                # only a manager can decide
     assert nudge("hr", "approve emma's leave request", ["get_pending_requests"], pending) is None
-    assert nudge("manager", "approve emma's leave request", [], []) == approval_first.LOOK_FIRST                       # answered without looking at what is waiting
-    assert nudge("manager", "approve emma's leave request", ["get_pending_requests"], ["not json", "[1, 2]"]) == approval_first.LOOK_FIRST
-    assert "get_pending_requests" in approval_first.LOOK_FIRST and "already approved" in approval_first.LOOK_FIRST
+    assert nudge("manager", "approve emma's leave request", [], []) is None                    # nothing looked up: the code looks (needs_pending), no note
+    assert nudge("manager", "approve emma's leave request", ["get_pending_requests"], ["not json", "[1, 2]"]) is None
+    needs = approval_first.needs_pending
+    for q in ["approve emma's leave request", "reject hugo's request", "approuve la demande d'Emma", "can you approve Hugo's request?"]:
+        assert needs("manager", q, []), q                                                       # asked to decide, nothing looked up: the code looks
+        assert not needs("manager", q, ["get_pending_requests"]) and not needs("manager", q, ["decide_leave"]), q
+        assert not needs("employee", q, []) and not needs("hr", q, []), q                       # only a manager decides
+    for q in ["any pending request", "Which requests can I approve?", "hello", "", None]:
+        assert not needs("manager", q, []), q
     assert nudge("manager", "approve the request", ["get_pending_requests"], pending) is None                           # nobody named: asking which one is fine
     assert nudge("manager", "approve clara's request", ["get_pending_requests"], pending) is None                       # nothing pending for her: the reply says so
     assert nudge("manager", "approve emma's request", ["get_pending_requests"], [json.dumps({"pending_requests": [emma, {**emma, "request_id": 410}]})]) is None   # two waiting: which one?

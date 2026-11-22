@@ -22,6 +22,35 @@ _RULES = re.compile(
 
 SEARCH_TOOLS = ("search_policy", "search_labour_code", "search_collective_agreement")
 
+# a question about seeing or acting on someone else's data ("Can I see my team's pending leave requests?", "les congés de Hugo") is about the
+# person's role, not the rules: the role's tools and the prompt answer it, and a forced search only gave the grounding check a policy to reshape the
+# reply around (Nov 22: the reply then named neither the manager nor HR, 1 in 5). Whose data: the team, colleagues, someone else, or a name
+_DATA = (r"(?:pending |leave |sick |paid |casual )*(?:leave|requests?|balances?|absences?|holidays?|vacations?|time off|days off|payslips?|pay|"
+         r"salar(?:y|ies)|contracts?|files?|data|calendars?|schedules?)")
+# a capitalised word is a name, except the words of holidays and dates ("New Year's Day", "Labour Day's leave", "leave for Monday")
+_NAME = (r"(?!(?:New|Day|Year|Eve|Christmas|Easter|Labour|Labor|Mother|Father|Valentine|Saint|St|Monday|Tuesday|Wednesday|Thursday|Friday|"
+         r"Saturday|Sunday|January|February|March|April|May|June|July|August|September|October|November|December|HR|France)\b)[A-Z][a-zà-ÿ]+")
+_OTHERS = (r"(?i:my (?:team|teams|colleagues?|co-?workers?|(?:direct )?reports|employees|staff)|someone else|somebody else|other people|others|"
+           r"a colleague|another employee)")
+_DONNEES = (r"(?:cong[ée]s|demandes?|soldes?|absences?|arr[êe]ts?(?: maladie)?|fiches? de paie|salaires?|contrats?|dossiers?|donn[ée]es|plannings?|calendriers?)"
+            r"(?: en attente)?")
+# not a bare "autres": "Puis-je voir les autres types de congés ?" is a rules question
+_AUTRES = (r"(?i:mon [ée]quipe|mes [ée]quipes|mes collaborat(?:eurs|rices)|mes coll[èe]gues|mes employ[ée]s|mon coll[èe]gue|ma coll[èe]gue|"
+           r"une? coll[èe]gue|un autre salari[ée]|les autres salari[ée]s|quelqu'un d'autre)")
+_FR_NAME = r"(?!(?:No[ëe]l|P[âa]ques|Toussaint|Pentec[ôo]te|l'Ascension|Ascension)\b)[A-ZÀ-Ý][a-zà-ÿ]+"
+_ABOUT_OTHERS = re.compile(
+    rf"(?:{_OTHERS}|\b{_NAME})(?:'s?|’s?) (?i:{_DATA})\b"                                # my team's leave, Hugo's requests
+    rf"|(?i:\b{_DATA}) (?:of|for|from) (?:{_OTHERS}|{_NAME})\b"                         # the requests of my team, the leave for Hugo
+    rf"|\b(?i:does|did|has) (?:{_OTHERS}|{_NAME}) (?i:have|get|take|got|taken)\b"       # how much leave does Hugo have
+    rf"|(?i:\b{_DONNEES}) (?:(?:de |d'|d’|du |des )(?:{_AUTRES}|{_FR_NAME})|(?i:des autres))\b"   # les congés de mon équipe, la demande d'Emma
+    rf"|(?i:\b(?:see|view|access|approve|reject|manage)\b[^.?]{{0,30}}){_OTHERS}\b"     # view what my direct reports booked
+    rf"|(?i:\b(?:voir|consulter|approuver|valider|refuser|g[ée]rer)\b[^.?]{{0,30}}){_AUTRES}")
+
+
+def about_others(text):
+    """True for a question about someone else's (or the team's) leave, requests, balance or file: a role question, not a rules one."""
+    return bool(_ABOUT_OTHERS.search(str(text or "")))
+
 
 def asks_about_rules(text):
     text = str(text or "")
@@ -30,8 +59,9 @@ def asks_about_rules(text):
 
 def needs_lookup(role, user_text, called):
     """True when the reply must not go out as it is: a rules question answered with no tool at all. `called` is the tools used in this answer:
-    any tool (a balance, a document, a search) means it looked something up, so only an answer with no tool is this guard's business."""
-    return not called and roles.allowed(role, "search_policy") and asks_about_rules(user_text)
+    any tool (a balance, a document, a search) means it looked something up, so only an answer with no tool is this guard's business. A question
+    about someone else's data is a role question (about_others)."""
+    return not called and roles.allowed(role, "search_policy") and asks_about_rules(user_text) and not about_others(user_text)
 
 
 def earlier_results(messages):
