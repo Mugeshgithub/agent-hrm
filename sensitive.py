@@ -54,6 +54,15 @@ _PATTERNS = {
 }
 # routine questions that share words with the patterns above, answered by the assistant as usual
 _ROUTINE = re.compile(r"\bif\s+i\s+resign\b|\bsi\s+je\s+d[ée]missionne\b|\bfire\s+(?:alarm|drill|exit|safety|extinguisher)\b|\b(?:is\s+there|what\s+is)\s+(?:a|the)\s+(?:policy|training)\b", _I)
+# a question about the policy itself ("Where is the harassment policy?", "How do I report harassment?", "Quelle est la procédure disciplinaire ?") is
+# answered from the policy, with HR's contact: it is passed on only when it also tells the person's own situation ("...by my manager", "on m'a...")
+_ABOUT_POLICY = re.compile(
+    r"\b(?:polic(?:y|ies)|procedures?|process|rules?|guidelines?|training|code\s+of\s+conduct|where\s+(?:is|are|can\s+i\s+find)|"
+    r"how\s+(?:do|can|should|would)\s+(?:i|we|you|employees|someone|one)\s+(?:report|file|raise|make|flag)|"
+    r"politique|proc[ée]dures?|r[èe]glement|charte|formation|o[ùu]\s+(?:est|sont|trouver)|comment\s+(?:signaler|d[ée]clarer|faire\s+un\s+signalement)|existe-t-il)\b", _I)
+_OWN_SITUATION = re.compile(
+    r"\b(?:me|my|myself|mine|i'?m|i\s+am|i\s+was|i'?ve|i\s+got|i\s+have\s+been|i\s+feel|j'ai|je\s+suis|je\s+me\s+sens|moi|"
+    r"mon\s+(?:manager|chef|coll[èe]gue|responsable)|ma\s+(?:manager|cheffe|coll[èe]gue|responsable))\b|\bm'|\bon\s+m'", _I)
 _FRENCH = re.compile(r"\b(?:je|j'|mon|ma|mes|est-ce|peut|suis|une?|le|la|les|des|du|qu'|avec|pour|pas)\b", _I)
 _SELF_HARM = re.compile(r"\bsuicid|\bself[\s-]harm|\bkill\s+myself\b|\bme\s+suicider\b|\ben\s+finir\b", _I)
 
@@ -63,10 +72,34 @@ def classify(role, text):
     text = str(text or "")
     if role in NOT_FOR or not text.strip() or _ROUTINE.search(text):
         return None
+    if _ABOUT_POLICY.search(text) and not _OWN_SITUATION.search(text):
+        return None
     for kind, pattern in _PATTERNS.items():
         if pattern.search(text):
             return kind
     return None
+
+
+# the topics, asked about in general: the answer comes from the policy, and code adds HR's contact after it (agent.py)
+_TOPIC = re.compile(
+    r"\bharass|\bharc[eè]l|\bdiscrimin|\bdisciplin|\bdismiss|\blicenci|\bwarning\b|\bavertissement|\bsanction|\bon\s+sick\s+leave\b|"
+    r"\ben\s+arr[êe]t\s+maladie\b|\bbull(?:y|ying)\b|\bunequal\s+pay\b", _I)
+
+
+def policy_question(role, text):
+    """True for a question about one of these topics in general ("How do I report harassment?", "Quelle est la procédure disciplinaire ?",
+    "What happens if I'm on sick leave for more than 3 days?"): searched in the policy, then HR's contact is given. Never for a matter that is
+    passed on (classify), nor for a routine question that does not name the topic ("How many sick days do I have?")."""
+    return role not in NOT_FOR and classify(role, text) is None and bool(_TOPIC.search(str(text or "")))
+
+
+def contact_line(text, contact):
+    name, email = contact
+    if not email:
+        return ""
+    if bool(_FRENCH.search(str(text or ""))) and not re.search(r"\b(?:the|my|is|are|i|you|what|can|how|where)\b", str(text or ""), re.I):
+        return f"Si vous souhaitez en parler à quelqu'un, vous pouvez contacter {name} aux RH ({email})."
+    return f"If you'd like to talk it through with someone, you can contact {name} at HR ({email})."
 
 
 def hr_contact():

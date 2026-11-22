@@ -203,11 +203,11 @@ Labour-law answers are general information about the law, not legal advice; a co
 ROLE_RULES = {
     "employee": """
 Never mention or offer manager or HR features like team requests, approvals or other people's tickets.
-Harassment, discrimination, their own health problems, a disciplinary matter, dismissal, or a pay dispute about a specific person: call escalate_to_hr first, before any search, and give no advice.
+Harassment, discrimination, their own health problems, a disciplinary matter, dismissal, or a pay dispute about a specific person: call escalate_to_hr first, before any search, and give no advice. A question about the policy on these (where it is, how to report, the procedure) is not passed on: answer it from search_policy and give HR's contact.
 Asked about the team's or another person's leave, requests or balance (in any language): say you can only show their own, suggest asking their manager or HR, and stop there. Their role is known: nothing about what managers can do or where they find it.""",
     "manager": """
 You can view your team's pending requests and approve or reject them.
-Harassment, discrimination, someone's health problems, a disciplinary matter, dismissal, or a pay dispute about a specific person: call escalate_to_hr first, before any search, and give no advice.
+Harassment, discrimination, someone's health problems, a disciplinary matter, dismissal, or a pay dispute about a specific person: call escalate_to_hr first, before any search, and give no advice. A question about the policy on these (where it is, how to report, the procedure) is not passed on: answer it from search_policy and give HR's contact.
 A rejection always needs a reason; ask for one if it was not given, politely explaining it helps the employee plan or reapply.
 If the answer to an approve-or-reject question is unclear (like "no"), ask whether to reject it or leave it pending. Never treat an unclear answer as a decision.
 When asked what needs your attention or what is waiting, call get_needs_attention and tell them what is waiting, the oldest first, including any onboarding step for a new hire, any contract waiting for your approval, and any paid-leave warning. Only list it: never approve or reject until they say what to do with a request.""",
@@ -551,11 +551,17 @@ def system_prompt_for(user_id):
                                             "search_policy and search_labour_code to call first, or together."}]
           if (order := collective_agreement.agreement_prompt()) else []),
         # block 3: changes per user, so it goes AFTER the cached part
-        {"type": "text", "text": f"The logged-in user is {user['name']}, role: {role}. {category_prompt(user_id)} "
+        {"type": "text", "text": f"The logged-in user is {user['name']}, role: {role}. {category_prompt(user_id)} {hr_contact_line()}"
                                  "Earlier messages may be reloaded from saved history without their tool calls. "
                                  "Never reuse numbers from them. For every balance, day count or request status, "
                                  "call the tool again in this turn."},
     ]
+
+
+def hr_contact_line():
+    """HR's contact, for answers that point to HR (sensitive.py picks the first active HR person)."""
+    name, email = sensitive.hr_contact()
+    return f"HR's contact: {name} ({email})." if email else ""
 
 
 def with_cache_marker(messages):
@@ -846,6 +852,9 @@ def run_tool(name, tool_input):
     # ---------- HR tickets ----------
 
     if name == "escalate_to_hr":           # the backup to sensitive.classify: the app answers, no advice (sensitive.py)
+        if sensitive.policy_question(current_role(), last_turn["question"]):        # "Comment signaler un harcèlement ?" is about the policy
+            return {"error": "Not passed on: this is a general question about the policy, not the person's own case. Call search_policy and "
+                             "answer from it."}
         last_turn["escalated"] = sensitive.escalate(me, tool_input.get("kind"), last_turn["question"], "model")
         return {"escalated": True, "message": "Passed to HR. The app gives the reply."}
 
@@ -1048,7 +1057,8 @@ def answer_turn(user_text):
                 # search earlier in this conversation already returned what it finds, the reply stands and the checks below read those results too.
                 # Otherwise the reply is dropped (never shown, never saved), the code's search goes into the turn and the model answers again: the
                 # person never reads "I'll search the policy first". Once per message.
-                if not search_retry_used and search_first.needs_lookup(role, user_text, last_turn["tools_called"]):
+                if not search_retry_used and (search_first.needs_lookup(role, user_text, last_turn["tools_called"])
+                                              or (not last_turn["tools_called"] and sensitive.policy_question(role, user_text))):
                     search_retry_used = True
                     agreement = collective_agreement.on_file()
                     if search_first.already_found(search_policy(user_text), earlier, agreement):
@@ -1211,6 +1221,11 @@ def answer_turn(user_text):
                 # a law answer says how recent the law it quotes is: added by code after every guard, the model can forget a line (law_status.py)
                 if (as_of_line := law_status.line_for(reply, turn_sources, user_text)):
                     reply = f"{reply}\n\n{as_of_line}"
+
+                # a question about a sensitive topic in general (harassment, the disciplinary procedure...): the policy's answer, then HR's contact, added
+                # by code after every check so a retry or a quoted section never loses it (sensitive.py)
+                if sensitive.policy_question(role, user_text) and (line := sensitive.contact_line(user_text, sensitive.hr_contact())) and line not in reply:
+                    reply = f"{reply}\n\n{line}"
 
                 # the policy does not answer it: keep the question, without a name, for HR (policy_gaps.py)
                 if policy_gaps.record_from_turn(last_turn["policy_searches"], reply):

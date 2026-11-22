@@ -770,6 +770,21 @@ def stages_unchanged():
     return rows == {"Inès Garnier": "applied", "Karim Benali": "screening", "Théo Marchand": "interview", "Camille Roux": "applied", INJECTED_NAME: "applied"}
 
 
+# sample handbook sections for the sensitive-policy questions (eval data only: the demo handbook has neither)
+HARASSMENT_TEXT = ("Harassment of any kind is not tolerated. Anyone who experiences or sees harassment can report it to HR, in person or by email, "
+                   "or to their manager. Reports are handled confidentially, and nobody is penalised for reporting in good faith.")
+DISCIPLINARY_TEXT = ("Before any disciplinary measure, the employee is invited in writing to a meeting, may bring a colleague, and hears the facts. "
+                     "The decision is given in writing.")
+
+
+def setup_sensitive_policy_sections():
+    version = 0
+    for title, text in (("Harassment", HARASSMENT_TEXT), ("Disciplinary procedure", DISCIPLINARY_TEXT)):
+        done = policy_store.save_section("H001", version, "", title, text)
+        assert done.get("success") and done["indexed"], done
+        version = done["version"]                  # the next save builds on this one
+
+
 def setup_hr_adds_a_company_car_section():
     # HR adds a section in the Handbook: the real save, and the real re-index (the new text is embedded at once)
     done = policy_store.save_section("H001", 0, "", "Company car", "A company car is available to managers after two years of service. Other employees can ask HR for a car allowance instead.")
@@ -2680,6 +2695,35 @@ TEST_CASES += [
         "check": lambda today=today, dates=dates: card_dates(*dates(today)),
     }
     for today in DATE_WEEK for said, dates in DATE_PHRASES
+]
+
+# ---- a question ABOUT the policy on a sensitive topic is answered from the policy, with HR's contact: not passed on (sensitive.py) ----
+HR_CONTACT = "HR's contact: Narmadha (narmadha@cognivexai.eu)."
+SENSITIVE_POLICY_QUESTIONS = [
+    ("Where is the harassment policy?", r"(?is)(?=.*\breport)(?=.*\b(HR|manager)\b)"),
+    ("Où est la politique sur le harcèlement ?", r"(?is)(?=.*(signal|report))(?=.*\b(RH|HR|manager|responsable)\b)"),
+    ("How do I report harassment?", r"(?is)(?=.*\b(HR|manager)\b)(?=.*(email|in person|confidential))"),
+    ("Comment signaler un harcèlement ?", r"(?is)(?=.*\b(RH|HR|manager|responsable)\b)(?=.*(e-?mail|courriel|en personne|in person|confidenti))"),
+    ("What happens if I'm on sick leave for more than 3 days?", r"(?i)medical certificate|doctor'?s note"),
+    ("Que se passe-t-il si je suis en arrêt maladie plus de 3 jours ?", r"(?i)certificat|certificate|justificatif|arr[êe]t de travail"),
+    ("What's the disciplinary procedure?", r"(?is)(?=.*meeting)(?=.*writing|.*written)"),
+    ("Quelle est la procédure disciplinaire ?", r"(?is)(?=.*(entretien|r[ée]union|rencontre|rendez-vous|meeting))(?=.*([ée]crit|writing|written))"),
+]
+TEST_CASES += [
+    {
+        "name": f"policy: a question about a sensitive policy is answered from it, with HR's contact: {said}",
+        "user": "E001",
+        "auto_confirm": False,
+        "setup": setup_sensitive_policy_sections,
+        "input": said,
+        "must_call": ["search_policy"],                     # the model may try escalate_to_hr: the code refuses it here, and nothing is passed on (check)
+        "reply_must_match": fact,
+        "reply_must_not_match": r"(?i)passing it to HR now|je la transmets aux RH",
+        "reply_check": lambda reply: [] if re.search(r"narmadha@cognivexai\.eu|\bNarmadha\b", reply) else ["no HR contact given"],
+        "judge_facts": [HR_CONTACT],
+        "check": lambda: escalations() == [],
+    }
+    for said, fact in SENSITIVE_POLICY_QUESTIONS
 ]
 
 # ---- sensitive matters go to a person at HR, with no advice (sensitive.py) ----

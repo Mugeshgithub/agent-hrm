@@ -3084,6 +3084,18 @@ def a_sensitive_matter_goes_to_hr_and_a_routine_question_does_not():
                  "Why is my pay lower this month?", "What is Hugo's salary?", "Is there a policy on harassment training?", "When is the next fire drill?",
                  "Can I see my team's pending leave requests?", "Book me Friday off as casual leave", "", None]:
         assert sensitive.classify("employee", said) is None, said
+    # a question about the policy itself is answered from it, with HR's contact; it is passed on only when it tells the person's own situation
+    for said in ["Where is the harassment policy?", "Où est la politique sur le harcèlement ?", "How do I report harassment?", "Comment signaler un harcèlement ?",
+                 "What happens if I'm on sick leave for more than 3 days?", "Que se passe-t-il si je suis en arrêt maladie plus de 3 jours ?",
+                 "What's the disciplinary procedure?", "Quelle est la procédure disciplinaire ?", "Quelle est la procédure de licenciement ?"]:
+        assert sensitive.classify("employee", said) is None and sensitive.policy_question("employee", said), said
+    for said in ["How do I report harassment by my manager?", "My manager harasses me, what does the policy say?", "On m'a mis un avertissement, quelle est la procédure ?"]:
+        assert sensitive.classify("employee", said) and not sensitive.policy_question("employee", said), said
+    for said in ["How many sick days do I have?", "What does the policy say about remote work?"]:
+        assert not sensitive.policy_question("employee", said), said
+    assert not sensitive.policy_question("hr", "What's the disciplinary procedure?")
+    assert "Narmadha" in sensitive.contact_line("How do I report harassment?", ("Narmadha", "n@x.eu"))
+    assert sensitive.contact_line("Comment signaler un harcèlement ?", ("Narmadha", "n@x.eu")).startswith("Si vous souhaitez")
     fr = sensitive.reply("dismissal", "je suis en arrêt maladie, on peut me licencier ?", "HR-0042", ("Narmadha", "narmadha@cognivexai.eu"))
     assert "transmets aux RH" in fr and "HR-0042" in fr and "narmadha@cognivexai.eu" in fr and "3114" not in fr
     en = sensitive.reply("health", "I feel suicidal", None, ("HR", ""))
