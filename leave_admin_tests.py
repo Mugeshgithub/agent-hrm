@@ -402,7 +402,8 @@ def a_manager_sees_leave_paid_leave_and_floating_holidays_of_the_team_oldest_fir
     assert [r["leave_type"] for r in box["leave_requests"]] == ["paid", "casual", "floater"]
     assert box["waiting_on_you"] == 3 and box["hr_requests"] == [] and box["role"] == "manager"
     first = box["leave_requests"][0]
-    assert first["days"] == 6 and first["balances"]["paid"] == {"balance": 12.5, "pending": 6, "available": 6.5}
+    assert first["days"] == 6 and first["balances"]["paid"] == {"balance": 12.5, "pending": 6, "available": 6.5,
+                                                                 "words": "days available (12.5 total, 6 waiting for approval)"}   # the assistant's words
     assert [o["name"] for o in first["overlaps"]] == ["Hugo"]                                    # who else is off then
 
 

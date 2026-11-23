@@ -51,6 +51,7 @@ import guard_events
 from citations import ungrounded_citations, RETRY_MESSAGE, SAFE_REPLY
 from documents import asks_if_genuine, says_cannot_tell, GENUINE_ANSWER, GENUINE_RETRY
 from tools import (
+    shown_by_app,
     get_leave_balance, apply_leave, days_for, days_figures, no_days_reason, today_line, holidays_of, balance_of, clean_days, paid_policy_note,
     get_pending_requests, decide_leave, get_my_requests, get_employee, existing_request, already_requested, when_label,
     get_team_member_balance, cancel_leave, cancel_problem, decide_problem, request_summary,
@@ -175,6 +176,7 @@ If the user asks why their balance changed or where their days went, call get_ba
 To cancel or withdraw leave, call get_my_requests first to find the request ID, then call cancel_leave.
 If exactly one request matches what the user wants to cancel, call cancel_leave straight away. Only ask which one if several requests match.
 Do not ask "shall I proceed?" before approve, reject, apply, cancel, ticket or reply actions. The system shows its own confirmation box.
+When you give a leave balance, use the sentence from say_as_is in get_leave_balance word for word.
 If an employee asks about another person's leave balance, refuse immediately. Never ask for their employee ID. Only managers can view their own team members' balances.
 Users can give dates in any normal way. Never ask them for a specific date format; convert dates yourself.
 Collective agreement: if they mention the company's collective agreement (convention collective) and you do NOT have a search_collective_agreement tool, your reply says that HR has not added the collective agreement to the assistant yet, then stops there on that subject: never say what it contains from memory.
@@ -980,7 +982,9 @@ def answer_turn(user_text):
                     last_turn["tools_called"].append(use["name"])
                 result = run_tool(use["name"], use["input"])          # run_tool applies the same refusal
                 turn_sources.append(json.dumps(result, ensure_ascii=False))
-                tool_results.append({"type": "tool_result", "tool_use_id": use["id"], "content": json.dumps(result)})
+                # lines the app adds itself (shown_by_app) never reach the model: shown them, it said them again in its own words (half the replies)
+                seen = {k: v for k, v in result.items() if k != "shown_by_app"} if isinstance(result, dict) else result
+                tool_results.append({"type": "tool_result", "tool_use_id": use["id"], "content": json.dumps(seen)})
             return {"role": "user", "content": tool_results}
 
         while calls_this_message < MAX_CALLS_PER_MESSAGE:
@@ -1181,6 +1185,11 @@ def answer_turn(user_text):
                 # a law answer says how recent the law it quotes is: added by code after every guard, the model can forget a line (law_status.py)
                 if (as_of_line := law_status.line_for(reply, turn_sources, user_text)):
                     reply = f"{reply}\n\n{as_of_line}"
+
+                # lines a tool marks shown_by_app ("16 Nov: still waiting for your manager's decision", "2 past requests need a decision") are added
+                # by code under the reply, word for word: the model left them out or reworded them (tools.past_waiting, tools.past_decisions_line)
+                if (lines := shown_by_app(turn_sources, reply)):
+                    reply = reply + "\n\n" + "\n".join(lines)
 
                 # the policy does not answer it: keep the question, without a name, for HR (policy_gaps.py)
                 if policy_gaps.record_from_turn(last_turn["policy_searches"], reply):

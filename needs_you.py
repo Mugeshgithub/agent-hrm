@@ -16,7 +16,7 @@ import law_status
 import onboarding
 import policy_gaps
 import untrusted
-from tools import get_employee, get_pending_requests, clean_days
+from tools import get_employee, get_pending_requests, clean_days, past_decisions_line
 
 PAID_WARN_ABOVE = 30    # unused paid days. L3141-3 caps a year's paid leave at 30 jours ouvrables, so
                         # more than that means days are piling up and leave is worth planning
@@ -92,7 +92,7 @@ def for_assistant(emp_id):
     return {
         "about_candidate_names": untrusted.NOTE if box["new_applications"] else None,
         "waiting_on_you": box["waiting_on_you"],
-        "leave_requests": [{"request_id": p["request_id"], "employee_name": p["employee_name"],
+        "leave_requests": [{"request_id": p["request_id"], "employee_name": p["employee_name"], **({"dates_passed": True} if p.get("dates_passed") else {}),
                             "leave_type": p["leave_type"], "start": p["start"], "end": p["end"], "days": p["days"],
                             "also_off": [o["name"] for o in p["overlaps"]]} for p in box["leave_requests"]],
         "hr_requests": [{"ticket": t["ticket"], "employee_name": t["employee_name"], "summary": t["summary"]}
@@ -110,4 +110,6 @@ def for_assistant(emp_id):
         "questions_the_policy_does_not_answer": [{"topic": g["topic"], "times_asked": g["asks"], "also_asked_as": g["examples"][1:]}
                                                  for g in box["policy_gaps"]],
         "paid_leave_warnings": [w["message"] for w in box["paid_leave_warnings"]],
+        # requests whose dates passed while they still wait: the app adds this line under the reply (tools.shown_by_app)
+        **({"shown_by_app": [line]} if (line := past_decisions_line(sum(1 for p in box["leave_requests"] if p.get("dates_passed")))) else {}),
     }

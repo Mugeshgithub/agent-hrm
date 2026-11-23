@@ -58,7 +58,7 @@ import needs_you
 import policy_gaps
 import policy_store
 from notifications import notify_decision, notify_ticket_reply
-from tools import (get_employee, apply_leave, cancel_leave, days_for, holidays_of, get_pending_requests,
+from tools import (get_employee, apply_leave, cancel_leave, days_for, holidays_of, get_pending_requests, past_waiting, past_decisions_line,
                    decide_leave, create_hr_ticket, get_my_tickets, reply_to_ticket, PENDING, LEAVE_TYPES)
 
 db.DB_PATH = os.getenv("HRM_DB", "hr.db")
@@ -214,11 +214,14 @@ def home(request: Request):
         "latest_payslip": {"month": latest["month"], "net_paid_eur": latest["net_paid_eur"],
                            "gross_eur": latest["gross_eur"]} if latest and "error" not in latest else None,
         "holidays": [h for h in sorted(d.isoformat() for d in holidays_of(emp["id"])) if h >= today][:3],
+        "past_waiting": past_waiting(emp["id"]),         # dates passed, still waiting for the manager: kept, counted, and said
     }
     if emp["role"] in ("manager", "hr"):
         data["waiting_on_you"] = needs_you.waiting_count(emp["id"])     # the menu badge
     if emp["role"] == "manager":
-        data["pending_approvals"] = len(get_pending_requests(emp["id"])["pending_requests"])
+        waiting = get_pending_requests(emp["id"])["pending_requests"]
+        data["pending_approvals"] = len(waiting)
+        data["past_decisions"] = past_decisions_line(sum(1 for r in waiting if r.get("dates_passed")))
         members = [m["id"] for m in hr_queries.team(emp["id"])]
         data["team_size"] = len(members)
         data["team_leave"] = hr_queries.leave_between(today, _plus_days(today, 21), members)

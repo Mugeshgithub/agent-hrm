@@ -38,6 +38,60 @@ def clean_days(n):
     return int(n) if n == int(n) else n
 
 
+BALANCE_LABELS = {"casual": "Casual leave", "sick": "Sick leave", "paid": "Paid leave"}
+
+
+def balance_words(kind, balance, pending):
+    """The balance in one sentence, said as is by the assistant and shown on the dashboard, so both use the same words:
+    ("Casual leave: 1 day available (2 total, 1 waiting for approval)", "day available (2 total, 1 waiting for approval)") — the second
+    is what follows the big number on the dashboard tile."""
+    balance, pending = clean_days(balance), clean_days(pending)
+    available = clean_days(balance - pending)
+    after = f"{'day' if available == 1 else 'days'} available" + (f" ({balance} total, {pending} waiting for approval)" if pending else "")
+    return f"{BALANCE_LABELS[kind]}: {available} {after}", after
+
+
+def short_dates(start, end):
+    """"16 Nov", "16–17 Nov" or "30 Nov – 2 Dec"."""
+    start, end = date.fromisoformat(str(start)), date.fromisoformat(str(end))
+    if start == end:
+        return f"{start.day} {start:%b}"
+    if (start.year, start.month) == (end.year, end.month):
+        return f"{start.day}–{end.day} {end:%b}"
+    return f"{start.day} {start:%b} – {end.day} {end:%b}"
+
+
+def past_waiting(employee_id, today=None):
+    """The person's requests that started before today and still wait for their manager's decision: kept and still counted, each said
+    as "16 Nov: still waiting for your manager's decision"."""
+    today = (today or date.today()).isoformat()
+    conn = get_conn()
+    rows = conn.execute("SELECT id, start_date, end_date FROM leave_requests WHERE employee_id = ? AND status = ? AND start_date < ? ORDER BY start_date",
+                        (employee_id, PENDING, today)).fetchall()
+    conn.close()
+    return [{"request_id": r[0], "label": f"{short_dates(r[1], r[2])}: still waiting for your manager's decision"} for r in rows]
+
+
+def past_decisions_line(count):
+    """What a manager is told about requests whose dates have passed and that still wait for them."""
+    return f"{count} past request{'s need' if count != 1 else ' needs'} a decision" if count else ""
+
+
+def shown_by_app(turn_sources, reply):
+    """The shown_by_app lines of this turn's tool results that the reply does not already hold, in order, each once."""
+    import json
+    plain, out = str(reply or "").replace("**", "").lower(), []
+    for source in turn_sources:
+        try:
+            result = json.loads(source)
+        except (TypeError, ValueError):
+            continue
+        for line in (result.get("shown_by_app") or []) if isinstance(result, dict) else []:
+            if line and line.lower() not in plain and line not in out:
+                out.append(line)
+    return out
+
+
 def balance_of(emp):
     # the three balances of one employee row, the same shape everywhere
     return {kind: clean_days(emp[f"{kind}_balance"]) for kind in LEAVE_TYPES}
@@ -80,9 +134,15 @@ def get_leave_balance(employee_id, leave_type=None):
         "leave_balance": balance_of(emp),
     }
     # the figure a person asks for next ("how many days will I have once my request is approved?") comes from here, not from arithmetic
-    if pending := pending_days_by_type(employee_id):
+    pending = pending_days_by_type(employee_id)
+    if pending:
         result["pending_days"] = pending
         result["available_after_pending"] = {kind: clean_days(emp[f"{kind}_balance"] - days) for kind, days in pending.items()}
+    # the balance in words, said as is (the dashboard tile shows the same words)
+    kinds = [leave_type] if leave_type in LEAVE_TYPES else list(LEAVE_TYPES)
+    result["say_as_is"] = [balance_words(k, emp[f"{k}_balance"], pending.get(k, 0))[0] for k in kinds]
+    if late := past_waiting(employee_id):       # dates already passed, still waiting: kept and counted; the app adds these lines to the reply
+        result["shown_by_app"] = [r["label"] for r in late]
     if leave_type == PAID:       # asked about paid leave: no dates yet, so always remind of the usual window
         result["policy_note"] = paid_policy()[1]
     return result
@@ -295,10 +355,16 @@ def get_pending_requests(manager_id):
     ).fetchall()
     conn.close()
     requests = [dict(r) for r in rows]
+    today = date.today().isoformat()
     for r in requests:
         if r["leave_type"] in LEAVE_TYPES:           # floating holidays have no balance
             r["balance_after_approval"] = clean_days(r[f"{r['leave_type']}_balance"] - r["days"])
-    return {"pending_requests": requests}
+        if r["start"] < today:
+            r["dates_passed"] = True                 # still waiting although its dates have started or passed
+    result = {"pending_requests": requests}
+    if late := sum(1 for r in requests if r.get("dates_passed")):
+        result["shown_by_app"] = [past_decisions_line(late)]      # the app adds this line to the reply (agent.py)
+    return result
 
 
 def decide_leave(manager_id, request_id, decision, reason=""):

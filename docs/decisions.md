@@ -6,6 +6,7 @@ Entries marked *backfilled* were written afterwards from the code, the git histo
 ## Open items
 Known weak spots, measured and not fixed yet. Remove a line when its fix merges.
 - **Grounding check: "decided on a case-by-case basis" is caught 2 to 4 times in 10** (grounding_tests.py, 22 Nov; 3/10 on main before #63). An invented basis for the manager's decision can reach the person. See entry 29.
+- **French leave types (congés payés, RTT, no sick balance) are not modelled.** Touches the balance columns, leave rules, about 10 web files and most tests; about 2-3 PRs, more for real RTT accrual. The French demo uses paid leave only for now (23 Nov).
 - **Test that CV text stays out of Langfuse against a live Langfuse before real candidate data.** The summary call is wrapped in `tracing.private_call()` and its trace keeps no input or output (entry 35), checked only by reading the installed instrumentation's source.
 - **Eval "category: when HR has not set it the assistant says so and gives each case" fails about 1 time in 10** (9/10 on main, 8/10 on #64's branch, 22 Nov; one CI retry on #64). The reply sometimes gives one notice period and mentions the other only as an "unless". Not fixed: CI's one retry covers it.
 
@@ -267,6 +268,13 @@ Known weak spots, measured and not fixed yet. Remove a line when its fix merges.
 - **Why:** real, Sun 22 Nov: "Friday 29 November" (a Sunday) for Friday 27 November. 35 evals (5 phrases for each day of the week as today) x10: 244/350 before, 350/350 after; the reply check never had to step in.
 - **Cost:** about 600 more tokens in the cached prompt. "Next Friday" on a Monday is read as next week's Friday, not this week's: people use both, and this one is now fixed in code.
 - **Change it when:** people say the app picks the wrong one of two readings, or another phrase ("in two weeks", "le 1er") needs working out.
+
+### 40. A balance is one sentence from code, and requests whose dates passed while they wait are said, not expired (PR #70, 2026-11-23)
+- **Chose:** [tools.py](../tools.py) `balance_words`: "Casual leave: 1 day available (2 total, 1 waiting for approval)". The balance tool returns it (`say_as_is`) and the model is told to use it word for word; the dashboard tile shows the same words after the big number. A request still waiting after its dates have started stays counted; the employee sees "16 Nov: still waiting for your manager's decision" (balance tool, dashboard) and the manager "N past requests need a decision" (pending requests, Needs you, dashboard). Those lines are added under the reply by code (`shown_by_app`) and never sent to the model.
+- **Not chosen:** expiring past requests (the user's call: a decision is still owed); asking the model to say those lines word for word (it left out the employee's line 8 times in 10 and reworded the manager's 3 times in 10; shown the lines, it said them twice in half the replies).
+- **Why:** "1 day pending" read as a mistake when it was right; a request from 16 Nov kept reducing a balance with nobody told.
+- **Cost:** the Time off page keeps its own wording ("5 on balance, 2 waiting"). 4 evals x10: 40/40.
+- **Change it when:** someone wants past requests to expire, or the Time off page should use the same sentence.
 
 ### 42. employees_tests run in UTC (PR #72, 2026-11-24)
 - **Chose:** `TZ=UTC` set at the top of [employees_tests.py](../employees_tests.py), like CI and the server.

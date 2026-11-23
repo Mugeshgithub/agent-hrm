@@ -18,6 +18,7 @@ import careers
 import interviews
 import memory
 import notifications
+import tools
 import tracing
 import payslips
 import checkins
@@ -383,6 +384,25 @@ def setup_priya_one_approved():
 
 def setup_karthik_pending():
     apply_leave("E002", "casual", iso(day(1, 0)), iso(day(1, 0)))
+
+
+def setup_hugo_request_left_waiting():
+    # a request nobody decided on: booked for a day ahead, then its dates moved to last week, still waiting for Lucas (apply_leave refuses past dates)
+    setup_karthik_pending()
+    past = date.today() - timedelta(days=7 + date.today().weekday())          # last week's Monday
+    conn = db.get_conn()
+    with conn:
+        conn.execute("""UPDATE leave_requests SET start_date = ?, end_date = ? WHERE id = (SELECT MAX(id) FROM leave_requests WHERE employee_id = 'E002')""",
+                     (past.isoformat(), past.isoformat()))
+    conn.close()
+
+
+def says_exactly(expected):
+    # the reply holds each of the tool's sentences word for word (case and ** marks aside)
+    def check(reply):
+        plain = re.sub(r"\*\*", "", reply).lower()
+        return [f"missing {e!r}" for e in expected() if e.lower() not in plain]
+    return check
 
 
 def setup_priya_poisoned_history():
@@ -2665,6 +2685,48 @@ TEST_CASES += [
         "check": lambda today=today, dates=dates: card_dates(*dates(today)),
     }
     for today in DATE_WEEK for said, dates in DATE_PHRASES
+]
+
+# ---- balances in the tool's own words, and requests whose dates passed while they still wait (tools.balance_words, tools.past_waiting) ----
+TEST_CASES += [
+    {
+        "name": "balance: the balance is said in the tool's words, with what waits for approval",
+        "user": "E002",
+        "auto_confirm": False,
+        "setup": setup_karthik_pending,
+        "input": "How many casual days do I have?",
+        "must_call": ["get_leave_balance"],
+        "reply_check": says_exactly(lambda: [tools.balance_words("casual", tools.get_employee("E002")["casual_balance"],
+                                                                 tools.pending_days_by_type("E002").get("casual", 0))[0]]),
+    },
+    {
+        "name": "balance: a past request still waiting is said to the employee, and still counted",
+        "user": "E002",
+        "auto_confirm": False,
+        "setup": setup_hugo_request_left_waiting,
+        "input": "What's my leave balance?",
+        "must_call": ["get_leave_balance"],
+        "reply_check": says_exactly(lambda: [r["label"] for r in tools.past_waiting("E002")]
+                                    + [tools.balance_words("casual", tools.get_employee("E002")["casual_balance"], tools.pending_days_by_type("E002")["casual"])[0]]),
+    },
+    {
+        "name": "inbox: a manager is told how many past requests need a decision",
+        "user": "M001",
+        "auto_confirm": False,
+        "setup": setup_hugo_request_left_waiting,
+        "input": "What needs my attention?",
+        "must_call_one_of": ["get_needs_attention", "get_pending_requests"],
+        "reply_check": says_exactly(lambda: [tools.get_pending_requests("M001")["shown_by_app"][0]]),
+    },
+    {
+        "name": "approve: asked what is pending, a manager hears how many past requests need a decision",
+        "user": "M001",
+        "auto_confirm": False,
+        "setup": setup_hugo_request_left_waiting,
+        "input": "Show me my team's pending leave requests",
+        "must_call": ["get_pending_requests"],
+        "reply_check": says_exactly(lambda: [tools.get_pending_requests("M001")["shown_by_app"][0]]),
+    },
 ]
 
 

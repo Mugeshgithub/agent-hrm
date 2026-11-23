@@ -13,7 +13,8 @@ import { useMe } from "@/components/Me";
 type Home = {
   person: Person; balances: Balances; upcoming_leave: LeaveRequest[]; notifications: Notification[];
   open_tickets: number; latest_payslip: { month: string; net_paid_eur: string; gross_eur: string } | null;
-  holidays: string[]; pending_approvals?: number; team_size?: number; team_leave?: CalendarLeave[];
+  holidays: string[]; past_waiting: { request_id: number; label: string }[];
+  pending_approvals?: number; past_decisions?: string; team_size?: number; team_leave?: CalendarLeave[];
   open_hr_tickets?: number; headcount?: number;
 };
 
@@ -50,12 +51,19 @@ export default function HomePage() {
               <div key={t} className={t === "paid" ? "sm:col-span-2" : undefined}>
                 <p className="text-sm text-ink-soft">{leaveLabel(t)}</p>
                 <p className="mt-0.5"><span className="text-xl font-semibold">{data.balances[t].available}</span>
-                  <span className="ml-1.5 text-ink-soft">{data.balances[t].available === 1 ? "day" : "days"} available</span></p>
+                  <span className="ml-1.5 text-ink-soft">{data.balances[t].words ?? `${data.balances[t].available === 1 ? "day" : "days"} available`}</span></p>
                 <div className="mt-3"><DayTiles balance={data.balances[t]} booked={booked(t)} /></div>
               </div>
             ))}
           </div>
           <div className="px-5 pb-4"><TileLegend /></div>
+          {data.past_waiting.length > 0 && (
+            <ul className="space-y-1 px-5 pb-4 text-sm" aria-label="Past requests still waiting">
+              {data.past_waiting.map((p) => (
+                <li key={p.request_id} className="flex items-center gap-2"><span className="h-2 w-2 shrink-0 rounded-full bg-wait" aria-hidden />{p.label}</li>
+              ))}
+            </ul>
+          )}
 
           <div className="border-t border-rule">
             <div className="flex items-center justify-between px-5 pt-4 pb-2">
@@ -92,6 +100,9 @@ export default function HomePage() {
                   <span>Leave requests to decide</span>
                   <span className={`text-lg font-semibold ${data.pending_approvals ? "text-dossier" : "text-ink-faint"}`}>{data.pending_approvals}</span>
                 </Link>
+              )}
+              {me.role === "manager" && data.past_decisions && (
+                <p className="mt-2 flex items-center gap-2 text-sm"><span className="h-2 w-2 shrink-0 rounded-full bg-wait" aria-hidden />{data.past_decisions}</p>
               )}
               {me.role === "hr" && (
                 <Link href="/inbox" className="mt-3 flex items-baseline justify-between rounded border border-rule px-3 py-2.5 hover:border-dossier">

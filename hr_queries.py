@@ -1,7 +1,7 @@
 # hr_queries.py: read-only queries for the web app (directory, team, calendar, inboxes, audit log).
 # Every change still goes through tools.py / payslips.py, so the business rules live in one place.
 import db
-from tools import PENDING, HOLIDAYS, balance_of, clean_days
+from tools import PENDING, HOLIDAYS, balance_of, balance_words, clean_days
 
 # job details for the people directory (the employees table only holds what the agent needs)
 SEED_PROFILES = [
@@ -69,7 +69,8 @@ def balances(emp_id):
     out = {}
     for kind, saved in balance_of(emp).items():
         out[kind] = {"balance": saved, "pending": pending.get(kind, 0),
-                     "available": clean_days(saved - pending.get(kind, 0))}
+                     "available": clean_days(saved - pending.get(kind, 0)),
+                     "words": balance_words(kind, saved, pending.get(kind, 0))[1]}      # the assistant's words (tools.balance_words), after the number
     return out
 
 
