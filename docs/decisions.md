@@ -271,7 +271,7 @@ Known weak spots, measured and not fixed yet. Remove a line when its fix merges.
 
 ### 40. A balance is one sentence from code, and requests whose dates passed while they wait are said, not expired (PR #70, 2026-11-23)
 - **Chose:** [tools.py](../tools.py) `balance_words`: "Casual leave: 1 day available (2 total, 1 waiting for approval)". The balance tool returns it (`say_as_is`) and the model is told to use it word for word; the dashboard tile shows the same words after the big number. A request still waiting after its dates have started stays counted; the employee sees "16 Nov: still waiting for your manager's decision" (balance tool, dashboard) and the manager "N past requests need a decision" (pending requests, Needs you, dashboard). Those lines are added under the reply by code (`shown_by_app`) and never sent to the model.
-- **Not chosen:** expiring past requests (the user's call: a decision is still owed); asking the model to say those lines word for word (it left out the employee's line 8 times in 10 and reworded the manager's 3 times in 10; shown the lines, it said them twice in half the replies).
+- **Not chosen:** expiring past requests (the user's call: a decision is still owed); asking the model to say those lines word for word (it left out the employee's line 8 times in 10 and reworded the manager's 2-3 times in 10; shown the lines, it said them twice in half the replies).
 - **Why:** "1 day pending" read as a mistake when it was right; a request from 16 Nov kept reducing a balance with nobody told.
 - **Cost:** the Time off page keeps its own wording ("5 on balance, 2 waiting"). 4 evals x10: 40/40.
 - **Change it when:** someone wants past requests to expire, or the Time off page should use the same sentence.
