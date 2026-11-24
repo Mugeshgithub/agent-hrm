@@ -6,9 +6,15 @@ import json
 import os
 import sys
 import tempfile
+import time
 import re
 from types import SimpleNamespace
 from datetime import date, datetime, timedelta
+
+# The database stamps rows in UTC (CURRENT_TIMESTAMP) and the tests compare them with date.today(): on a laptop in Paris the two
+# disagree between midnight and 1 a.m., and 6 recruitment tests failed there. CI and the server run in UTC; so do these tests.
+os.environ["TZ"] = "UTC"
+time.tzset()
 
 import db
 db.DB_PATH = os.path.join(tempfile.mkdtemp(), "employees_test.db")   # throwaway database

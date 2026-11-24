@@ -267,3 +267,10 @@ Known weak spots, measured and not fixed yet. Remove a line when its fix merges.
 - **Why:** real, Sun 22 Nov: "Friday 29 November" (a Sunday) for Friday 27 November. 35 evals (5 phrases for each day of the week as today) x10: 244/350 before, 350/350 after; the reply check never had to step in.
 - **Cost:** about 600 more tokens in the cached prompt. "Next Friday" on a Monday is read as next week's Friday, not this week's: people use both, and this one is now fixed in code.
 - **Change it when:** people say the app picks the wrong one of two readings, or another phrase ("in two weeks", "le 1er") needs working out.
+
+### 42. employees_tests run in UTC (PR #72, 2026-11-24)
+- **Chose:** `TZ=UTC` set at the top of [employees_tests.py](../employees_tests.py), like CI and the server.
+- **Not chosen:** freezing the date in each test (6 tests, more code); changing the app's dates (a separate fix: see below).
+- **Why:** the database stamps rows in UTC and the tests compare them with the local `date.today()`: in Paris, 6 recruitment tests failed between midnight and 1 a.m. Now 128/128 at 00:59 CET, and under UTC+14 and UTC−11.
+- **Cost:** the tests no longer show the app's own mix of UTC stamps and local dates, which matters only if the server runs outside UTC.
+- **Change it when:** the server runs in a timezone other than UTC.
