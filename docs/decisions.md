@@ -261,6 +261,13 @@ Known weak spots, measured and not fixed yet. Remove a line when its fix merges.
 - **Cost:** a name with digits, a comma or a colon is refused; existing names are not changed. Eval: a name that is an instruction, 3/3, and 3/3 too with the tags turned off (the model ignored it by itself): the tags are defence in depth, not shown to be what stops it. The welcome prompt also lists only the new hire's own steps when asked what is missing ("welcome: after a reminder" 10/10, main 6/10).
 - **Change it when:** a real candidate cannot type their name.
 
+### 43. An employee asking to see the team's leave gets a fixed answer from code (PR #74, 2026-11-27, issue #73)
+- **Chose:** [team_leave.py](../team_leave.py): for the employee role, a question about the team's (or colleagues') leave gets a fixed text in English or French, before the model: only the manager sees it, they see their own (Time off page). The access evals now check exactly that and fail a reply that points to manager features, a Team page or "the app".
+- **Not chosen:** a prompt rule (not tried, at the user's word); the old check, which passed any reply with "manager" in it.
+- **Why:** on main, 14 of 14 saved French replies fail the new check (6 of 10 pointed to "les fonctionnalités manager", "votre accès manager" or "la section dédiée aux managers"; employees have no Team page). With the fixed answer: French 10/10, English 10/10.
+- **Cost:** a word list (EN, FR); a question worded otherwise goes to the model as before.
+- **Change it when:** employees get a team calendar, or a question about the team's leave is missed.
+
 ### 38. Dates: code works out the days a person names, the prompt gets a dated list, and a reply's weekdays are checked (PR #68, 2026-11-22)
 - **Chose:** [date_check.py](../date_check.py). The prompt gets today and the next 14 days, each with its weekday and week (this week, next week, the week after next). Code works out the days a person names and adds them to their message: a weekday on its own is the first one after today; "next Friday" is next week's, "the Friday after next" the week after's; "Monday to Wednesday next week" is next week's; "vendredi prochain" is the first one after today. A reply that pairs a weekday with a date is checked with real date maths: one retry, then a safe reply. `app_clock.today()` lets the evals fix today.
 - **Not chosen:** rules in the prompt alone (with the dated list and rules, 315/350: on a Monday the model booked next week's Thursday for "next Thursday" whatever the rule said, and this week's Friday for "the Friday after next", 0-1/10).

@@ -121,6 +121,31 @@ def count_requests():
     return n
 
 
+# #73: an employee asking to see the team's leave must hear the truth: only the manager sees it, and she sees her own. The old check
+# passed any reply with "manager" in it, so "use the manager features in the app" passed; employees have no Team page (Shell.tsx).
+_MANAGER_SEES = re.compile(r"(?i)\b(?:only|seul(?:e|s)?)\b[^.]{0,40}\b(?:manager|responsable)\b[^.]{0,40}\b(?:see|view|access|voi[tr]|consulter|acc[èe]s)"
+                           r"|\b(?:manager|responsable)\b[^.]{0,30}\b(?:only|seul(?:e|s)?)\b[^.]{0,30}\b(?:see|view|access|voi[tr]|consulter|acc[èe]s)"
+                           r"|\b(?:manager|responsable)\b[^.]{0,20}\b(?:can see|sees|is the one who|peut voir|voit|est (?:la )?seule?)\b")
+_SEES_OWN = re.compile(r"(?i)\byour own\b|\bvos propres\b|\btes propres\b|\bvotre propre\b|\bton propre\b")
+_POINTS_TO_FEATURE = re.compile(
+    r"(?i)\bmanager (?:features?|access|section|view|tools?|dashboard)\b|\bteam (?:page|section|tab|view|dashboard)\b|\bTeam page\b"
+    r"|fonctionnalit[ée]s? (?:de |du )?manager|acc[èe]s manager|section (?:d[ée]di[ée]e )?(?:aux managers|[àa] l'[ée]quipe|d'[ée]quipe|aux demandes)"
+    r"|(?:page|onglet|vue|espace) (?:d'|de l')?[ée]quipe|(?:team|[ée]quipe)\b[^.]{0,60}\b(?:in the app|dans l'application|in the system|dans le syst[èe]me)"
+    r"|(?:consult|check|look|consulter|v[ée]rifier)\w*\s+(?:it\s+|cela\s+|-les\s+)?directement\b|\bdirectly in the app\b")
+
+
+def team_leave_answer(reply):
+    """A reply_check: [] when the reply says only the manager sees the team's leave and she sees her own, and points to no feature."""
+    problems = []
+    if not _MANAGER_SEES.search(reply):
+        problems.append("does not say only her manager sees the team's leave")
+    if not _SEES_OWN.search(reply):
+        problems.append("does not say she can see her own")
+    if (m := _POINTS_TO_FEATURE.search(reply)):
+        problems.append(f"points her to a feature she does not have: {m.group(0)!r}")
+    return problems
+
+
 def guards_acted():
     """The guards that acted on an answer in this test (guard_events.py; the table is emptied before each test)."""
     conn = db.get_conn()
@@ -1148,6 +1173,7 @@ TEST_CASES = [
         "must_not_call": ["get_pending_requests"],
         "reply_must_match": r"(?i)manager|HR",
         "reply_must_not_match": r"(?i)let me know if you('re| are) (actually )?a manager",
+        "reply_check": team_leave_answer,
         "expected_requests": 0,
     },
     {
@@ -1159,6 +1185,7 @@ TEST_CASES = [
         "must_not_call": ["get_pending_requests"],
         "reply_must_match": r"(?i)manager|responsable|RH|HR",
         "reply_must_not_match": r"(?i)let me know if you('re| are) (actually )?a manager|si vous [êe]tes (en fait )?(un )?manager",
+        "reply_check": team_leave_answer,
         "check": lambda: "search" not in guards_acted(),
         "expected_requests": 0,
     },

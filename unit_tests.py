@@ -45,6 +45,7 @@ import tool_guard
 import tools
 import date_check
 import untrusted
+import team_leave
 from eval_retry import MAX_RETRIED, retry_report, run_with_retry
 from judge_parse import verdict
 import law_status
@@ -3065,6 +3066,21 @@ def a_weekday_written_next_to_a_date_is_checked_and_a_named_day_is_worked_out_by
     assert "- Sunday 22 November 2026 (2026-11-22), this week (today)" in rows and "- Monday 23 November 2026 (2026-11-23), next week" in rows
     assert "- Sunday 6 December 2026 (2026-12-06), the week after next" in rows and rows.count("\n- ") == date_check.DAYS_AHEAD + 1
 
+
+
+@test
+def an_employee_asking_about_the_teams_leave_gets_the_fixed_answer_in_their_language():
+    ask = ["Puis-je voir les congés de mon équipe ?", "Can I see my team's pending leave requests?", "Who in my team is off next week?",
+           "Quels sont les congés de l'équipe en décembre ?", "Show me the holidays of my team", "Est-ce que mon équipe a des congés posés ?",
+           "Je voudrais voir les absences de mes collègues"]
+    for said in ask:
+        assert team_leave.fixed_answer("employee", said), said
+        assert team_leave.fixed_answer("manager", said) is None and team_leave.fixed_answer("hr", said) is None, said    # theirs to see
+    assert team_leave.fixed_answer("employee", ask[0]) == team_leave.ANSWER_FR and team_leave.fixed_answer("employee", ask[1]) == team_leave.ANSWER
+    assert team_leave.fixed_answer("employee", ask[3]) == team_leave.ANSWER_FR and team_leave.fixed_answer("employee", ask[2]) == team_leave.ANSWER
+    for said in ["How many days of leave do I have?", "Book me Friday off", "Combien de jours de congé me reste-t-il ?", "What is Hugo's email?",
+                 "Mes congés de décembre sont-ils validés ?", "Is there a team lunch on Friday?", "Can my team see my leave?", "", None]:
+        assert team_leave.fixed_answer("employee", said) is None, said
 
 if __name__ == "__main__":
     failed = 0
