@@ -20,7 +20,7 @@ export type Change = {
   changed_at: string; changed_by: string | null;
 };
 
-export type Balance = { balance: number; pending: number; available: number };
+export type Balance = { balance: number; pending: number; available: number; words?: string };   // words: what follows the number, as the assistant says it
 export type Balances = { casual: Balance; sick: Balance; paid: Balance };
 
 export type LeaveRequest = {

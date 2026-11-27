@@ -3066,6 +3066,23 @@ def a_weekday_written_next_to_a_date_is_checked_and_a_named_day_is_worked_out_by
     assert "- Sunday 6 December 2026 (2026-12-06), the week after next" in rows and rows.count("\n- ") == date_check.DAYS_AHEAD + 1
 
 
+@test
+def a_balance_is_one_sentence_and_past_requests_still_waiting_are_said():
+    assert tools.balance_words("casual", 2, 1) == ("Casual leave: 1 day available (2 total, 1 waiting for approval)",
+                                                   "day available (2 total, 1 waiting for approval)")
+    assert tools.balance_words("paid", 25, 0)[0] == "Paid leave: 25 days available"
+    assert tools.balance_words("paid", 12.5, 2.5)[0] == "Paid leave: 10 days available (12.5 total, 2.5 waiting for approval)"
+    assert tools.balance_words("sick", 4.0, 0)[0] == "Sick leave: 4 days available"
+    assert tools.short_dates("2026-11-16", "2026-11-16") == "16 Nov" and tools.short_dates("2026-11-16", "2026-11-17") == "16–17 Nov"
+    assert tools.short_dates("2026-11-30", "2026-12-02") == "30 Nov – 2 Dec"
+    assert tools.past_decisions_line(0) == "" and tools.past_decisions_line(1) == "1 past request needs a decision"
+    assert tools.past_decisions_line(3) == "3 past requests need a decision"
+    found = [json.dumps({"shown_by_app": ["16 Nov: still waiting for your manager's decision"]}), "not json", json.dumps([1]),
+             json.dumps({"shown_by_app": ["1 past request needs a decision", "16 Nov: still waiting for your manager's decision"]})]
+    assert tools.shown_by_app(found, "Your balance...") == ["16 Nov: still waiting for your manager's decision", "1 past request needs a decision"]
+    assert tools.shown_by_app(found, "**1 past request needs a decision**. 16 nov: still waiting for your manager's decision") == []   # already said
+
+
 if __name__ == "__main__":
     failed = 0
     for t in TESTS:
