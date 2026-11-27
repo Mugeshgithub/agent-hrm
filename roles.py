@@ -8,6 +8,7 @@ EVERYONE = {
     "search_policy", "search_labour_code", "search_collective_agreement", "create_hr_ticket", "get_my_tickets",
     "get_payslip", "compare_payslips", "get_pay_summary", "lookup_colleague", "get_balance_history", "get_holidays",
     "get_my_documents", "read_my_document",       # the signed-in person's OWN documents: no way to name anyone else's
+    "escalate_to_hr",                             # sensitive matters go to a person at HR (sensitive.py); not for HR, who are those people
 }
 
 # a new hire (signed in with their welcome link, before day one) can only read their own onboarding: no leave,
@@ -26,7 +27,7 @@ ROLE_TOOLS = {
     CANDIDATE: CANDIDATE_TOOLS,
     "employee": EVERYONE,
     "manager":  EVERYONE | {"get_pending_requests", "get_team_member_balance", "decide_leave", "get_needs_attention", "get_job_pipeline"},
-    "hr":       EVERYONE | {"get_open_tickets", "reply_to_ticket", "get_needs_attention", "get_contract_status", "get_job_pipeline"},
+    "hr":       (EVERYONE - {"escalate_to_hr"}) | {"get_open_tickets", "reply_to_ticket", "get_needs_attention", "get_contract_status", "get_job_pipeline"},
 }
 
 # tools where only HR may name another employee
