@@ -1645,6 +1645,56 @@ def ten_people_chat_at_the_same_time_and_nobody_sees_anyone_elses_conversation()
     with_the_real_agent(ManyPeopleClaude(len(people)), confirm_round)
 
 
+class SaysYesClaude:
+    """Books casual leave on 11 March 2031 when the message says "book"; to anything else it answers in words, and asks to book again when the
+    message sounds like a yes (as a real model might): the worst case for a spoken "confirm"."""
+    def __init__(self):
+        self.messages = self
+
+    def create(self, **request):
+        usage = types.SimpleNamespace(input_tokens=10, output_tokens=10, cache_creation_input_tokens=0, cache_read_input_tokens=0)
+        last = request["messages"][-1]["content"]
+        if isinstance(last, list) and last[-1].get("type") == "tool_result":
+            return types.SimpleNamespace(content=[Block(type="text", text="Please review the card and press Confirm.")], stop_reason="end_turn", usage=usage)
+        said = (last if isinstance(last, str) else last[-1].get("text", "")).lower()
+        if "book" in said or re.search(r"\b(yes|confirm|oui|confirme)\b", said):
+            call = Block(type="tool_use", id=f"toolu_{len(request['messages'])}", name="apply_leave",
+                         input={"leave_type": "casual", "start_date": "2031-03-11", "end_date": "2031-03-11"})
+            return types.SimpleNamespace(content=[call], stop_reason="tool_use", usage=usage)
+        return types.SimpleNamespace(content=[Block(type="text", text="Okay.")], stop_reason="end_turn", usage=usage)
+
+
+@test
+def a_spoken_confirm_or_cancel_is_a_message_and_never_decides_a_card():
+    # voice input (web/components/MicButton.tsx) only fills the chat box: what is said reaches the API as an ordinary message. A message
+    # never confirms or cancels a card: only the Confirm or Cancel click (/api/assistant/confirm) does, and a new message expires the card
+    import conversations
+    who = ten_people_who_can_book_a_day()[0]
+    client = as_person(who)
+    server.ASK_BY_PERSON.clear()
+
+    def requests():
+        conn = db.get_conn()
+        n = conn.execute("SELECT COUNT(*) AS n FROM leave_requests WHERE start_date = '2031-03-11' AND employee_id = ?", (who,)).fetchone()["n"]
+        conn.close()
+        return n
+
+    def run():
+        before = requests()
+        assert client.post("/api/assistant", json={"message": "Book me casual leave on 11 March 2031"}).json()["confirm"]["tool"] == "apply_leave"
+        for spoken in ("Confirm", "Yes, confirm it", "Cancel", "Oui, confirme", "press confirm"):
+            r = client.post("/api/assistant", json={"message": spoken})
+            assert r.status_code == 200 and requests() == before, (spoken, r.json())          # nothing was booked by saying it
+        c = conversations.open_conversation(who, lambda user_id: (None, []))
+        assert c is not None and c.card_id is not None and c.pending.get("tool") == "apply_leave"    # at most a new card, still waiting for a click
+        conversations.release(c)
+        assert client.post("/api/assistant", json={"message": "Cancel that"}).status_code == 200
+        assert client.post("/api/assistant/confirm", json={"accept": True}).status_code == 400 and requests() == before   # the message expired it
+        assert client.post("/api/assistant", json={"message": "Book me casual leave on 11 March 2031"}).json()["confirm"]
+        assert client.post("/api/assistant/confirm", json={"accept": True}).status_code == 200 and requests() == before + 1   # only the click books
+    with_the_real_agent(SaysYesClaude(), run)
+
+
 @test
 def a_production_server_refuses_to_start_with_the_demo_picker_or_without_a_secret():
     assert server.production_problems({"HRM_ENV": "development"}) == []
