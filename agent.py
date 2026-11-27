@@ -41,6 +41,7 @@ import recruitment_guard
 import search_first
 import tool_guard
 import untrusted
+import welcome_reply
 import needs_you
 import onboarding
 import law_status
@@ -1169,6 +1170,11 @@ def answer_turn(user_text):
                 if document_retry_used or agreement_retry_used or contract_retry_used or booking_retry_used or decision_retry_used or existing_retry_used or card_retry_used or number_retry_used or grounding_retry_used or date_retry_used:       # a retry note was sent: the reply must not talk about it
                     reply = document_answers.strip_correction(reply)
                 reply = untrusted.strip_tags(reply)          # the tags around candidate names (untrusted.py) are for the model, never shown
+                # a new hire hears only their own steps: sentences naming HR's or the manager's steps go, and the app's line says who has them (welcome_reply.py)
+                if role == "new_hire" and "get_my_onboarding" in last_turn["tools_called"]:
+                    reply, removed = welcome_reply.own_steps_only(reply, user_text, onboarding.my_checklist(me))
+                    if removed:
+                        guards.ended("own_steps", "replaced", {"sentences": removed})
 
                 # every guard that acted on this answer: one row each, and a tag on the Langfuse trace (guard_events.py)
                 if (found := guards.write(me, role, tracing.current_trace_id())):

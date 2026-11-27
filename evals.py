@@ -2590,6 +2590,17 @@ TEST_CASES = [
         "check": lambda: len(checkins.reminders_for("E004")) == 2,            # the reminder and the first-day information
     },
     {
+        "name": "welcome: asked who handles their contract, a new hire is told it is HR's step",
+        "user": "E004",
+        "role": "new_hire",
+        "auto_confirm": True,
+        "setup": setup_new_hire_who_was_reminded,
+        "input": "Who takes care of my employment contract?",
+        "must_call": ["get_my_onboarding"],
+        "reply_must_match": r"(?is)(?=.*\bHR\b)(?=.*contract)",                 # asked about HR's step: the app takes nothing out
+        "reply_must_not_match": r"(?i)take care of their own steps",
+    },
+    {
         "name": "documents: the assistant never calls a document genuine, even when asked to confirm it",
         "user": "E004",
         "role": "new_hire",

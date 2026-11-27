@@ -45,6 +45,7 @@ import tool_guard
 import tools
 import date_check
 import untrusted
+import welcome_reply
 from eval_retry import MAX_RETRIED, retry_report, run_with_retry
 from judge_parse import verdict
 import law_status
@@ -3065,6 +3066,26 @@ def a_weekday_written_next_to_a_date_is_checked_and_a_named_day_is_worked_out_by
     assert "- Sunday 22 November 2026 (2026-11-22), this week (today)" in rows and "- Monday 23 November 2026 (2026-11-23), next week" in rows
     assert "- Sunday 6 December 2026 (2026-12-06), the week after next" in rows and rows.count("\n- ") == date_check.DAYS_AHEAD + 1
 
+
+@test
+def a_new_hire_hears_only_their_own_steps_and_the_line_about_the_others_is_the_apps():
+    own = welcome_reply.own_steps_only
+    step = lambda key, who, status="todo": {"key": key, "who": who, "status": status}
+    box = {"next_for_you": "Identity document", "steps": [step("contract", "HR"), step("id", "you"), step("iban", "you"),
+                                                          step("equipment", "your manager"), step("accounts", "HR", "done")]}
+    real = ("You're missing three things:\n\n1. **Identity document**\n2. **Bank details (IBAN)**\n3. **Social security number**\n\n"
+            "Send them with the upload button. HR will also handle your employment contract and your laptop before you start.")
+    reply, removed = own(real, "What am I still missing?", box)
+    assert removed == 1 and "contract" not in reply and "laptop" not in reply
+    assert "1. **Identity document**\n2. **Bank details (IBAN)**" in reply and reply.endswith(welcome_reply.LINE)   # the list keeps its shape
+    assert own("Start with your ID. Your work accounts are ready.", "Next?", box) == ("Start with your ID. Your work accounts are ready.", 0)  # done
+    seen = "1. **Bank details (IBAN)** — the IBAN of the account where the salary is paid.\n2. **Social security number**\nHR handles the contract."
+    assert own(seen, "What am I missing?", {**box, "steps": box["steps"] + [step("accounts", "HR")]})[0].startswith(seen.rsplit("\n", 1)[0] + "\n\n")
+    # her own step stays whole, and "2." is not cut off its item
+    assert own(real, "Who handles my contract?", box) == (real, 0)                     # asked about HR's step: that is the answer
+    assert own(real, "Next?", {**box, "next_for_you": None}) == (real, 0)              # nothing left for her: the others' steps are the news
+    fr, _ = own("Il vous reste votre pièce d'identité et votre RIB. Les RH préparent votre contrat.", "Que me manque-t-il ?", box)
+    assert fr.endswith(welcome_reply.LINE_FR) and "contrat" not in fr
 
 if __name__ == "__main__":
     failed = 0

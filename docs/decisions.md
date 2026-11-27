@@ -268,6 +268,13 @@ Known weak spots, measured and not fixed yet. Remove a line when its fix merges.
 - **Cost:** about 600 more tokens in the cached prompt. "Next Friday" on a Monday is read as next week's Friday, not this week's: people use both, and this one is now fixed in code.
 - **Change it when:** people say the app picks the wrong one of two readings, or another phrase ("in two weeks", "le 1er") needs working out.
 
+### 41. A new hire hears only their own steps; the line about HR's and the manager's is the app's (PR #71, 2026-11-24)
+- **Chose:** after the reply, while the new hire still has steps to do and did not ask about anyone else's, code ([welcome_reply.py](../welcome_reply.py)) takes out each sentence naming a step still HR's or the manager's (a sentence naming one of her own steps stays) and adds one fixed line: "HR and your manager take care of their own steps". Logged as the guard `own_steps`.
+- **Not chosen:** more prompt rules (the prompt already says "list only their own steps"); hiding the other steps from the model (it could no longer answer "who handles my contract?").
+- **Why:** "welcome: after a reminder" was 5/10 on main on 24 Nov (the reply added "HR will handle your contract, equipment…"); 10/10 with this, and "who handles my contract?" 10/10.
+- **Cost:** a word list per step, in English and French: a step named in other words stays in the reply.
+- **Change it when:** a step is added to the onboarding template (add its words), or new hires ask about others' steps in ways the list misses.
+
 ### 42. employees_tests run in UTC (PR #72, 2026-11-24)
 - **Chose:** `TZ=UTC` set at the top of [employees_tests.py](../employees_tests.py), like CI and the server.
 - **Not chosen:** freezing the date in each test (6 tests, more code); changing the app's dates (a separate fix: see below).
