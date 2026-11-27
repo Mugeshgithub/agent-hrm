@@ -64,8 +64,8 @@ flowchart LR
 
 ## How I know it works
 
-- **149 evals** run the real assistant against a test database. Code checks the facts; an LLM judge (Claude Sonnet)
-  checks policy and law answers against what the tools returned. CI runs 141 of them on every push to main. The 8
+- **193 evals** run the real assistant against a test database. Code checks the facts; an LLM judge (Claude Sonnet)
+  checks policy and law answers against what the tools returned. CI runs 185 of them on every push to main. The 8
   labour-law evals need the Postgres database, which CI doesn't have, so they run locally.
 - **The retry rule:** model answers vary, so in CI a failed eval gets one retry, in the open: the log names it, and
   the run fails anyway if more than 2 tests needed a retry. Users only see the first answer, so I treat every retry
