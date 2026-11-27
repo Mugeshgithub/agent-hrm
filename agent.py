@@ -41,6 +41,7 @@ import recruitment_guard
 import search_first
 import tool_guard
 import untrusted
+import team_leave
 import needs_you
 import onboarding
 import law_status
@@ -940,6 +941,11 @@ def answer_turn(user_text):
         # guardrail in code: leave asked for on a Saturday, a Sunday or a weekend, with no date, has nothing to count: the answer is fixed (booking_first.py).
         if (fixed := booking_first.weekend_answer(role, user_text)):
             print("  [guard] leave asked for on a weekend, no date: the fixed answer")
+            return fixed_reply(fixed, messages, user_text)
+
+        # guardrail in code: an employee asking to see the team's leave hears that only the manager sees it, and that they see their own (team_leave.py, #73)
+        if (fixed := team_leave.fixed_answer(role, user_text)):
+            print("  [guard] an employee asked about the team's leave: the fixed answer")
             return fixed_reply(fixed, messages, user_text)
 
         # the agent loop, limited so one question can't loop forever
